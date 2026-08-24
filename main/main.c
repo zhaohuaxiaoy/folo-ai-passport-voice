@@ -35,6 +35,9 @@ static int s_batt_soc = -1;              // 电量缓存(至多 1s 读一次真�
 static uint64_t s_batt_last_ms = (uint64_t)-1000;   // 上次电量读取时刻(负初值:首帧立即读)
 static uint64_t s_last_render_ms = 0;    // 上次渲染时刻(S1 降频:非计时状态 ≥1s 兜底;初值 0 → 首帧立即渲染)
 
+// 事件排空批上限:每 16 条让出 2ms,防洪峰饿死低优先级投递方(F2)
+#define APP_EVENT_BATCH_MAX 16
+
 // 经 EVENT 特征上行一行(序列化已完成,含 '\n')。异步:ble_audio 非阻塞入队,
 // event_worker 串行发送(最长单片 ~150ms 的抖动被隔离到事件通道,不再压住
 // app_task 渲染/命令路径);无订阅/队列满时由 ble_audio 计数丢弃,此处记日志。
@@ -146,13 +149,21 @@ static void app_task(void *arg)
         app_action_t acts[APP_ACT_MAX];
         bool got = false;
 
-        // 排空当前积压事件(每次 reduce 立即执行其动作)
+        // 排空当前积压事件(每次 reduce 立即执行其动作)。
+        // 批上限:持续事件洪峰下(如按住按键/流控风暴)无界排空会饿死
+        // 低优先级投递方(event_worker/sound_worker)——每 16 条让出 2ms
+        // 给它们调度窗口,事件吞吐不变(第 7 轮 F2)。
+        int n_batch = 0;
         while (xQueueReceive(q, &ev, 0) == pdTRUE) {
             got = true;
             now_ms = esp_timer_get_time() / 1000;
             uint8_t n = 0;
             app_state_reduce(&s_state, &ev, now_ms, acts, &n);
             run_actions(acts, n);
+            if (++n_batch >= APP_EVENT_BATCH_MAX) {
+                vTaskDelay(pdMS_TO_TICKS(2));
+                n_batch = 0;
+            }
         }
 
         // 心跳(与事件独立计时,保证息屏/超时/秒表不依赖事件流量)
@@ -176,16 +187,19 @@ static void app_task(void *arg)
                         || snap.state == APP_ST_LISTENING
                         || (now_ms - s_last_render_ms >= 1000);
         if (need_render) {
-            // 渲染(唯一 LVGL 写者,锁内;电池值在此补真实值)
+            // 电量 I2C 读取移出 LVGL 锁(总线事务最长 100ms,不占锁;第 7 轮 F2)。
+            // 息屏跳过语义保持:息屏期间不读 I2C、不渲染。读数至多 1s 一次,缓存复用(#9)。
+            if (snap.screen_on || s_ui_screen_on) {
+                if (now_ms - s_batt_last_ms >= 1000) {
+                    s_batt_soc = bsp_battery_soc();
+                    s_batt_last_ms = now_ms;
+                }
+            }
+            // 渲染(唯一 LVGL 写者,锁内;电池值在锁外已补真实值)
             if (bsp_lvgl_lock(100)) {
                 // 息屏跳过渲染路径:首次转息屏的那帧仍执行(背光 100→0 由它驱动),
-                // 之后息屏期间不做快照/电量/LVGL 任何工作(第 5 轮 #10)。
-                // 电量:至多 1s 读一次真实 I2C 总线事务,读数缓存复用(#9)。
+                // 之后息屏期间不做快照/LVGL 任何工作(第 5 轮 #10)。
                 if (snap.screen_on || s_ui_screen_on) {
-                    if (now_ms - s_batt_last_ms >= 1000) {
-                        s_batt_soc = bsp_battery_soc();
-                        s_batt_last_ms = now_ms;
-                    }
                     snap.battery_available = (s_batt_soc >= 0);
                     snap.battery_soc = (s_batt_soc > 0) ? (uint8_t)s_batt_soc : 0;
                     app_ui_render(&snap, audio_streamer_peak());

@@ -162,6 +162,7 @@ static QueueHandle_t s_event_q;
 static TaskHandle_t s_event_worker;
 
 static void start_advertising(void);
+static void event_worker_task(void *param);   // 定义在下方(init 中使用须前置声明)
 
 // ---- 单片 notify:发完等 NOTIFY_TX 完成再返回(调用方按返回值决定是否继续下一片) ----
 static bool notify_one(uint16_t conn_handle, uint16_t val_handle,
