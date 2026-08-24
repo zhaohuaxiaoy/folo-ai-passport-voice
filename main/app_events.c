@@ -8,11 +8,15 @@ static const char *TAG = "app_evt";
 
 #define APP_EVENT_QUEUE_DEPTH 16
 
+// 静态队列:16×~232B ≈ 3.7KB 静态分配,消除启动堆峰值与创建失败分支(M2)
+static StaticQueue_t s_queue_struct;
+static uint8_t s_queue_storage[APP_EVENT_QUEUE_DEPTH * sizeof(app_event_t)];
 static QueueHandle_t s_queue;
 
 esp_err_t app_events_init(void) {
-    s_queue = xQueueCreate(APP_EVENT_QUEUE_DEPTH, sizeof(app_event_t));
-    if (!s_queue) {
+    s_queue = xQueueCreateStatic(APP_EVENT_QUEUE_DEPTH, sizeof(app_event_t),
+                                 s_queue_storage, &s_queue_struct);
+    if (!s_queue) {   // 静态创建仅在存储对齐异常时失败,防御保留
         ESP_LOGE(TAG, "事件队列创建失败");
         return ESP_FAIL;
     }

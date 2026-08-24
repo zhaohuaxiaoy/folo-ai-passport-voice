@@ -295,6 +295,9 @@ class Relay:
             print(f"[event] status drop={self._device_drop}")
         elif etype == "agent.action":
             self.decisions.append(ev)
+            # 内存有界:与 session_stats 同款截断(每会话至多 1 条,100 条足够复盘)
+            if len(self.decisions) > 100:
+                self.decisions.pop(0)
             print(f"[event] agent.action action={ev.get('action')} "
                   f"taskId={ev.get('taskId')}")
             if self._approval_waiter is not None:
