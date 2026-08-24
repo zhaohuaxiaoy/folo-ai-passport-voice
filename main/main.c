@@ -33,6 +33,7 @@ static uint32_t s_last_drop_count = 0;   // 最近一次 STREAM_STOP 的会话�
 static bool s_ui_screen_on = true;       // 上次渲染时的屏幕状态(初始亮,与 app_ui 内 s_last_screen_on 一致)
 static int s_batt_soc = -1;              // 电量缓存(至多 1s 读一次真实 I2C,见渲染路径)
 static uint64_t s_batt_last_ms = (uint64_t)-1000;   // 上次电量读取时刻(负初值:首帧立即读)
+static uint64_t s_last_render_ms = 0;    // 上次渲染时刻(S1 降频:非计时状态 ≥1s 兜底;初值 0 → 首帧立即渲染)
 
 // 经 EVENT 特征上行一行(序列化已完成,含 '\n')。异步:ble_audio 非阻塞入队,
 // event_worker 串行发送(最长单片 ~150ms 的抖动被隔离到事件通道,不再压住
@@ -155,33 +156,44 @@ static void app_task(void *arg)
         }
 
         // 心跳(与事件独立计时,保证息屏/超时/秒表不依赖事件流量)
+        bool tick_acted = false;
         now_ms = esp_timer_get_time() / 1000;
         if (now_ms >= next_tick) {
             app_event_t t = { .type = APP_EV_TICK };
             uint8_t n = 0;
             app_state_reduce(&s_state, &t, now_ms, acts, &n);
             run_actions(acts, n);
+            tick_acted = (n > 0);      // TICK 产生动作(toast 过期/超时/息屏) → 需渲染
             next_tick = now_ms + APP_TICK_MS;
         }
 
-        // 渲染(唯一 LVGL 写者,锁内;电池值在此补真实值)
-        if (bsp_lvgl_lock(100)) {
-            app_ui_snapshot_t snap;
-            app_state_snapshot(&s_state, now_ms, &snap);
-            // 息屏跳过渲染路径:首次转息屏的那帧仍执行(背光 100→0 由它驱动),
-            // 之后息屏期间不做快照/电量/LVGL 任何工作(第 5 轮 #10)。
-            // 电量:至多 1s 读一次真实 I2C 总线事务,读数缓存复用(#9)。
-            if (snap.screen_on || s_ui_screen_on) {
-                if (now_ms - s_batt_last_ms >= 1000) {
-                    s_batt_soc = bsp_battery_soc();
-                    s_batt_last_ms = now_ms;
+        // 渲染判定(S1 降频):有事件/动作、LISTENING(计时+音量条持续变化)、
+        // 或距上次渲染 ≥1s(顶栏/电量兜底)才渲染。静止状态从每 100ms 降到 ≤1 次/s,
+        // 省下 LVGL 锁 + 10+ 次 label set_text 重排/重绘。快照仅一次,判定与渲染共用。
+        app_ui_snapshot_t snap;
+        app_state_snapshot(&s_state, now_ms, &snap);
+        bool need_render = got || tick_acted
+                        || snap.state == APP_ST_LISTENING
+                        || (now_ms - s_last_render_ms >= 1000);
+        if (need_render) {
+            // 渲染(唯一 LVGL 写者,锁内;电池值在此补真实值)
+            if (bsp_lvgl_lock(100)) {
+                // 息屏跳过渲染路径:首次转息屏的那帧仍执行(背光 100→0 由它驱动),
+                // 之后息屏期间不做快照/电量/LVGL 任何工作(第 5 轮 #10)。
+                // 电量:至多 1s 读一次真实 I2C 总线事务,读数缓存复用(#9)。
+                if (snap.screen_on || s_ui_screen_on) {
+                    if (now_ms - s_batt_last_ms >= 1000) {
+                        s_batt_soc = bsp_battery_soc();
+                        s_batt_last_ms = now_ms;
+                    }
+                    snap.battery_available = (s_batt_soc >= 0);
+                    snap.battery_soc = (s_batt_soc > 0) ? (uint8_t)s_batt_soc : 0;
+                    app_ui_render(&snap, audio_streamer_peak());
+                    s_ui_screen_on = snap.screen_on;
                 }
-                snap.battery_available = (s_batt_soc >= 0);
-                snap.battery_soc = (s_batt_soc > 0) ? (uint8_t)s_batt_soc : 0;
-                app_ui_render(&snap, audio_streamer_peak());
-                s_ui_screen_on = snap.screen_on;
+                bsp_lvgl_unlock();
             }
-            bsp_lvgl_unlock();
+            s_last_render_ms = now_ms;
         }
 
         // 无事件时睡到下一个心跳,避免空转
