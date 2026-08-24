@@ -94,8 +94,9 @@ int ble_audio_init(void);
 // 无连接/未订阅 AUDIO 时返回非 0(上层计入掉帧,UI 走 BLE BUSY)。
 int ble_audio_notify_audio(const uint8_t *frame, size_t len);
 
-// 上行事件行(≤ EVENT_LINE_MAX,含结尾 '\n'):≤MTU-3 单包直发,否则走同一分片流控。
-// 无连接/未订阅 EVENT 时返回非 0(内部累加 event 掉帧计数,console st 可查)。
+// 上行事件行(≤ EVENT_LINE_MAX,含结尾 '\n'):非阻塞入队,event_worker 任务
+// 串行发送(≤MTU-3 单包直发,否则同一分片流控)。调用方缓冲可立即复用。
+// 无连接/未订阅/队列满时返回非 0(内部累加 event 掉帧计数,console st 可查)。
 int ble_audio_notify_event(const char *line, size_t len);
 
 // ---- 状态查询(console `st` / 主循环) ----

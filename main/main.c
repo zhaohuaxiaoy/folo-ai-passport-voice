@@ -30,8 +30,13 @@ static const char *TAG = "main";
 // ---- 动作执行:与协议/音频/BLE 的边界都在这里 ----
 static app_state_t s_state;   // app_task 独占,无需锁
 static uint32_t s_last_drop_count = 0;   // 最近一次 STREAM_STOP 的会话丢帧数(voice.end 后 status 帧)
+static bool s_ui_screen_on = true;       // 上次渲染时的屏幕状态(初始亮,与 app_ui 内 s_last_screen_on 一致)
+static int s_batt_soc = -1;              // 电量缓存(至多 1s 读一次真实 I2C,见渲染路径)
+static uint64_t s_batt_last_ms = (uint64_t)-1000;   // 上次电量读取时刻(负初值:首帧立即读)
 
-// 经 EVENT 特征上行一行(序列化已完成,含 '\n');无订阅时由 ble_audio 计数丢弃。
+// 经 EVENT 特征上行一行(序列化已完成,含 '\n')。异步:ble_audio 非阻塞入队,
+// event_worker 串行发送(最长单片 ~150ms 的抖动被隔离到事件通道,不再压住
+// app_task 渲染/命令路径);无订阅/队列满时由 ble_audio 计数丢弃,此处记日志。
 static void send_event_line(char *buf, size_t len)
 {
     if (len == 0) return;
@@ -158,10 +163,19 @@ static void app_task(void *arg)
         if (bsp_lvgl_lock(100)) {
             app_ui_snapshot_t snap;
             app_state_snapshot(&s_state, now_ms, &snap);
-            int soc = bsp_battery_soc();
-            snap.battery_available = (soc >= 0);
-            snap.battery_soc = (soc > 0) ? (uint8_t)soc : 0;
-            app_ui_render(&snap, audio_streamer_peak());
+            // 息屏跳过渲染路径:首次转息屏的那帧仍执行(背光 100→0 由它驱动),
+            // 之后息屏期间不做快照/电量/LVGL 任何工作(第 5 轮 #10)。
+            // 电量:至多 1s 读一次真实 I2C 总线事务,读数缓存复用(#9)。
+            if (snap.screen_on || s_ui_screen_on) {
+                if (now_ms - s_batt_last_ms >= 1000) {
+                    s_batt_soc = bsp_battery_soc();
+                    s_batt_last_ms = now_ms;
+                }
+                snap.battery_available = (s_batt_soc >= 0);
+                snap.battery_soc = (s_batt_soc > 0) ? (uint8_t)s_batt_soc : 0;
+                app_ui_render(&snap, audio_streamer_peak());
+                s_ui_screen_on = snap.screen_on;
+            }
             bsp_lvgl_unlock();
         }
 

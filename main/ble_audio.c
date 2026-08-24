@@ -98,6 +98,7 @@ ble_audio_err_t ble_audio_event_chunks(ble_audio_chunk_t *chunks, size_t chunks_
 #include "app_protocol.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "host/ble_att.h"
@@ -145,6 +146,20 @@ static volatile uint32_t s_drop_event = 0;         // 事件行 notify 失败丢
 static SemaphoreHandle_t s_tx_done_sem;
 static SemaphoreHandle_t s_tx_mutex;
 static volatile uint16_t s_tx_status = 0;
+
+// 事件下行队列:notify_event 只做非阻塞入队,event_worker 串行发送。
+// 动机:notify_one 单片最长 ~150ms(mutex 100ms + NOTIFY_TX 50ms),若在产生
+// 者上下文同步发送,渲染循环/串口命令/配网会被压住(第 5 轮卡顿项 #6)。
+// 专用任务把抖动隔离到事件通道自身。队列 4×512B 静态(2KB,零堆),满则
+// 丢帧计数——status 帧带丢帧计数,链路对账可见,不掩盖。
+// worker 优先级 3:低于 app_task(4),UI 不被事件发送抢占;与 sound_worker
+// 同级(两者无共享资源)。栈 2048:发送路径只做打包 + NimBLE API 浅封装
+// (深栈在 host 任务侧),真机 HWM 经 console st 验证(NOT RUN)。
+#define EVENT_Q_DEPTH 4
+static StaticQueue_t s_event_q_static;
+static uint8_t s_event_q_storage[EVENT_Q_DEPTH][EVENT_LINE_MAX];  // 项含尾 NUL
+static QueueHandle_t s_event_q;
+static TaskHandle_t s_event_worker;
 
 static void start_advertising(void);
 
@@ -381,6 +396,15 @@ int ble_audio_init(void) {
     if (!s_tx_done_sem) { ESP_LOGE(TAG, "TX 完成信号量创建失败"); return -1; }
     s_tx_mutex = xSemaphoreCreateMutex();
     if (!s_tx_mutex) { ESP_LOGE(TAG, "TX 互斥锁创建失败"); return -1; }
+    // 事件下行队列 + worker(静态 2KB,零堆);须在事件产生者(app_task)
+    // 启动前就绪,否则 notify_event 走"队列未建"丢弃路径
+    s_event_q = xQueueCreateStatic(EVENT_Q_DEPTH, EVENT_LINE_MAX,
+                                   (uint8_t *)s_event_q_storage, &s_event_q_static);
+    if (!s_event_q) { ESP_LOGE(TAG, "事件队列创建失败"); return -1; }
+    if (xTaskCreate(event_worker_task, "event_worker", 2048, NULL, 3,
+                    &s_event_worker) != pdPASS) {
+        ESP_LOGE(TAG, "事件 worker 创建失败"); return -1;
+    }
 
     ble_hs_cfg.sync_cb = on_sync;
     // Just Works 无输入输出配对(macOS 主动发起);CONFIG_BT_NIMBLE_SM_SC=y 只允许 SC 配对
@@ -433,8 +457,9 @@ int ble_audio_notify_audio(const uint8_t *frame, size_t len) {
     return 0;
 }
 
-int ble_audio_notify_event(const char *line, size_t len) {
-    if (!line || len == 0 || len > EVENT_LINE_MAX) return -1;
+// 事件行实际发送(仅 event_worker 上下文):单包直发或同一分片流控。
+// 订阅状态在入队后可能变化,发送前复查;失败丢帧计数(语义同旧同步路径)。
+static int send_event_line_now(const char *line, size_t len) {
     if (s_conn == 0xFFFF || !s_event_subscribed) {
         s_drop_event++;
         return -1;   // 订阅者缺失:上层走丢帧
@@ -461,6 +486,37 @@ int ble_audio_notify_event(const char *line, size_t len) {
             s_drop_event++;
             return -1;
         }
+    }
+    return 0;
+}
+
+// 事件发送专用任务:从队列取行串行发送。FIFO 保证 voice.end/status 等
+// 事件间顺序(帧序保证依赖:voice.end 在 drain 后入队,status 紧跟其后)。
+static void event_worker_task(void *param) {
+    (void)param;
+    char item[EVENT_LINE_MAX];
+    for (;;) {
+        if (xQueueReceive(s_event_q, item, portMAX_DELAY) != pdTRUE) continue;
+        // 入队时已写尾 NUL(见 ble_audio_notify_event),按 C 串取长
+        send_event_line_now(item, strlen(item));
+    }
+}
+
+int ble_audio_notify_event(const char *line, size_t len) {
+    if (!line || len == 0 || len > EVENT_LINE_MAX) return -1;
+    if (s_event_q == NULL || s_conn == 0xFFFF || !s_event_subscribed) {
+        s_drop_event++;
+        return -1;   // 队列未建/订阅者缺失:计数丢弃
+    }
+    char item[EVENT_LINE_MAX];
+    if (len >= sizeof(item)) len = sizeof(item) - 1;   // 协议实际行 ≤511,此处仅防越界
+    memcpy(item, line, len);
+    item[len] = '\0';
+    // 非阻塞入队:队列满 = 事件通道拥塞(worker 单片 ~150ms 上限),丢帧计数;
+    // status 帧带丢帧计数,链路对账可见,不掩盖。
+    if (xQueueSend(s_event_q, item, 0) != pdTRUE) {
+        s_drop_event++;
+        return -1;
     }
     return 0;
 }
