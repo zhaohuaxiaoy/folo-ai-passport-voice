@@ -2,6 +2,7 @@
 // 标准 boot 键盘报告(8B:修饰键 + 保留 + 6 键码);macOS 无需配对即识别。
 // 事件:连接/断开经 app_event_post 上报(BLE_CONNECTED/DISCONNECTED)。
 #include "ble_hid_keyboard.h"
+#include "ble_provisioning.h"
 #include "app_events.h"
 #include "app_types.h"
 #include "hid_keymap.h"
@@ -65,8 +66,8 @@ static QueueHandle_t s_job_queue;
 
 // ---- GATT 句柄与连接状态 ----
 static uint16_t s_report_val_handle;
-static volatile bool s_connected = false;
-static volatile bool s_subscribed = false;
+static volatile uint8_t s_conn_count;                 // 活跃连接数(≤CONFIG_BT_NIMBLE_MAX_CONNECTIONS)
+static volatile uint16_t s_hid_conn = 0xFFFF;         // 订阅了 HID CCCD 的连接(键盘可用即此)
 static uint16_t s_conn_handle;
 static uint8_t s_report_value[REPORT_LEN];   // 注册值:READ 返回,notify 前同步
 
@@ -80,12 +81,15 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
-            s_connected = true;
             s_conn_handle = event->connect.conn_handle;
-            s_subscribed = false;
-            ESP_LOGI(TAG, "已连接 (handle %u)", s_conn_handle);
-            app_event_t ev = { .type = APP_EV_BLE_CONNECTED };
-            app_event_post(&ev);
+            if (s_conn_count == 0) {   // 首连:对外报"键盘已连接"
+                app_event_t ev = { .type = APP_EV_BLE_CONNECTED };
+                app_event_post(&ev);
+            }
+            s_conn_count++;
+            ESP_LOGI(TAG, "已连接 (handle %u, 连接数 %u)", s_conn_handle, s_conn_count);
+            // 双连接:还有空闲槽就继续广播(配网 app 可挤进第二条,AC6)
+            if (s_conn_count < CONFIG_BT_NIMBLE_MAX_CONNECTIONS) start_advertising();
         } else {
             ESP_LOGW(TAG, "连接失败,重开广播");
             start_advertising();
@@ -94,21 +98,31 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, "断开 (reason %d)", event->disconnect.reason);
-        s_connected = false;
-        s_subscribed = false;
-        app_event_t d = { .type = APP_EV_BLE_DISCONNECTED };
-        app_event_post(&d);
+        if (s_conn_count > 0) s_conn_count--;
+        if (event->disconnect.conn_handle == s_hid_conn) s_hid_conn = 0xFFFF;
+        if (s_conn_count == 0) {   // 全部断开:对外报"键盘已断开"
+            app_event_t d = { .type = APP_EV_BLE_DISCONNECTED };
+            app_event_post(&d);
+        }
         start_advertising();
         break;
 
     case BLE_GAP_EVENT_SUBSCRIBE:
-        s_subscribed = (event->subscribe.cur_notify || event->subscribe.cur_indicate);
-        ESP_LOGI(TAG, "CCCD 订阅=%d", (int)s_subscribed);
+        // 仅 HID 报告特征的订阅算键盘可用(PROV_RESULT 订阅由 ble_provisioning 处理)
+        if (event->subscribe.attr_handle == s_report_val_handle) {
+            if (event->subscribe.cur_notify || event->subscribe.cur_indicate) {
+                s_hid_conn = event->subscribe.conn_handle;
+            } else if (event->subscribe.conn_handle == s_hid_conn) {
+                s_hid_conn = 0xFFFF;
+            }
+            ESP_LOGI(TAG, "HID 订阅连接=%u", s_hid_conn);
+        }
         break;
 
     default:
         break;
     }
+    ble_provisioning_gap_event(event);   // 配网服务共享同一 GAP 回调链
     return 0;
 }
 
@@ -214,21 +228,17 @@ static const struct ble_gatt_svc_def gatt_defs[] = {
     { 0 },
 };
 
-// ---- 发送 8B 键盘报告(Notifier) ----
+// ---- 发送 8B 键盘报告(Notifier;发往订阅 HID CCCD 的连接) ----
 static void send_report(const uint8_t report[REPORT_LEN])
 {
-    if (!s_connected) {
-        ESP_LOGW(TAG, "无 BLE 连接,丢弃键报");
-        return;
-    }
-    if (!s_subscribed) {
-        ESP_LOGW(TAG, "未订阅 Notify,丢弃键报");
+    if (s_hid_conn == 0xFFFF) {
+        ESP_LOGW(TAG, "无 HID 键盘连接,丢弃键报");
         return;
     }
     memcpy(s_report_value, report, REPORT_LEN);
     struct os_mbuf *om = ble_hs_mbuf_from_flat(report, REPORT_LEN);
     if (!om) { ESP_LOGW(TAG, "mbuf 分配失败"); return; }
-    int rc = ble_gatts_notify_custom(s_conn_handle, s_report_val_handle, om);
+    int rc = ble_gatts_notify_custom(s_hid_conn, s_report_val_handle, om);
     if (rc != 0) ESP_LOGW(TAG, "notify 失败 %d", rc);
 }
 
@@ -239,7 +249,7 @@ static void hid_worker(void *arg)
     hid_job_t job;
     for (;;) {
         if (xQueueReceive(s_job_queue, &job, portMAX_DELAY) != pdTRUE) continue;
-        if (!s_connected || !s_subscribed) {
+        if (s_hid_conn == 0xFFFF) {
             if (job.mode == APP_INJECT_TYPE) {
                 ESP_LOGW(TAG, "BLE 不可用,整段文本丢弃 (%d chars)", (int)strlen(job.text));
             } else {
@@ -263,7 +273,7 @@ static void hid_worker(void *arg)
         }
         // 逐字键入;非 ASCII 跳过(CJK 走 paste)
         for (const char *p = job.text; *p; p++) {
-            if (!s_connected || !s_subscribed) {
+            if (s_hid_conn == 0xFFFF) {
                 // 中途断连:放弃整段,避免对不存在的连接空转 128 字符
                 ESP_LOGW(TAG, "BLE 中途断开,中止键入");
                 app_event_t drop = { .type = APP_EV_BLE_DROP };
@@ -321,6 +331,8 @@ esp_err_t ble_hid_keyboard_init(void)
     if (rc != 0) { ESP_LOGE(TAG, "count_cfg 失败 %d", rc); return ESP_FAIL; }
     rc = ble_gatts_add_svcs(gatt_defs);
     if (rc != 0) { ESP_LOGE(TAG, "add_svcs 失败 %d", rc); return ESP_FAIL; }
+    rc = ble_provisioning_init();   // 注册配网服务(0xA1B0),统一 gatts_start
+    if (rc != 0) { ESP_LOGE(TAG, "配网服务注册失败 %d", rc); return ESP_FAIL; }
 
     rc = ble_gatts_start();
     if (rc != 0) { ESP_LOGE(TAG, "gatts_start 失败 %d", rc); return ESP_FAIL; }
@@ -355,8 +367,8 @@ void ble_hid_keyboard_paste(void)
     }
 }
 
-bool ble_hid_keyboard_connected(void) { return s_connected; }
-bool ble_hid_keyboard_ready(void) { return s_connected && s_subscribed; }
+bool ble_hid_keyboard_connected(void) { return s_hid_conn != 0xFFFF; }
+bool ble_hid_keyboard_ready(void) { return s_hid_conn != 0xFFFF; }   // 连接即订阅(macOS HID 自动订阅)
 size_t ble_hid_keyboard_queue_len(void)
 {
     return s_job_queue ? (size_t)uxQueueMessagesWaiting(s_job_queue) : 0;

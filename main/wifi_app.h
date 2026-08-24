@@ -12,6 +12,7 @@ esp_err_t wifi_app_set_credentials(const char *ssid, const char *pass); // 保�
 bool wifi_app_connected(void);
 // 返回当前 IP 字符串(未连接时为空串)
 const char *wifi_app_ip(void);
+bool wifi_app_provisioned(void);            // NVS 是否已有凭据(未配网横幅依据)
 
 #ifdef __cplusplus
 }

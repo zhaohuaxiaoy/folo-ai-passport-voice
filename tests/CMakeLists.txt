@@ -12,6 +12,9 @@ enable_testing()
 
 add_compile_options(-Wall -Wextra)
 
+# cJSON 是第三方老代码,其 warning 不升级为 error(-Werror 门禁只约束自有代码)
+set_source_files_properties(${CJSON_DIR}/cJSON.c PROPERTIES COMPILE_OPTIONS "-Wno-error")
+
 # --- 状态机 ---
 add_executable(test_app_state test_app_state.c ${MAIN_DIR}/app_state.c)
 target_include_directories(test_app_state PRIVATE ${MAIN_DIR})
@@ -32,3 +35,9 @@ add_executable(test_app_protocol test_app_protocol.c ${MAIN_DIR}/app_protocol.c
                ${MAIN_DIR}/app_state.c ${CJSON_DIR}/cJSON.c)
 target_include_directories(test_app_protocol PRIVATE ${MAIN_DIR} ${CJSON_DIR})
 add_test(NAME app_protocol COMMAND test_app_protocol)
+
+# --- 配网协议(纯 C + cJSON,与 app_protocol 同构) ---
+add_executable(test_prov_protocol test_prov_protocol.c ${MAIN_DIR}/prov_protocol.c
+               ${CJSON_DIR}/cJSON.c)
+target_include_directories(test_prov_protocol PRIVATE ${MAIN_DIR} ${CJSON_DIR})
+add_test(NAME prov_protocol COMMAND test_prov_protocol)

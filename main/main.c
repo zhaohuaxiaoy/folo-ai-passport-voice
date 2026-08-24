@@ -8,7 +8,10 @@
 #include "app_protocol.h"
 #include "audio_streamer.h"
 #include "ble_hid_keyboard.h"
+#include "ble_provisioning.h"
+#include "prov_protocol.h"
 #include "console_cmds.h"
+#include "mdns_resolver.h"
 #include "nvs_settings.h"
 #include "wifi_app.h"
 #include "ws_client.h"
@@ -83,7 +86,28 @@ static void run_actions(const app_action_t *acts, uint8_t n)
                 ble_hid_keyboard_type(a->u.inject.text);
             }
             break;
+        case APP_ACT_PROV_WIFI:
+            // 配网凭据 → 存 NVS + set_config + 立即连接(wifi_app 内自包含)
+            wifi_app_set_credentials(a->u.prov.ssid, a->u.prov.pass);
+            break;
+        case APP_ACT_WS_RETARGET:
+            ws_client_retarget(a->u.ws_target.url);   // 运行时改目标,不写 NVS
+            break;
+        case APP_ACT_RESOLVE_SERVICE:
+            mdns_resolver_request();                  // WS 断开/手动 → 重查(auto 模式)
+            break;
         }
+    }
+}
+
+// WiFi 断开 reason → 配网错误码(与 app_state 的 toast 映射一致)
+static prov_error_t wifi_reason_to_prov(uint16_t reason)
+{
+    switch (reason) {
+    case 201: return PROV_ERR_NO_AP;
+    case 202: case 15: case 2: return PROV_ERR_AUTH_FAIL;
+    case 203: return PROV_ERR_ASSOC_FAIL;
+    default:  return PROV_ERR_OTHER;
     }
 }
 
@@ -109,6 +133,8 @@ static void app_task(void *arg)
 {
     (void)arg;
     app_state_init(&s_state);
+    // 启动注入:NVS 已有凭据则不显示"NO WIFI"横幅(配网后由事件流接管)
+    s_state.wifi_configured = wifi_app_provisioned();
     QueueHandle_t q = app_events_queue();
     uint64_t next_tick = esp_timer_get_time() / 1000;
     uint64_t now_ms = next_tick;
@@ -122,8 +148,18 @@ static void app_task(void *arg)
         while (xQueueReceive(q, &ev, 0) == pdTRUE) {
             got = true;
             now_ms = esp_timer_get_time() / 1000;
+            // 配网结果编排:reduce 会清 provisioning,先快照会话标志(每 op 只报一次)
+            const bool prov_active = s_state.provisioning;
             uint8_t n = 0;
             app_state_reduce(&s_state, &ev, now_ms, acts, &n);
+            if (prov_active) {
+                if (ev.type == APP_EV_WIFI_CONNECTED) {
+                    ble_provisioning_notify_ok(wifi_app_ip());
+                } else if (ev.type == APP_EV_WIFI_CONNECT_FAIL) {
+                    ble_provisioning_notify_error(
+                        wifi_reason_to_prov(ev.u.wifi_fail.reason), NULL);
+                }
+            }
             run_actions(acts, n);
         }
 
@@ -131,8 +167,14 @@ static void app_task(void *arg)
         now_ms = esp_timer_get_time() / 1000;
         if (now_ms >= next_tick) {
             app_event_t t = { .type = APP_EV_TICK };
+            // 超时判断在 reduce 前求值(reduce 会清 deadline)
+            const bool prov_timeout = s_state.provisioning &&
+                                      now_ms >= s_state.prov_deadline_ms;
             uint8_t n = 0;
             app_state_reduce(&s_state, &t, now_ms, acts, &n);
+            if (prov_timeout) {
+                ble_provisioning_notify_error(PROV_ERR_TIMEOUT, NULL);
+            }
             run_actions(acts, n);
             next_tick = now_ms + APP_TICK_MS;
         }
@@ -219,6 +261,7 @@ void app_main(void)
 
     // 6. 网络:Wi-Fi(GOT_IP 后自动起 WS)→ WS 客户端
     wifi_app_init();
+    if (mdns_resolver_init() != ESP_OK) ESP_LOGW(TAG, "mDNS 解析器初始化失败");
     if (ws_client_init() != ESP_OK) ESP_LOGW(TAG, "WS 客户端初始化失败");
 
     // 7. 音频流式管线(双 worker 空闲等待)

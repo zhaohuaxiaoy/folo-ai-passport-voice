@@ -51,6 +51,7 @@ void app_state_snapshot(const app_state_t *s, uint64_t now_ms, app_ui_snapshot_t
     snap->screen_on        = s->screen_on;
     snap->net_busy         = s->net_busy;
     snap->ble_connected    = s->ble_connected;
+    snap->wifi_configured  = s->wifi_configured;
     snap->elapsed_ms       = (uint32_t)(now_ms - s->state_since_ms);
     snap->battery_available = true; // 由主循环在快照后补真实值,见 app_ui
     snap->mac_cpu          = s->mac_cpu;
@@ -248,10 +249,29 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
     }
 }
 
+// WiFi 断开 reason → 简短 toast(与 prd 错误码语义对齐)
+static const char *wifi_fail_text(uint16_t reason) {
+    switch (reason) {
+    case 201: return "WiFi: no AP";            // NO_AP
+    case 202: case 15: case 2: return "WiFi: auth fail";   // AUTH_FAIL
+    case 203: return "WiFi: assoc fail";       // ASSOC_FAIL
+    default:  return "WiFi: connect fail";
+    }
+}
+
 static void handle_tick(app_state_t *s, uint64_t now_ms, app_action_t *out, uint8_t *n, uint8_t max) {
     // toast 过期
     if (s->toast[0] && now_ms >= s->toast_until_ms) {
         s->toast[0] = '\0';
+        app_action_t r = { .type = APP_ACT_UI_REFRESH };
+        emit(out, n, max, r);
+    }
+
+    // 配网结果 30s 超时:清会话标志,结果通知由主循环编排
+    if (s->provisioning && now_ms >= s->prov_deadline_ms) {
+        s->provisioning = false;
+        s->prov_deadline_ms = 0;
+        set_toast(s, now_ms, "Provisioning timeout");
         app_action_t r = { .type = APP_ACT_UI_REFRESH };
         emit(out, n, max, r);
     }
@@ -298,6 +318,8 @@ static void handle_ws(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
     s->ws_connected = false;
     app_action_t st = { .type = APP_ACT_STREAM_STOP };
     emit(out, n, max, st);   // 幂等,未开流时执行器无副作用
+    app_action_t rs = { .type = APP_ACT_RESOLVE_SERVICE };   // 断开 → 触发 mDNS 重查
+    emit(out, n, max, rs);
     switch (s->state) {
     case APP_ST_LISTENING:
         s->ptt_pending_end = false;
@@ -440,6 +462,56 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         set_toast(s, now_ms, "BLE typing dropped");
         app_action_t br = { .type = APP_ACT_UI_REFRESH };
         emit(out, out_n, max, br);
+        break;
+
+    case APP_EV_PROV_CMD:
+        // 凭据已收:置会话标志与 30s 截止,立刻执行连接(PROV_WIFI)
+        str_cpy(s->wifi_ssid, sizeof(s->wifi_ssid), ev->u.prov.ssid);
+        s->wifi_configured = true;
+        s->provisioning = true;
+        s->prov_deadline_ms = now_ms + APP_PROV_TIMEOUT_MS;
+        set_toast(s, now_ms, "Provisioning WiFi...");
+        {
+            app_action_t a = { .type = APP_ACT_PROV_WIFI };
+            str_cpy(a.u.prov.ssid, sizeof(a.u.prov.ssid), ev->u.prov.ssid);
+            str_cpy(a.u.prov.pass, sizeof(a.u.prov.pass), ev->u.prov.pass);
+            emit(out, out_n, max, a);
+        }
+        {
+            app_action_t r = { .type = APP_ACT_UI_REFRESH };
+            emit(out, out_n, max, r);
+        }
+        break;
+
+    case APP_EV_WIFI_CONNECTED:
+        s->provisioning = false;
+        s->prov_deadline_ms = 0;
+        s->wifi_configured = true;
+        set_toast(s, now_ms, "WiFi connected");
+        {
+            app_action_t r = { .type = APP_ACT_UI_REFRESH };
+            emit(out, out_n, max, r);
+        }
+        break;
+
+    case APP_EV_WIFI_CONNECT_FAIL:
+        // 不置 wifi_configured=false:凭据仍在 NVS,后续自动重连
+        s->provisioning = false;
+        s->prov_deadline_ms = 0;
+        set_toast(s, now_ms, wifi_fail_text(ev->u.wifi_fail.reason));
+        {
+            app_action_t r = { .type = APP_ACT_UI_REFRESH };
+            emit(out, out_n, max, r);
+        }
+        break;
+
+    case APP_EV_WS_TARGET_FOUND:
+        // mDNS 发现新目标 → 运行时 retarget(不写 NVS;static 模式不会走到这里)
+        {
+            app_action_t a = { .type = APP_ACT_WS_RETARGET };
+            str_cpy(a.u.ws_target.url, sizeof(a.u.ws_target.url), ev->u.ws_target.url);
+            emit(out, out_n, max, a);
+        }
         break;
 
     case APP_EV_AUDIO_ERROR:

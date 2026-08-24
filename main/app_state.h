@@ -19,6 +19,10 @@ typedef struct {
     uint64_t       state_since_ms;  // 进入当前状态的时刻(超时计时)
     uint64_t       toast_until_ms;
     bool           ptt_pending_end; // LISTENING:已松开、等单击窗口定夺(再按=取消,到期=发送)
+    bool           wifi_configured; // NVS 已有凭据(未配网横幅依据)
+    bool           provisioning;    // BLE 配网会话进行中
+    uint64_t       prov_deadline_ms;// 配网超时时刻(provisioning 时有效)
+    char           wifi_ssid[PROV_SSID_MAX + 1];
     char           toast[APP_TOAST_MAX];
     uint8_t        mac_cpu, mac_ram, mac_batt;
     bool           mac_charging;

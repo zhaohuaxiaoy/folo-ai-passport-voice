@@ -506,6 +506,78 @@ static void test_ble_events(void) {
     assert(strstr(s.toast, "dropped"));
 }
 
+// ---- 配网:PROV_CMD → 会话标志 + PROV_WIFI 动作;成功/失败/超时 ----
+static void test_provisioning_flow(void) {
+    reset();
+    app_event_t cmd = { .type = APP_EV_PROV_CMD };
+    memcpy(cmd.u.prov.ssid, "MyNet", 6);   // 5+1
+    memcpy(cmd.u.prov.pass, "wpa2", 5);    // 4+1
+    app_state_reduce(&s, &cmd, now, out, &on);
+    assert(s.provisioning == true);
+    assert(s.wifi_configured == true);
+    assert(strcmp(s.wifi_ssid, "MyNet") == 0);
+    assert(strstr(s.toast, "Provisioning"));
+    app_action_t *a = find_action(APP_ACT_PROV_WIFI);
+    assert(a != NULL);
+    assert(strcmp(a->u.prov.ssid, "MyNet") == 0);
+    assert(strcmp(a->u.prov.pass, "wpa2") == 0);
+
+    // 成功:清会话 + toast,凭据保留
+    app_event_t ok = { .type = APP_EV_WIFI_CONNECTED };
+    app_state_reduce(&s, &ok, now + 1000, out, &on);
+    assert(s.provisioning == false);
+    assert(s.wifi_configured == true);
+    assert(s.prov_deadline_ms == 0);
+    assert(strstr(s.toast, "WiFi connected"));
+}
+
+static void test_provisioning_fail(void) {
+    reset();
+    app_event_t cmd = { .type = APP_EV_PROV_CMD };
+    memcpy(cmd.u.prov.ssid, "MyNet", 6);
+    memcpy(cmd.u.prov.pass, "wrong", 6);   // 5+1
+    app_state_reduce(&s, &cmd, now, out, &on);
+    assert(s.provisioning == true);
+
+    // 密码错:reason 202 → auth fail;凭据不清(自动重连)
+    app_event_t fail = { .type = APP_EV_WIFI_CONNECT_FAIL, .u.wifi_fail = { .reason = 202 } };
+    app_state_reduce(&s, &fail, now + 1000, out, &on);
+    assert(s.provisioning == false);
+    assert(s.wifi_configured == true);
+    assert(strstr(s.toast, "auth fail"));
+
+    // SSID 不存在:201 → no AP
+    reset();
+    cmd = (app_event_t){ .type = APP_EV_PROV_CMD };
+    memcpy(cmd.u.prov.ssid, "GhostNet", 9);  // 8+1
+    app_state_reduce(&s, &cmd, now, out, &on);
+    fail = (app_event_t){ .type = APP_EV_WIFI_CONNECT_FAIL, .u.wifi_fail = { .reason = 201 } };
+    app_state_reduce(&s, &fail, now + 1000, out, &on);
+    assert(strstr(s.toast, "no AP"));
+}
+
+static void test_provisioning_timeout(void) {
+    reset();
+    app_event_t cmd = { .type = APP_EV_PROV_CMD };
+    memcpy(cmd.u.prov.ssid, "SlowNet", 8);  // 7+1
+    app_state_reduce(&s, &cmd, now, out, &on);
+    assert(s.provisioning == true);
+
+    // 30s 内:会话保持
+    app_event_t tick = { .type = APP_EV_TICK };
+    app_state_reduce(&s, &tick, now + 29000, out, &on);
+    assert(s.provisioning == true);
+
+    // 超时:清会话 + toast
+    app_state_reduce(&s, &tick, now + 31000, out, &on);
+    assert(s.provisioning == false);
+    assert(strstr(s.toast, "timeout"));
+
+    // 再次 TICK:不重复报告
+    app_state_reduce(&s, &tick, now + 32000, out, &on);
+    assert(s.provisioning == false);
+}
+
 // ---- 快照:agent_state_name 保留真实 status,仅空时兜底 ----
 static void test_snapshot_agent_name(void) {
     reset();
@@ -549,6 +621,9 @@ int main(void) {
     test_agent_error();
     test_audio_drop_netbusy();
     test_ble_events();
+    test_provisioning_flow();
+    test_provisioning_fail();
+    test_provisioning_timeout();
     test_metrics();
     test_snapshot_agent_name();
     test_bounded();

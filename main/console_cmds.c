@@ -1,6 +1,7 @@
 // main/console_cmds.c —— esp_console 命令实现。
 // USB-Serial-JTAG 控制台:配置 Wi-Fi / WS 目标、查看系统状态、重启与出厂复位。
 #include "console_cmds.h"
+#include "mdns_resolver.h"
 #include "nvs_settings.h"
 #include "wifi_app.h"
 #include "ws_client.h"
@@ -57,18 +58,37 @@ static int cmd_ws(int argc, char **argv)
 {
     if (argc == 1 || strcmp(argv[1], "status") == 0) {
         char url[128] = "";
+        bool auto_mode;
         nvs_settings_get_ws_url(url, sizeof(url));
+        nvs_settings_get_ws_mode(&auto_mode);
         printf("url: %s\n", url);
+        printf("mode: %s\n", auto_mode ? "auto (mDNS)" : "static");
         printf("connected: %s\n", ws_client_connected() ? "yes" : "no");
         return 0;
     }
     if (strcmp(argv[1], "set") == 0 && argc == 3) {
+        if (strcmp(argv[2], "auto") == 0) {
+            // 切回自动发现:mDNS 可覆盖运行时 URL(不写回 NVS URL)
+            esp_err_t e = nvs_settings_set_ws_mode(true);
+            printf("ws mode: %s\n", e == ESP_OK ? "auto (mDNS)" : esp_err_to_name(e));
+            return 0;
+        }
+        nvs_settings_set_ws_mode(false);   // 显式 URL → static(用户显式优先)
         esp_err_t e = ws_client_reinit(argv[2]);
         printf("ws set: %s\n", e == ESP_OK ? "ok" : esp_err_to_name(e));
         return 0;
     }
-    printf("usage: ws set <url> | ws status\n");
+    printf("usage: ws set <url> | ws set auto | ws status\n");
     return 1;
+}
+
+// ---- mdns:手动触发解析 ----
+static int cmd_mdns(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    mdns_resolver_request();
+    printf("mDNS 解析已触发(auto 模式);目标变化时自动重连 WS\n");
+    return 0;
 }
 
 // ---- st:状态一览 ----
@@ -136,7 +156,8 @@ esp_err_t console_cmds_register(void)
     reg("wifi", "Wi-Fi 设置/状态",
         "set <ssid> <pass> | get | status", cmd_wifi);
     reg("ws", "WebSocket 目标设置/状态",
-        "set <url> | status", cmd_ws);
+        "set <url> | set auto | status", cmd_ws);
+    reg("mdns", "手动触发 mDNS 解析", NULL, cmd_mdns);
     reg("st", "系统状态一览", NULL, cmd_st);
     reg("reboot", "重启设备", NULL, cmd_reboot);
     reg("factory", "清空 NVS 并重启", NULL, cmd_factory);

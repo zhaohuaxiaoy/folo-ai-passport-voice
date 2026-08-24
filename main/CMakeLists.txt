@@ -12,6 +12,9 @@ idf_component_register(
          "ws_client.c"
          "audio_streamer.c"
          "ble_hid_keyboard.c"
+         "ble_provisioning.c"
+         "prov_protocol.c"
+         "mdns_resolver.c"
          "hid_keymap.c"
          "console_cmds.c"
     INCLUDE_DIRS "."
@@ -24,4 +27,5 @@ idf_component_register(
              esp_event
              esp_console
              bt
+             mdns
 )

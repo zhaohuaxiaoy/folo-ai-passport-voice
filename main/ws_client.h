@@ -25,8 +25,11 @@ void ws_client_send_voice_end(void);
 // 供音频 worker 调用的阻塞二进制发送。返回 ESP_OK 或超时错误。
 esp_err_t ws_client_send_bin_blocking(const uint8_t *data, size_t len);
 
-// 重新按新 URL 初始化(控制台 `ws set` 后用)。
+// 重新按新 URL 初始化并写 NVS(控制台 `ws set` 后用,置 static 模式)。
 esp_err_t ws_client_reinit(const char *url);
+
+// 运行时改目标 URL,不写 NVS(mDNS 发现结果用;auto 模式下被 WS_TARGET_FOUND 驱动)。
+esp_err_t ws_client_retarget(const char *url);
 
 #ifdef __cplusplus
 }

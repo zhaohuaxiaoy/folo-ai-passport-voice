@@ -107,8 +107,9 @@ esp_err_t ws_client_init(void) {
     return ESP_OK;
 }
 
-esp_err_t ws_client_reinit(const char *url) {
-    esp_err_t e = nvs_settings_set_ws_url(url);
+// 重建客户端句柄:persist=true 同时写 NVS(reinit),false 只改运行时(retarget)
+static esp_err_t rebuild_client(const char *url, bool persist) {
+    esp_err_t e = persist ? nvs_settings_set_ws_url(url) : ESP_OK;
     if (e != ESP_OK) return e;
     // 重建句柄必须与 ws_worker 的在飞发送互斥,否则 send_bin 可能撞上 destroy(use-after-free)
     if (xSemaphoreTake(s_tx_mutex, pdMS_TO_TICKS(500)) != pdTRUE) {
@@ -133,6 +134,10 @@ esp_err_t ws_client_reinit(const char *url) {
     xSemaphoreGive(s_tx_mutex);
     return e;
 }
+
+esp_err_t ws_client_reinit(const char *url) { return rebuild_client(url, true); }
+
+esp_err_t ws_client_retarget(const char *url) { return rebuild_client(url, false); }
 
 esp_err_t ws_client_start(void) {
     if (!s_client) return ESP_FAIL;

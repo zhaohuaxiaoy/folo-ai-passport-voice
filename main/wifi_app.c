@@ -1,6 +1,10 @@
 // main/wifi_app.c —— Wi-Fi STA 实现。
-// GOT_IP → ws_client_start();STA_DISCONNECTED → ws_client_stop()。
+// GOT_IP → WIFI_CONNECTED 事件 + ws_client_start();
+// STA_DISCONNECTED → 按 reason 去重投 WIFI_CONNECT_FAIL + ws_client_stop()。
 #include "wifi_app.h"
+#include "app_events.h"
+#include "app_types.h"
+#include "mdns_resolver.h"
 #include "nvs_settings.h"
 #include "ws_client.h"
 #include "esp_event.h"
@@ -16,6 +20,15 @@ static const char *TAG = "wifi_app";
 static bool s_connected = false;
 static char s_ip[16] = "";
 static esp_netif_t *s_sta;
+static uint16_t s_last_reason = 0;   // 已上报的失败 reason(0=无);GOT_IP/set_credentials 时清空防风暴
+
+// 失败事件按 reason 去重:同一原因在配网会话/重连风暴中只报一次(PRD AC3 每 op 只报一次)
+static void post_wifi_fail(uint16_t reason) {
+    if (reason == s_last_reason) return;
+    s_last_reason = reason;
+    app_event_t ev = { .type = APP_EV_WIFI_CONNECT_FAIL, .u.wifi_fail = { .reason = reason } };
+    app_event_post(&ev);
+}
 
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
     (void)arg; (void)base;
@@ -25,7 +38,9 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         s_connected = false;
         s_ip[0] = '\0';
         ws_client_stop();
-        ESP_LOGW(TAG, "Wi-Fi 断开,停止 WS");
+        wifi_event_sta_disconnected_t *d = data;
+        post_wifi_fail(d ? (uint16_t)d->reason : 0);
+        ESP_LOGW(TAG, "Wi-Fi 断开 (reason %u),停止 WS", s_last_reason);
         esp_wifi_connect();                  // 自动重连
     }
 }
@@ -36,8 +51,12 @@ static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data
         ip_event_got_ip_t *e = data;
         snprintf(s_ip, sizeof(s_ip), IPSTR, IP2STR(&e->ip_info.ip));
         s_connected = true;
+        s_last_reason = 0;                   // 连上即清:后续新失败允许再次上报
         ESP_LOGI(TAG, "已获取 IP: %s", s_ip);
-        ws_client_start();                   // 有网才起 WS
+        app_event_t ev = { .type = APP_EV_WIFI_CONNECTED };
+        app_event_post(&ev);
+        mdns_resolver_request();             // 有网 → mDNS 发现 Mac(AC4:≤5s 内自动连 WS)
+        ws_client_start();                   // 有网才起 WS(先按 NVS URL,发现后 retarget)
     }
 }
 
@@ -81,6 +100,7 @@ esp_err_t wifi_app_init(void) {
 }
 
 esp_err_t wifi_app_set_credentials(const char *ssid, const char *pass) {
+    s_last_reason = 0;   // 新凭据:旧失败不抑制新上报
     esp_err_t e = nvs_settings_set_wifi(ssid, pass);
     if (e != ESP_OK) return e;
 
@@ -90,6 +110,12 @@ esp_err_t wifi_app_set_credentials(const char *ssid, const char *pass) {
     e = esp_wifi_set_config(WIFI_IF_STA, &wc);
     if (e != ESP_OK) return e;
     return esp_wifi_connect();
+}
+
+// NVS 是否已有凭据(未配网横幅依据)
+bool wifi_app_provisioned(void) {
+    char ssid[64] = "", pass[64] = "";
+    return nvs_settings_get_wifi(ssid, sizeof(ssid), pass, sizeof(pass)) == ESP_OK && ssid[0];
 }
 
 bool wifi_app_connected(void) { return s_connected; }

@@ -4,6 +4,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "prov_protocol.h"   // PROV_SSID_MAX/PROV_PASS_MAX/prov_wifi_set_t(纯 C 头)
 
 #ifdef __cplusplus
 extern "C" {
@@ -70,6 +71,10 @@ typedef enum {
     APP_EV_BLE_CONNECTED,
     APP_EV_BLE_DISCONNECTED,
     APP_EV_BLE_DROP,        // BLE 注入因断连/未订阅被丢弃(UI toast 反馈)
+    APP_EV_PROV_CMD,        // BLE 配网凭据(写特征回调投递,零阻塞)
+    APP_EV_WIFI_CONNECTED,  // WiFi 连上(GOT_IP)
+    APP_EV_WIFI_CONNECT_FAIL, // WiFi 连接失败(u.wifi_fail.reason)
+    APP_EV_WS_TARGET_FOUND, // mDNS 发现 Mac(u.ws_target.url)
     APP_EV_AUDIO_ERROR,     // 采集硬件错误(与 WS 断线语义不同)
     APP_EV_TICK,            // 100ms 心跳,驱动超时/息屏
 } app_event_type_t;
@@ -114,6 +119,7 @@ typedef enum {
 #define APP_METRIC_APP_MAX    24
 #define APP_AGENT_MSG_MAX     96
 #define APP_TOAST_MAX         64
+#define APP_WS_URL_MAX        128
 
 // 事件(定长结构,入队拷贝,union 保小)
 typedef struct {
@@ -140,6 +146,12 @@ typedef struct {
             char text[APP_TRANSCRIPT_MAX];
             uint8_t inject_mode;                        // app_inject_mode_t
         } transcript;                                   // TRANSCRIPT
+        struct {
+            char ssid[PROV_SSID_MAX + 1];
+            char pass[PROV_PASS_MAX + 1];
+        } prov;                                         // PROV_CMD
+        struct { uint16_t reason; } wifi_fail;          // WIFI_CONNECT_FAIL
+        struct { char url[APP_WS_URL_MAX]; } ws_target; // WS_TARGET_FOUND
     } u;
 } app_event_t;
 
@@ -157,6 +169,9 @@ typedef enum {
     APP_ACT_STREAM_STOP,
     APP_ACT_PLAY_TONE,
     APP_ACT_INJECT_TEXT,
+    APP_ACT_PROV_WIFI,        // wifi_app_set_credentials(配网凭据)
+    APP_ACT_WS_RETARGET,      // ws_client_retarget(运行时 URL,不写 NVS)
+    APP_ACT_RESOLVE_SERVICE,  // mdns_resolver_request(触发 mDNS 重查)
 } app_action_type_t;
 
 #define APP_ACT_MAX 4   // 单事件最多产出的动作数
@@ -174,6 +189,8 @@ typedef struct {
             char text[APP_TRANSCRIPT_MAX];
             uint8_t inject_mode;
         } inject;                                       // INJECT_TEXT
+        struct { char url[APP_WS_URL_MAX]; } ws_target; // WS_RETARGET
+        prov_wifi_set_t prov;                           // PROV_WIFI
     } u;
 } app_action_t;
 
@@ -185,6 +202,7 @@ typedef struct {
     bool           screen_on;
     bool           net_busy;        // 音频丢帧中 → NET BUSY
     bool           ble_connected;   // BLE 键盘是否已连接
+    bool           wifi_configured; // 无凭据 → "NO WIFI" 未配网横幅
     bool           battery_available;
     uint8_t        battery_soc;     // 0..100
     uint8_t        mac_cpu;         // 0..100
@@ -208,6 +226,7 @@ typedef struct {
 #define APP_IDLE_SCREENOFF_MS   60000u   // 无按键息屏
 #define APP_TRANSCRIBE_TIMEOUT  30000u   // 转写等待超时
 #define APP_AGENT_RUN_TIMEOUT   90000u   // Agent 执行超时
+#define APP_PROV_TIMEOUT_MS     30000u   // 配网结果等待上限(BLE 通知超时)
 #define APP_TICK_MS             100u     // 应用任务心跳
 
 #ifdef __cplusplus

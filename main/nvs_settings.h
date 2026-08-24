@@ -15,6 +15,10 @@ esp_err_t nvs_settings_set_wifi(const char *ssid, const char *pass);
 esp_err_t nvs_settings_get_ws_url(char *url, size_t sz);
 esp_err_t nvs_settings_set_ws_url(const char *url);
 
+// WS 目标策略:true=auto(mDNS 自动发现,缺省)/ false=static(显式 URL 优先)
+esp_err_t nvs_settings_get_ws_mode(bool *auto_mode);
+esp_err_t nvs_settings_set_ws_mode(bool auto_mode);
+
 void nvs_settings_factory_reset(void);   // 清 "app" 命名空间
 
 #ifdef __cplusplus
