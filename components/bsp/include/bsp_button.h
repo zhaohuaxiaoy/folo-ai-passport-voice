@@ -14,6 +14,7 @@ typedef enum {
 
 typedef enum {
     BSP_BTN_PRESS = 0,   // 按下瞬间(低延迟,适合游戏类即时响应)
+    BSP_BTN_RELEASE,     // 抬起瞬间(Push-to-Talk 的"松开结束"依赖它)
     BSP_BTN_CLICK,       // 单击(按下并抬起)
     BSP_BTN_DOUBLE,      // 双击
     BSP_BTN_LONG,        // 长按
