@@ -59,19 +59,22 @@ LCD RST 和功放 PA 使能均定义为 `-1`：LCD 复位脚未接 MCU，驱动�
 
 ```text
 app_main
-  ├─ bsp_i2c_init → bsp_i2c_scan
+  ├─ nvs_flash_init → nvs_settings_init
+  ├─ bsp_i2c_init
   ├─ bsp_display_init → bsp_lvgl_init → backlight 100%
-  ├─ bsp_button_init(on_key)
-  ├─ bsp_audio_init
+  ├─ app_events_init(事件队列)
+  ├─ bsp_button_init(on_key → app_event_post)
+  ├─ app_sound_init(sound_worker)
   ├─ bsp_battery_init
-  └─ LVGL menu
-       ├─ Display demo
-       ├─ Button demo
-       ├─ Audio demo
-       └─ Battery demo
+  ├─ app_ui_init(LVGL 状态页 + 顶栏/横幅)
+  ├─ wifi_app_init → ws_client_init(GOT_IP 后自动启动)
+  ├─ audio_streamer_init(audio/ws 双 worker)
+  ├─ ble_hid_keyboard_init(NimBLE HID 外设)
+  ├─ console_init + app_task
+  └─ app_task:事件 → app_state_reduce → 动作执行 → LVGL 渲染(锁内)
 ```
 
-显示是 UI 的硬依赖，显示或 LVGL 初始化失败时 `app_main` 直接返回。按键、音频、电池是软依赖：初始化失败的菜单项显示 `[FAIL]`，其他页面仍可用。
+显示是 UI 的硬依赖，显示或 LVGL 初始化失败时 `app_main` 直接返回。按键、提示音、电池是软依赖：初始化失败只记日志并继续。
 
 公开 BSP API 位于 `components/bsp/include/`：
 
@@ -170,9 +173,7 @@ MCU 是 I2S master，ES8311 是 slave；I2S0 的 TX/RX 全双工通道共享 MCL
 - `bsp_audio_read/write` 是阻塞调用，不能放在按键回调或 LVGL 任务中。
 - I2S DMA 当前为 6 个 descriptor、每个 240 frame。更改 DMA 或 LVGL buffer 前必须联合评估内部 RAM。
 
-Audio demo 使用独立 4 KB 栈任务：OK 播放 1 秒 1 kHz 方波，UP 录 3 秒再回放。录音缓冲约 96 KB，是当前最显著的瞬时堆分配，可能因碎片或其他功能增大而失败。新增长录音应优先采用分块流式处理或外部存储，不可假设存在 PSRAM。
-
-当前 demo 的退出会直接删除音频任务。如果任务正阻塞于 codec 读写，实际硬件上需特别验证退出行为；若扩展为生产逻辑，应设计可取消的分块循环与明确的任务退出握手。
+产品固件（`main`）的音频为流式：提示音（方波，复用 ES8311 播放）与录音严格分时，录音经 4 KB **静态**环形缓冲双 worker（采集 prio 6 / 发送 prio 5）分块（3200 B = 100 ms）上行，拥塞时源端丢帧并显示 NET BUSY。任何路径最大连续堆分配 ≤4 KB，不引入整段录音缓冲。
 
 ## 9. CW2017 电池计
 
@@ -196,7 +197,8 @@ FoloToy AI Passport 的所有硬件批次均使用 8 MB Flash，`sdkconfig.defau
 - LVGL 静态内存池 24 KB；
 - LCD DMA buffer 约 9.6 KB；
 - I2S DMA descriptor/frame buffer；
-- Audio demo 96 KB 录音堆；
+- 音频静态环 4 KB + 两 worker 任务栈（各 4 KB）；
+- Wi-Fi 栈（约 35–45 KB）与 NimBLE（约 30–45 KB,MSYS 已收窄）；
 - 各 FreeRTOS 任务栈和最大连续空闲块。
 
 新增图片、字体、网络栈、TLS、音频缓存或双缓冲时，应记录 build 后的静态 RAM/Flash 使用，并在运行时记录 free heap 与 largest free block。总 free heap 足够不代表能成功分配大连续缓冲。
@@ -211,16 +213,11 @@ FoloToy AI Passport 的所有硬件批次均使用 8 MB Flash，`sdkconfig.defau
 4. 初始化应尽量幂等，错误应返回 `esp_err_t` 并输出包含引脚/地址的诊断日志。
 5. 明确 API 的线程、阻塞、内存所有权、任务上下文和失败返回值。
 
-新增硬件验证页：
+新增硬件验证能力（`main` 已是产品固件，不再有 demo 菜单）：
 
-1. 创建 `main/demo_<feature>.c`，实现 `enter`、`exit`、`key`。
-2. 在 `main/demo.h` 声明，在 `main/CMakeLists.txt` 加源文件，在 `main.c` 的 `DEMOS[]` 注册。
-3. `enter` 创建并加载自己的 screen；`exit` 先停任务/定时器，再删 screen 和清空指针。
-4. 页面文字保持英文；说明性注释可用中文。
-5. 慢操作放工作任务，结果通过 LVGL 锁更新界面。
-6. 保留 OK 长按返回这一全局交互，不在页面重复实现。
-
-如果菜单项依赖新外设，还需扩展 `s_ok[]` 初始化与失败禁用逻辑。注意当前数组索引与 `DEMOS[]` 顺序隐式对应，修改顺序时必须同步核对。
+1. 能复用 BSP 的直接在控制台 `st` 看状态；需要交互式验证的，可仿照产品模式：按键回调只 `app_event_post`，页面与渲染走 `app_ui` 状态页。
+2. 临时验证页参照 `main` 既有模块的锁纪律（LVGL 写只在 app_task 锁内）与内存纪律（无 >4 KB 连续分配）。
+3. 硬件级验证内容（引脚/ADC/时钟/DMA）按本指南各章节的验收要求记录在 PR 中。
 
 ## 12. 开发环境搭建
 
@@ -349,7 +346,7 @@ idf.py build
 | 能烧录但无日志 | 确认 USB Serial/JTAG 配置和正确端口，不要默认改用 GPIO21 UART TX |
 | 构建目录来自其他 IDF | 激活 5.5.3 后 `idf.py fullclean`，再 set-target/build |
 
-环境验收标准是：`idf.py --version` 正确、`idf.py build` 无错误、设备可烧录、monitor 能看到 `FoloToy AI Passport BSP demo 启动`，并且启动后没有持续重启或 assert。
+环境验收标准是：`idf.py --version` 正确、`idf.py build` 无错误、设备可烧录、monitor 能看到 `AI Passport 固件启动`（最终日志为 `就绪:按键=... 提示音=... 电量=...`），并且启动后没有持续重启或 assert。
 
 ## 13. 构建与验证
 

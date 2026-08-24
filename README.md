@@ -156,6 +156,8 @@ idf.py flash monitor
 
 The first build uses ESP-IDF Component Manager to fetch LVGL, `esp_lvgl_port`, `button`, `esp_codec_dev`, and other dependencies. Do not edit the generated `managed_components/` directory. If configuration state is stale, use `idf.py fullclean` and configure again, but never use it to clean user source changes.
 
+> The current `main` is the **AI Passport firmware MVP** (push-to-talk voice over WebSocket, BLE HID typing, physical-button approvals). Usage, console commands, mock Companion server (`tools/ws_test_server.py`), host tests and the device acceptance checklist are in [README.zh_CN.md](README.zh_CN.md) under “AI Passport 固件 MVP”.
+
 The current baseline includes a pure-logic test that can run independently:
 
 ```bash
