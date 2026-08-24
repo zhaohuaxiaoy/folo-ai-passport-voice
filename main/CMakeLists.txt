@@ -14,6 +14,7 @@ idf_component_register(
          "wifi_app.c"
          "ws_client.c"
          "mdns_resolver.c"
+         "mode.c"
     INCLUDE_DIRS "."
     REQUIRES bsp
              json

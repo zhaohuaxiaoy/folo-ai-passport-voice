@@ -1,7 +1,6 @@
 // main/audio_streamer.c —— 流式音频管线实现。
 #include "audio_streamer.h"
 #include "app_events.h"
-#include "ble_audio.h"
 #include "bsp_audio.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -54,6 +53,12 @@ static TickType_t s_fail_log_at = 0;
 
 static TaskHandle_t s_audio_task = NULL;
 static TaskHandle_t s_ble_task = NULL;
+
+// 音频帧发送函数(通道无关,见 audio_streamer.h)。注册点:main.c boot/模式切换。
+// 默认 NULL:发送一律按失败处理(丢帧计数),管线仍健康(第 6/7 轮语义保持)。
+static audio_send_fn_t s_send_fn = NULL;
+
+void audio_streamer_set_sender(audio_send_fn_t fn) { s_send_fn = fn; }
 
 static void drop_inc(void) {
     portENTER_CRITICAL(&s_drop_mux);
@@ -257,7 +262,7 @@ static void ble_worker(void *arg) {
             ring_empty_give_if();
             continue;
         }
-        int rc = ble_audio_notify_audio(item, len);
+        int rc = s_send_fn ? s_send_fn(item, len) : -1;   // 未注册通道视为发送失败
         vRingbufferReturnItem(s_ring, item);
         ring_empty_give_if();
         if (rc == 0) {
@@ -280,7 +285,7 @@ static void ble_worker(void *arg) {
             s_fail_log_n++;
             if (s_fail_log_at == 0 ||   // 首次失败立即打(之后按 1s 窗口聚合)
                 xTaskGetTickCount() - s_fail_log_at >= pdMS_TO_TICKS(1000)) {
-                ESP_LOGW(TAG, "音频帧 BLE 发送失败,丢弃(%u 帧/窗口)", s_fail_log_n);
+                ESP_LOGW(TAG, "音频帧发送失败,丢弃(%u 帧/窗口)", s_fail_log_n);
                 s_fail_log_n = 0;
                 s_fail_log_at = xTaskGetTickCount();
             }

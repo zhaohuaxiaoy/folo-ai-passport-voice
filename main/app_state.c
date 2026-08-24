@@ -535,5 +535,10 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             emit(out, out_n, max, rt);
         }
         break;
+
+    case APP_EV_MODE_SWITCH:
+        // 不进归约器:main.c 排空循环里直接调 mode_switch()(射频切换与状态机解耦)。
+        // 归约器永不收到该事件 —— 此处仅占位以满足 -Wswitch。
+        break;
     }
 }

@@ -1,7 +1,7 @@
 // tests/fake/fake_rtos.c —— FreeRTOS ringbuf/semphr/task 与外围 BSP/事件/发送
 // 的最小宿主实现。全部基于 pthread,单进程内模拟 audio_streamer 的并发时序。
 // 可控钩子(供 test_audio_streamer.c 断言):
-//   - g_notify_rc / g_notify_block_ms: ble_audio_notify_audio 的返回码与阻塞时长
+//   - g_notify_rc / g_notify_block_ms: link_send_audio(音频帧发送桩)的返回码与阻塞时长
 //   - g_fake_audio_fail: bsp_audio_read 报错(测 AUDIO_ERROR 事件)
 //   - g_events[]: app_event_post 投递记录
 #include <pthread.h>
@@ -12,7 +12,6 @@
 #include <unistd.h>
 
 #include "app_events.h"
-#include "ble_audio.h"
 #include "bsp_audio.h"
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
@@ -222,12 +221,13 @@ void app_event_post(const app_event_t *ev) {
     if (g_event_count < FAKE_EVENT_CAP) g_events[g_event_count++] = *ev;
 }
 
-// --- ble_audio_notify_audio:可配置返回码与阻塞(模拟在途 notify) ---
+// --- link_send_audio:音频帧发送桩(通道抽象后改名,语义同旧 ble_audio_notify_audio)。
+// 可配置返回码与阻塞(模拟在途发送被流控占用);由测试经 audio_streamer_set_sender 注册。
 int g_notify_count = 0;     // 成功到达发送层的帧数(cancel 丢弃的不算)
 int g_notify_rc = 0;        // 返回码(非 0 走丢帧计数路径)
-int g_notify_block_ms = 0;  // 阻塞毫秒(模拟在途 notify 被流控占用)
+int g_notify_block_ms = 0;  // 阻塞毫秒(模拟在途发送被流控占用)
 
-int ble_audio_notify_audio(const uint8_t *frame, size_t len) {
+int link_send_audio(const uint8_t *frame, size_t len) {
     (void)frame; (void)len;
     g_notify_count++;   // 调用即计入(发出/在途);阻塞只是模拟在途占用
     if (g_notify_block_ms > 0) usleep((useconds_t)(g_notify_block_ms * 1000));

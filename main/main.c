@@ -11,6 +11,7 @@
 #include "ble_audio.h"
 #include "console_cmds.h"
 #include "mdns_resolver.h"
+#include "mode.h"
 #include "nvs_settings.h"
 #include "ws_client.h"
 #include "bsp_audio.h"
@@ -40,13 +41,12 @@ static uint64_t s_last_render_ms = 0;    // 上次渲染时刻(S1 降频:非计�
 // 事件排空批上限:每 16 条让出 2ms,防洪峰饿死低优先级投递方(F2)
 #define APP_EVENT_BATCH_MAX 16
 
-// 经 EVENT 特征上行一行(序列化已完成,含 '\n')。异步:ble_audio 非阻塞入队,
-// event_worker 串行发送(最长单片 ~150ms 的抖动被隔离到事件通道,不再压住
-// app_task 渲染/命令路径);无订阅/队列满时由 ble_audio 计数丢弃,此处记日志。
+// 经当前链路通道上行一行(序列化已完成,含 '\n')。异步:BLE 走 event_worker 串行
+// 发送,WiFi 走 WS 文本帧;失败由通道层计数/记日志,此处仅警告。
 static void send_event_line(char *buf, size_t len)
 {
     if (len == 0) return;
-    if (ble_audio_notify_event(buf, len) != 0) {
+    if (mode_send_event_line(buf, len) != 0) {
         ESP_LOGW(TAG, "EVENT 行发送失败,丢弃: %.*s", (int)(len > 64 ? 64 : len), buf);
     }
 }
@@ -169,6 +169,12 @@ static void app_task(void *arg)
         while (xQueueReceive(q, &ev, 0) == pdTRUE) {
             got = true;
             now_ms = esp_timer_get_time() / 1000;
+            if (ev.type == APP_EV_MODE_SWITCH) {
+                // 射频模式切换不进归约器:先投的断连事件会由本循环继续消费,
+                // 状态机幂等收束后再切射频(避免切换期间渲染/按键被冻结过久)。
+                mode_switch((app_mode_t)ev.u.mode_switch.target);
+                continue;
+            }
             uint8_t n = 0;
             app_state_reduce(&s_state, &ev, now_ms, acts, &n);
             run_actions(acts, n);
@@ -297,7 +303,12 @@ void app_main(void)
     // 7. BLE 音频服务(NimBLE 外设 + GATT 0xA2B0,host sync 后自动开广播)
     if (ble_audio_init() != 0) ESP_LOGW(TAG, "BLE 音频服务初始化失败");
 
-    // 8. 控制台与 app 任务(栈 5120:快照 ~250B + 动作 ~544B + TX 512B + LVGL 调用深度;
+    // 8. 双模式(Windows 移植):WiFi/WS/mDNS 栈常驻(不 start),按 NVS 模式只启动
+    //    当前射频;WiFi 模式下蓝牙 controller 彻底关闭(省电)。射频切换会短暂阻塞
+    //    (≤ 数百 ms),boot 期无并发,安全。
+    if (mode_init() != ESP_OK) ESP_LOGW(TAG, "模式初始化失败(按 NVS 兜底)");
+
+    // 9. 控制台与 app 任务(栈 5120:快照 ~250B + 动作 ~544B + TX 512B + LVGL 调用深度;
     //    S3 后 START 音不再同步占栈,同步音 512B 余量转为保险)
     console_init();
     xTaskCreate(app_task, "app_task", 5120, NULL, 4, NULL);

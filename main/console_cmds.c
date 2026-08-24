@@ -1,9 +1,14 @@
 // main/console_cmds.c —— esp_console 命令实现。
-// USB-Serial-JTAG 控制台:查看系统/BLE 状态、重启与出厂复位。
+// USB-Serial-JTAG 控制台:配置模式/Wi-Fi/WS 目标、查看系统状态、重启与出厂复位。
 #include "console_cmds.h"
+#include "app_events.h"
+#include "mode.h"
 #include "nvs_settings.h"
 #include "ble_audio.h"
 #include "audio_streamer.h"
+#include "mdns_resolver.h"
+#include "wifi_app.h"
+#include "ws_client.h"
 #include "bsp_battery.h"
 #include "esp_console.h"
 #include "esp_heap_caps.h"
@@ -17,6 +22,104 @@
 #include <string.h>
 
 static const char *TAG = "console";
+
+// ---- mode:射频模式(手动切换;NVS 持久化)----
+static int cmd_mode(int argc, char **argv)
+{
+    if (argc == 1) {
+        printf("mode: %s\n", mode_name(mode_get()));
+        printf("link: %s\n", mode_link_up() ? "up" : "down");
+        return 0;
+    }
+    if (argc == 2 && strcmp(argv[1], "ble") == 0) {
+        if (mode_get() == APP_MODE_BLE) { printf("already BLE\n"); return 0; }
+        app_event_t e = { .type = APP_EV_MODE_SWITCH, .u.mode_switch = { .target = APP_MODE_BLE } };
+        app_event_post(&e);
+        printf("switching to BLE...\n");
+        return 0;
+    }
+    if (argc == 2 && strcmp(argv[1], "wifi") == 0) {
+        if (mode_get() == APP_MODE_WIFI) { printf("already WiFi\n"); return 0; }
+        app_event_t e = { .type = APP_EV_MODE_SWITCH, .u.mode_switch = { .target = APP_MODE_WIFI } };
+        app_event_post(&e);
+        printf("switching to WiFi...\n");
+        return 0;
+    }
+    printf("usage: mode | mode ble | mode wifi\n");
+    return 1;
+}
+
+// ---- wifi ----
+static int cmd_wifi(int argc, char **argv)
+{
+    if (argc == 1) {
+        char ssid[64] = "", pass[64] = "";
+        if (nvs_settings_get_wifi(ssid, sizeof(ssid), pass, sizeof(pass)) != ESP_OK) {
+            printf("stored ssid: (unreadable)\n");
+        } else {
+            printf("stored ssid: %s\n", ssid[0] ? ssid : "(none)");
+        }
+        printf("connected: %s\n", wifi_app_connected() ? "yes" : "no");
+        printf("ip: %s\n", wifi_app_ip());
+        return 0;
+    }
+    if (strcmp(argv[1], "set") == 0 && argc == 4) {
+        // 密码只写 NVS,绝不回显到控制台
+        esp_err_t e = wifi_app_set_credentials(argv[2], argv[3]);
+        printf("wifi set: %s\n", e == ESP_OK ? "ok" : esp_err_to_name(e));
+        return 0;
+    }
+    if (strcmp(argv[1], "get") == 0) {
+        char ssid[64] = "", pass[64] = "";
+        if (nvs_settings_get_wifi(ssid, sizeof(ssid), pass, sizeof(pass)) != ESP_OK) {
+            printf("ssid: (unreadable)\n");
+            return 0;
+        }
+        printf("ssid: %s pass: %s\n", ssid[0] ? ssid : "(none)",
+               pass[0] ? "***" : "(none)");
+        return 0;
+    }
+    printf("usage: wifi set <ssid> <pass> | wifi get | wifi status\n");
+    return 1;
+}
+
+// ---- ws ----
+static int cmd_ws(int argc, char **argv)
+{
+    if (argc == 1 || strcmp(argv[1], "status") == 0) {
+        char url[128] = "";
+        bool auto_mode;
+        nvs_settings_get_ws_url(url, sizeof(url));
+        nvs_settings_get_ws_mode(&auto_mode);
+        printf("url: %s\n", url);
+        printf("mode: %s\n", auto_mode ? "auto (mDNS)" : "static");
+        printf("connected: %s\n", ws_client_connected() ? "yes" : "no");
+        return 0;
+    }
+    if (strcmp(argv[1], "set") == 0 && argc == 3) {
+        if (strcmp(argv[2], "auto") == 0) {
+            // 切回自动发现:mDNS 可覆盖运行时 URL(不写回 NVS URL)
+            esp_err_t e = nvs_settings_set_ws_mode(true);
+            printf("ws mode: %s\n", e == ESP_OK ? "auto (mDNS)" : esp_err_to_name(e));
+            return 0;
+        }
+        nvs_settings_set_ws_mode(false);   // 显式 URL → static(用户显式优先)
+        esp_err_t e = ws_client_reinit(argv[2]);
+        printf("ws set: %s\n", e == ESP_OK ? "ok" : esp_err_to_name(e));
+        return 0;
+    }
+    printf("usage: ws set <url> | ws set auto | ws status\n");
+    return 1;
+}
+
+// ---- mdns:手动触发解析 ----
+static int cmd_mdns(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    mdns_resolver_request();
+    printf("mDNS 解析已触发(auto 模式);目标变化时自动重连 WS\n");
+    return 0;
+}
 
 // ---- st:状态一览 ----
 static int cmd_st(int argc, char **argv)
@@ -48,6 +151,11 @@ static int cmd_st(int argc, char **argv)
         }
         free(sts);
     }
+    printf("--- link ---\n");
+    printf("mode: %s link: %s\n", mode_name(mode_get()), mode_link_up() ? "up" : "down");
+    printf("wifi: %s ip: %s\n", wifi_app_connected() ? "connected" : "disconnected",
+           wifi_app_ip()[0] ? wifi_app_ip() : "(none)");
+    printf("ws: %s\n", ws_client_connected() ? "connected" : "disconnected");
     printf("--- ble ---\n");
     printf("connected: %s event_subscribed: %s mtu: %u\n",
            ble_audio_connected() ? "yes" : "no",
@@ -99,7 +207,11 @@ static void reg(const char *name, const char *help, const char *hint,
 
 esp_err_t console_cmds_register(void)
 {
-    reg("st", "系统状态一览(BLE 链路/MTU/掉帧/堆)", NULL, cmd_st);
+    reg("mode", "射频模式:mode | mode ble | mode wifi(切换需几秒,期间链路中断)", NULL, cmd_mode);
+    reg("wifi", "Wi-Fi 配置:wifi status | wifi get | wifi set <ssid> <pass>", NULL, cmd_wifi);
+    reg("ws", "WS 目标:ws status | ws set <url> | ws set auto", NULL, cmd_ws);
+    reg("mdns", "手动触发 mDNS 解析", NULL, cmd_mdns);
+    reg("st", "系统状态一览(模式/双链路/MTU/掉帧/堆)", NULL, cmd_st);
     reg("reboot", "重启设备", NULL, cmd_reboot);
     reg("factory", "清空 NVS 并重启", NULL, cmd_factory);
     return ESP_OK;

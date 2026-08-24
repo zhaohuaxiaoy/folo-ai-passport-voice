@@ -77,6 +77,7 @@ typedef enum {
     APP_EV_WS_CONNECTED,    // WS 通道通(link_up 的 WiFi 侧充分条件)
     APP_EV_WS_DISCONNECTED, // WS 通道断(断连/停止)
     APP_EV_WS_TARGET_FOUND, // mDNS 发现 Companion 地址(与缓存不同才投)
+    APP_EV_MODE_SWITCH,     // 射频模式切换请求(不进归约器:main.c 排空循环直接执行)
 } app_event_type_t;
 
 // Agent 状态(与协议字符串互转在 app_protocol.c)
@@ -150,6 +151,7 @@ typedef struct {
         } transcript;                                   // TRANSCRIPT
         struct { uint16_t reason; } wifi_fail;          // WIFI_CONNECT_FAIL
         struct { char url[APP_WS_URL_MAX]; } ws_target; // WS_TARGET_FOUND
+        struct { uint8_t target; } mode_switch;         // MODE_SWITCH(0=BLE/1=WiFi)
     } u;
 } app_event_t;
 

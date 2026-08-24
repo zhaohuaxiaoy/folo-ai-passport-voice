@@ -17,17 +17,19 @@
 
 // fake_rtos.c 提供的可控钩子
 extern int g_notify_count;       // 到达发送层的帧数(cancel 丢弃的不计)
-extern int g_notify_rc;          // notify 返回码(非 0 → 丢帧计数路径)
-extern int g_notify_block_ms;    // notify 阻塞毫秒(模拟在途)
+extern int g_notify_rc;          // 发送桩返回码(非 0 → 丢帧计数路径)
+extern int g_notify_block_ms;    // 发送桩阻塞毫秒(模拟在途)
 extern int g_fake_audio_fail;    // 非 0 → bsp_audio_read 报错
 extern app_event_t g_events[];
 extern int g_event_count;
 extern void fake_reset(void);
+extern int link_send_audio(const uint8_t *frame, size_t len);   // fake 发送桩
 
 static int s_inited = 0;
 static void ensure_init(void) {
     if (!s_inited) {
         assert(audio_streamer_init() == ESP_OK);
+        audio_streamer_set_sender(link_send_audio);   // 注册发送桩(默认 NULL 会全丢)
         s_inited = 1;
     }
 }

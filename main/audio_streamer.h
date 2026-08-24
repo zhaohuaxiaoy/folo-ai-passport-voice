@@ -7,10 +7,19 @@
 #include "esp_err.h"
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+// 音频帧发送函数(通道无关):BLE → ble_audio_notify_audio;WiFi → ws_client_send_bin_blocking。
+// 返回 0 = 已发送;非 0 = 发送失败(丢帧计数路径)。未注册(NULL)时一律按失败处理。
+typedef int (*audio_send_fn_t)(const uint8_t *data, size_t len);
+
+// 注册发送函数。调用点:main.c boot 与模式切换后按当前通道注册;切换前链路已断、
+// 管线已停,不存在并发改指针(设计见 mode.c)。
+void audio_streamer_set_sender(audio_send_fn_t fn);
 
 esp_err_t audio_streamer_init(void);   // 建环形缓冲与两个 worker(空闲等待)
 // 开始采集与发送(清零会话丢帧计数)。若上一次取消的残留仍未排空(系统级异常),
