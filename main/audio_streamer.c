@@ -69,7 +69,13 @@ void audio_streamer_start(void) {
             if (xRingbufferGetCurFreeSize(s_ring) == RING_BYTES) { drained = true; break; }
             vTaskDelay(pdMS_TO_TICKS(5));
         }
-        if (!drained) ESP_LOGW(TAG, "启动前残留未排空(异常),强制恢复丢帧模式");
+        if (!drained) {
+            // 残留未排空(notify 在途 >2s / worker 卡死等系统级异常):拒绝启动,
+            // 不置 s_active,丢帧模式保持——旧帧绝不流入新会话;下次 start 重试。
+            // 若 notify 卡死本也无音频可发,拒绝比泄漏正确。
+            ESP_LOGE(TAG, "启动被拒:上一次取消残留未排空(异常)");
+            return;
+        }
         s_cancel = false;
     }
     if (s_active) return;

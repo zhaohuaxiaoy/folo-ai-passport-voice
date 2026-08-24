@@ -60,7 +60,8 @@ static void test_cancel_drops_remaining(void) {
     audio_streamer_start();               // 新会话:旧残留已清
     usleep(50 * 1000);
     assert(g_notify_count >= 2);
-    audio_streamer_stop();                // 收尾:停流(防下个用例 start 空转)
+    audio_streamer_stop();                // 收尾:停流
+    audio_streamer_cancel();              // 收尾:排空在途尾帧(下个用例零残留)
 }
 
 // 2) 幂等:未采集时取消无害;STOP 后(残留仍待 drain 发送)取消同样丢弃残留
@@ -80,6 +81,7 @@ static void test_cancel_idempotent(void) {
     usleep(40 * 1000);
     assert(g_notify_count > before);
     audio_streamer_stop();
+    audio_streamer_cancel();              // 收尾:排空在途尾帧(下个用例零残留)
 }
 
 // 3) 排空超时:cancel 及时返回,但丢帧模式持续——残留仍被丢弃,绝不流入下次会话;
@@ -101,6 +103,30 @@ static void test_cancel_timeout_keeps_dropping(void) {
     usleep(50 * 1000);
     assert(g_notify_count >= 2);          // 新会话正常
     audio_streamer_stop();
+    audio_streamer_cancel();              // 收尾:排空在途尾帧(下个用例零残留)
+}
+
+// 4) 残留未排空时 start 拒绝启动:不置 active、丢帧模式保持;
+//    排空完成后下次 start 成功(旧帧绝不流入新会话)
+static void test_start_rejected_until_drained(void) {
+    fake_reset();
+    ensure_init();
+    g_notify_block_ms = 1000;             // notify 长时间在途 → cancel 排空超时
+    audio_streamer_start();
+    usleep(50 * 1000);
+    assert(g_notify_count == 1);
+    audio_streamer_cancel();              // ~200ms 超时,s_cancel 保持
+    audio_streamer_start();               // 环未空(残留还在) → 拒绝启动
+    assert(!audio_streamer_active());     // 关键:未进入录音,旧帧未放行
+    usleep(1300 * 1000);                  // notify 完成 + worker 丢完残留
+    g_notify_block_ms = 0;                // 最终会话不留长在途(与 T3 一致;否则 1s 在途
+                                          // notify 跨用例存活,污染下个用例的 cancel/start)
+    audio_streamer_start();               // 排空完成 → 正常启动
+    assert(audio_streamer_active());
+    usleep(50 * 1000);
+    assert(g_notify_count >= 2);          // 新会话正常(旧帧零泄漏)
+    audio_streamer_stop();
+    audio_streamer_cancel();              // 收尾:排空在途尾帧(下个用例零残留)
 }
 
 // 5) 丢帧对账:发送失败计数;取消丢弃的帧不计数
@@ -113,10 +139,16 @@ static void test_drop_accounting(void) {
     audio_streamer_stop();
     assert(audio_streamer_take_drops() > 0);
     assert(event_seen(APP_EV_AUDIO_DROP_START));
+    // stop() 只停采集,不会清理环内残留;先取消收尾,避免下一段 fake_reset
+    // 与上一会话的 ble_worker 在途帧并发,污染时序。
+    audio_streamer_cancel();
 
     fake_reset();
     g_notify_rc = 0;
-    g_notify_block_ms = 200;              // 消费慢 → 环满丢帧(计数 >0)
+    // 消费慢 → 环满丢帧(计数 >0)。必须 < CANCEL_DRAIN_POLLS×5ms(200ms):
+    // 若 ≥200ms,cancel 轮询窗口内排不完 → 残留 s_cancel 传染下一个用例
+    // (新 start() 会拒绝启动,见 test_start_rejected_until_drained 语义)。
+    g_notify_block_ms = 150;
     audio_streamer_start();
     usleep(80 * 1000);
     audio_streamer_stop();                // 停采集:计数冻结(环内残留仍由 worker 发送)
@@ -144,6 +176,7 @@ int main(void) {
     test_cancel_drops_remaining();
     test_cancel_idempotent();
     test_cancel_timeout_keeps_dropping();
+    test_start_rejected_until_drained();
     test_drop_accounting();
     test_audio_error_event();
     printf("test_audio_streamer: all assertions passed\n");
