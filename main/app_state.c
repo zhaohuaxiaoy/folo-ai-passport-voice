@@ -151,14 +151,15 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
                 app_action_t r = { .type = APP_ACT_UI_REFRESH };
                 emit(out, n, max, r);
             } else {
-                // 分帧时序:滴声 → voice.start → 开流(播放完成才采,避免 codec 分时冲突)
+                // 分帧时序:滴声 → voice.start → 开流由 TONE_DONE 驱动(播放完成才采,
+                // 避免 codec 分时冲突)。开流动作移到 TONE_DONE 分支,app_task 不再
+                // 同步阻塞 80ms 播滴声。
                 app_action_t t = { .type = APP_ACT_PLAY_TONE };
                 t.u.tone = APP_TONE_START;
                 emit(out, n, max, t);
                 app_action_t v = { .type = APP_ACT_SEND_VOICE_START };
                 emit(out, n, max, v);
-                app_action_t st = { .type = APP_ACT_STREAM_START };
-                emit(out, n, max, st);
+                s->stream_started = false;
                 s->state = APP_ST_LISTENING;
                 s->state_since_ms = now_ms;
             }
@@ -282,6 +283,15 @@ static void handle_tick(app_state_t *s, uint64_t now_ms, app_action_t *out, uint
     // 状态超时
     const uint64_t elapsed = now_ms - s->state_since_ms;
     switch (s->state) {
+    case APP_ST_LISTENING:
+        // S3 兜底:滴声队列满/声音任务异常 → TONE_DONE 永不来的场景,超时强制开流
+        // (宁可无滴声也不让 PTT 卡死无声)。
+        if (!s->stream_started && elapsed >= APP_TONE_PENDING_TIMEOUT_MS) {
+            app_action_t st = { .type = APP_ACT_STREAM_START };
+            emit(out, n, max, st);
+            s->stream_started = true;
+        }
+        break;
     case APP_ST_TRANSCRIBING:
         if (elapsed >= APP_TRANSCRIBE_TIMEOUT) {
             abort_to_ready(s, now_ms, "STT timeout", out, n, max);
@@ -454,6 +464,16 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
     case APP_EV_AUDIO_ERROR:
         set_toast(s, now_ms, "Audio error");
         abort_to_ready(s, now_ms, NULL, out, out_n, max);
+        break;
+
+    case APP_EV_TONE_DONE:
+        // START 提示音播放完成:开流(幂等)。非 LISTENING(双击取消/单击发送已离开)
+        // 或流已开 → 忽略,保证"滴声先于采集"且取消期间不误开流。
+        if (s->state == APP_ST_LISTENING && !s->stream_started) {
+            app_action_t st = { .type = APP_ACT_STREAM_START };
+            emit(out, out_n, max, st);
+            s->stream_started = true;
+        }
         break;
 
     case APP_EV_TICK:

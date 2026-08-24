@@ -107,10 +107,107 @@ static void test_ptt_offline_online(void) {
     assert(s.state == APP_ST_LISTENING);
     assert(has_action(APP_ACT_PLAY_TONE));                 // 440Hz 就绪音
     assert(has_action(APP_ACT_SEND_VOICE_START));
-    assert(has_action(APP_ACT_STREAM_START));
-    // 顺序契约:就绪音播完 → voice.start → 才开流(避免 codec 分时冲突)
+    assert(!has_action(APP_ACT_STREAM_START));             // S3:开流移出 PRESS 产出,由 TONE_DONE 驱动
+    assert(!s.stream_started);
+    // 顺序契约:就绪音先于 voice.start(动作顺序保证)
     assert_action_order(APP_ACT_PLAY_TONE, APP_ACT_SEND_VOICE_START);
-    assert_action_order(APP_ACT_SEND_VOICE_START, APP_ACT_STREAM_START);
+    // 滴声播完 → TONE_DONE → 开流
+    app_event_t ev = { .type = APP_EV_TONE_DONE };
+    app_state_reduce(&s, &ev, now + 100, out, &on);
+    assert(has_action(APP_ACT_STREAM_START));
+    assert(s.stream_started == true);
+}
+
+// ---- S3:READY+OK PRESS 只产出滴声 + voice.start,开流等 TONE_DONE ----
+static void test_tone_press_produce(void) {
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);    // → READY
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);    // 开录
+    assert(s.state == APP_ST_LISTENING);
+    assert(s.stream_started == false);
+    assert(!has_action(APP_ACT_STREAM_START));
+    app_action_t *t = find_action(APP_ACT_PLAY_TONE);
+    assert(t && t->u.tone == APP_TONE_START);
+    assert(has_action(APP_ACT_SEND_VOICE_START));
+    assert_action_order(APP_ACT_PLAY_TONE, APP_ACT_SEND_VOICE_START);
+}
+
+// ---- S3:TONE_DONE 在 LISTENING 且流未开时开流;重复到达幂等忽略 ----
+static void test_tone_done_idempotent(void) {
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);    // 开录,未开流
+    app_event_t ev = { .type = APP_EV_TONE_DONE };
+    app_state_reduce(&s, &ev, now + 110, out, &on);        // 滴声播完
+    assert(has_action(APP_ACT_STREAM_START));
+    assert(s.stream_started == true);
+    app_state_reduce(&s, &ev, now + 120, out, &on);        // 重复(异常重复投递)
+    assert(on == 0);                                       // 幂等:无动作
+}
+
+// ---- S3:双击取消在滴声期间,迟到的 TONE_DONE 必须忽略(不误开流) ----
+static void test_tone_done_late_after_cancel(void) {
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);    // 按下 #1:入 LISTENING,未开流
+    assert(!has_action(APP_ACT_STREAM_START));
+    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 30);  // 待定
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 200);   // 按下 #2:取消 → READY
+    assert(s.state == APP_ST_READY);
+    app_event_t ev = { .type = APP_EV_TONE_DONE };
+    app_state_reduce(&s, &ev, now + 210, out, &on);        // 滴声播完事件此刻才到
+    assert(on == 0);                                       // 已离开 LISTENING → 忽略
+    assert(!has_action(APP_ACT_STREAM_START));
+}
+
+// ---- S3:单击发送完整序列——先 TONE_DONE 开流,单击窗口到期才停流 ----
+static void test_tone_single_tap_order(void) {
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);    // 开录
+    app_event_t ev = { .type = APP_EV_TONE_DONE };
+    app_state_reduce(&s, &ev, now + 110, out, &on);        // 滴声播完 → 开流
+    assert(has_action(APP_ACT_STREAM_START));
+    assert(s.stream_started == true);
+    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 3000); // 待定
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 3300);  // 窗口到期 → 发送
+    assert(s.state == APP_ST_TRANSCRIBING);
+    assert(has_action(APP_ACT_STREAM_STOP));               // 停流仍由 CLICK 产出
+    assert_action_order(APP_ACT_STREAM_STOP, APP_ACT_SEND_VOICE_END);
+}
+
+// ---- S3:兜底——TICK 500ms 未收 TONE_DONE → 强制开流(防声音任务异常卡死) ----
+static void test_tone_tick_fallback(void) {
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);    // 开录
+    reduce(APP_EV_TICK, s.state_since_ms + 499);           // 499ms 未到阈值
+    assert(!has_action(APP_ACT_STREAM_START));
+    assert(!s.stream_started);
+    reduce(APP_EV_TICK, s.state_since_ms + 500);           // 500ms 到 → 兜底开流
+    assert(has_action(APP_ACT_STREAM_START));
+    assert(s.stream_started == true);
+    // 兜底后迟到的 TONE_DONE:幂等忽略
+    app_event_t ev = { .type = APP_EV_TONE_DONE };
+    app_state_reduce(&s, &ev, now + 600, out, &on);
+    assert(on == 0);
+}
+
+// ---- S3:TONE_DONE 在非 LISTENING 状态(HOME/READY)无动作 ----
+static void test_tone_done_ignored_elsewhere(void) {
+    reset();
+    app_event_t ev = { .type = APP_EV_TONE_DONE };
+    app_state_reduce(&s, &ev, now + 10, out, &on);         // HOME
+    assert(on == 0);
+    s.state = APP_ST_READY;
+    s.state_since_ms = now;
+    app_state_reduce(&s, &ev, now + 20, out, &on);         // READY
+    assert(on == 0);
 }
 
 // ---- LISTENING:松开进入"待定结束",单击到期发送,窗口内再按 = 取消 ----
@@ -573,6 +670,12 @@ int main(void) {
     test_home_nav();
     test_workflow_cycle();
     test_ptt_offline_online();
+    test_tone_press_produce();
+    test_tone_done_idempotent();
+    test_tone_done_late_after_cancel();
+    test_tone_single_tap_order();
+    test_tone_tick_fallback();
+    test_tone_done_ignored_elsewhere();
     test_listening_end();
     test_timeouts();
     test_agent_running_timeout();

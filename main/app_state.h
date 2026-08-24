@@ -19,6 +19,7 @@ typedef struct {
     uint64_t       state_since_ms;  // 进入当前状态的时刻(超时计时)
     uint64_t       toast_until_ms;
     bool           ptt_pending_end; // LISTENING:已松开、等单击窗口定夺(再按=取消,到期=发送)
+    bool           stream_started;  // 本会话采集是否已开(START 音播完后 TONE_DONE 驱动)
     char           toast[APP_TOAST_MAX];
     uint8_t        mac_cpu, mac_ram, mac_batt;
     bool           mac_charging;

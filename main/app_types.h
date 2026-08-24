@@ -69,6 +69,7 @@ typedef enum {
     APP_EV_BLE_DISCONNECTED,// 链路断(连接断开或 EVENT 订阅取消)
     APP_EV_BLE_DROP,        // BLE 事件行因断连/未订阅被丢弃(UI toast 反馈)
     APP_EV_AUDIO_ERROR,     // 采集硬件错误
+    APP_EV_TONE_DONE,       // START 提示音播放完成(异步开流的信号,见 design)
     APP_EV_TICK,            // 100ms 心跳,驱动超时/息屏
 } app_event_type_t;
 
@@ -206,6 +207,7 @@ typedef struct {
 #define APP_TRANSCRIBE_TIMEOUT  30000u   // 转写等待超时
 #define APP_AGENT_RUN_TIMEOUT   90000u   // Agent 执行超时
 #define APP_TICK_MS             100u     // 应用任务心跳
+#define APP_TONE_PENDING_TIMEOUT_MS 500u // S3:START 音后未收 TONE_DONE 的最大等待(兜底开流)
 
 #ifdef __cplusplus
 }

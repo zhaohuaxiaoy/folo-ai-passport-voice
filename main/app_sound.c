@@ -2,6 +2,7 @@
 // 每个音由一个或多个方波段组成(频率×时长),段间无缝衔接。
 // 全部走 16kHz/16bit/单声道 —— 与录音流同格式,bsp_audio_set_format 只调一次。
 #include "app_sound.h"
+#include "app_events.h"
 #include "bsp_audio.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -67,6 +68,12 @@ static void sound_worker(void *arg) {
     for (;;) {
         if (xQueueReceive(s_queue, &tone, portMAX_DELAY) == pdTRUE) {
             play_tone_impl((app_tone_t)tone);
+            // START 音播完 → 通知 app_task 开流(分时语义:滴声先于采集)。
+            // 其余音不需要,不产生事件。
+            if (tone == APP_TONE_START) {
+                app_event_t ev = { .type = APP_EV_TONE_DONE };
+                app_event_post(&ev);
+            }
         }
     }
 }
@@ -92,10 +99,12 @@ esp_err_t app_sound_init(void) {
     return ESP_OK;
 }
 
-void app_sound_play(app_tone_t tone) {
+bool app_sound_play(app_tone_t tone) {
     if (xQueueSend(s_queue, &tone, 0) != pdTRUE) {
         ESP_LOGW(TAG, "提示音队列满,丢弃 %d", (int)tone);
+        return false;
     }
+    return true;
 }
 
 void app_sound_play_sync(app_tone_t tone) {

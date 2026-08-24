@@ -98,9 +98,14 @@ static void run_actions(const app_action_t *acts, uint8_t n)
             audio_streamer_cancel();
             break;
         case APP_ACT_PLAY_TONE:
-            // START 音同步播完才开流(动作顺序保证),其余异步
+            // S3:START 改异步播放,开流由 sound_worker 播完后的 TONE_DONE 事件驱动
+            // (app_state 归约,分时语义保持:滴声先于采集)。app_task 不再阻塞 80ms。
+            // 入队失败(队列满,罕见)兜底:无滴声,立即开流,防 PTT 卡死无声。
             if (a->u.tone == APP_TONE_START) {
-                app_sound_play_sync(APP_TONE_START);
+                if (!app_sound_play(APP_TONE_START)) {
+                    s_state.stream_started = true;   // 同任务上下文,与 reduce 一致
+                    audio_streamer_start();
+                }
             } else {
                 app_sound_play((app_tone_t)a->u.tone);
             }
@@ -254,7 +259,8 @@ void app_main(void)
     // 7. BLE 音频服务(NimBLE 外设 + GATT 0xA2B0,host sync 后自动开广播)
     if (ble_audio_init() != 0) ESP_LOGW(TAG, "BLE 音频服务初始化失败");
 
-    // 8. 控制台与 app 任务(栈 5120:快照 ~250B + 动作 ~544B + TX 512B + 同步音 512B + LVGL 调用深度)
+    // 8. 控制台与 app 任务(栈 5120:快照 ~250B + 动作 ~544B + TX 512B + LVGL 调用深度;
+    //    S3 后 START 音不再同步占栈,同步音 512B 余量转为保险)
     console_init();
     xTaskCreate(app_task, "app_task", 5120, NULL, 4, NULL);
 
