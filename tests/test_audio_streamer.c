@@ -3,7 +3,8 @@
 // 调用了 ESP-IDF 不存在的 API(xRingbufferReset)未被捕获。本测试把 audio_streamer.c
 // 连同 fake ringbuf/semphr/task 一起编译——编译期即可拦截"不存在的 ESP-IDF API"
 // 类回归,运行期覆盖 cancel 的取消/幂等/在途/超时语义。
-// 编译宏:CANCEL_DRAIN_TIMEOUT_MS=200(由 CMake 注入,加速超时路径用例)。
+// 编译宏:WORKER_EXIT_TIMEOUT_MS=200 / CANCEL_DRAIN_TIMEOUT_MS=200(由 CMake
+// 注入,保持显式;F1 后等待为信号量事件驱动,fake 层是真实 pthread 信号量)。
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -50,7 +51,7 @@ static int event_seen(app_event_type_t t) {
 static void test_cancel_drops_remaining(void) {
     fake_reset();
     ensure_init();
-    g_notify_block_ms = 150;              // 第一块进 notify 即阻塞(模拟流控在途,< 200ms 轮询上限)
+    g_notify_block_ms = 150;              // 第一块进 notify 即阻塞(模拟流控在途,< 200ms 信号量超时上限)
     audio_streamer_start();
     usleep(50 * 1000);
     assert(g_notify_count == 1);          // 恰一帧在途(其完成不可撤回)
@@ -89,12 +90,12 @@ static void test_cancel_idempotent(void) {
 static void test_cancel_timeout_keeps_dropping(void) {
     fake_reset();
     ensure_init();
-    g_notify_block_ms = 1000;             // 远超注入的 CANCEL_DRAIN_POLLS×5ms=200ms
+    g_notify_block_ms = 1000;             // 远超注入的 200ms 超时上限
     audio_streamer_start();
     usleep(50 * 1000);
     assert(g_notify_count == 1);
     int64_t t0 = now_ms();
-    audio_streamer_cancel();              // ~200ms 轮询超时即返回
+    audio_streamer_cancel();              // ~200ms 信号量超时即返回
     assert(now_ms() - t0 <= 800);
     usleep(1300 * 1000);                  // notify 结束 + worker 继续丢弃至环空
     assert(g_notify_count == 1);          // 残留从未被发送
@@ -145,8 +146,8 @@ static void test_drop_accounting(void) {
 
     fake_reset();
     g_notify_rc = 0;
-    // 消费慢 → 环满丢帧(计数 >0)。必须 < CANCEL_DRAIN_POLLS×5ms(200ms):
-    // 若 ≥200ms,cancel 轮询窗口内排不完 → 残留 s_cancel 传染下一个用例
+    // 消费慢 → 环满丢帧(计数 >0)。必须 < 200ms 超时上限:
+    // 若 ≥200ms,cancel 超时窗口内排不完 → 残留 s_cancel 传染下一个用例
     // (新 start() 会拒绝启动,见 test_start_rejected_until_drained 语义)。
     g_notify_block_ms = 150;
     audio_streamer_start();

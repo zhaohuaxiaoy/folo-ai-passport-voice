@@ -40,12 +40,14 @@ target_include_directories(test_ble_audio PRIVATE ${MAIN_DIR} ${CJSON_DIR})
 add_test(NAME ble_audio COMMAND test_ble_audio)
 
 # --- 音频流管线(fake RTOS 层在宿主编译,真并发线程;编译期拦截"不存在的
-#     ESP-IDF API"类回归 —— 见 test_audio_streamer.c 头注释;超时用例 40×5ms=200ms) ---
+#     ESP-IDF API"类回归 —— 见 test_audio_streamer.c 头注释;超时用例
+#     注入 200ms(默认即 200,注入保持显式)) ---
 find_package(Threads REQUIRED)
 add_executable(test_audio_streamer test_audio_streamer.c ${MAIN_DIR}/audio_streamer.c
                ${FAKE_DIR}/fake_rtos.c)
 target_include_directories(test_audio_streamer PRIVATE
     ${MAIN_DIR} ${FAKE_DIR} ${BSP_DIR})
-target_compile_definitions(test_audio_streamer PRIVATE CANCEL_DRAIN_POLLS=40)
+target_compile_definitions(test_audio_streamer PRIVATE
+    WORKER_EXIT_TIMEOUT_MS=200 CANCEL_DRAIN_TIMEOUT_MS=200)
 target_link_libraries(test_audio_streamer PRIVATE Threads::Threads)
 add_test(NAME audio_streamer COMMAND test_audio_streamer)

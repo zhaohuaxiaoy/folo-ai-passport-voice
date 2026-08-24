@@ -14,10 +14,14 @@ static const char *TAG = "audio";
 // 100ms @ 16kHz/16bit/mono = 3200B(与 ble_audio AUDIO_FRAME_BYTES 对齐)
 #define CHUNK_BYTES  3200
 #define RING_BYTES   4096   // 静态环,约可容一块
-// 取消排空轮询上限:在途 notify ≤50ms,环内残留 ≤2 块——2s 余量充足。
-// 超时不破坏语义:丢帧模式保留,start() 会先等环空再清标志(见两处)。
-#ifndef CANCEL_DRAIN_POLLS
-#define CANCEL_DRAIN_POLLS 400   // 400 × 5ms = 2s
+// 信号量等待上限(F1 事件化替代轮询):在途 notify ≤50ms,环内残留 ≤2 块——
+// 200ms 余量充足。超时不破坏语义:丢帧模式保留,start() 会先等环空再清标志。
+// 最坏等待从 2.15s(轮询)降到 ≤400ms,典型 <30ms。
+#ifndef WORKER_EXIT_TIMEOUT_MS
+#define WORKER_EXIT_TIMEOUT_MS 200   // 等采集 worker 退出阻塞读(原 30×5ms 轮询)
+#endif
+#ifndef CANCEL_DRAIN_TIMEOUT_MS
+#define CANCEL_DRAIN_TIMEOUT_MS 200  // 等环空(原 400×5ms 轮询)
 #endif
 
 static StaticRingbuffer_t s_ring_struct;
@@ -25,6 +29,12 @@ static uint8_t s_ring_storage[RING_BYTES];
 static RingbufHandle_t s_ring;
 static uint8_t s_chunk[CHUNK_BYTES];     // 采集暂存(静态,零堆)
 static SemaphoreHandle_t s_sem;          // 二值:空闲时两 worker 同等的等待信号
+// F1 事件化等待(替代轮询,取消/收尾不再忙等):
+// s_worker_exit_sem —— audio_worker 退出阻塞读时 give(stop/cancel 等它);
+// s_ring_empty_sem  —— ble_worker 归还块后环空时 give(cancel/start/drain 等它)。
+// 二值信号量记住状态:give 先于 take 则 take 立即返回;多次 give 不计数,无副作用。
+static SemaphoreHandle_t s_worker_exit_sem;
+static SemaphoreHandle_t s_ring_empty_sem;
 static volatile bool s_active = false;
 static volatile bool s_worker_busy = false;  // audio_worker 是否仍在阻塞读中(供 stop/cancel 等待)
 // 丢帧模式:ble_worker 取到块只归还不发送。清除点唯一——start() 在确认环空后清
@@ -51,6 +61,29 @@ static void drop_inc(void) {
     portEXIT_CRITICAL(&s_drop_mux);
 }
 
+// ble_worker 归还块后调用:环空(无残留且在途已归还)时 give 信号量,
+// 唤醒 cancel/start/drain 的等待。归还是唯一使环空闲的操作,检测点唯一正确。
+static void ring_empty_give_if(void) {
+    if (xRingbufferGetCurFreeSize(s_ring) == RING_BYTES) {
+        xSemaphoreGive(s_ring_empty_sem);
+    }
+}
+
+// 等环空(最多 ms 毫秒)。信号量只做唤醒加速,环状态做最终判定:
+// ①先查环,空 → 立即完成(无事件可等时白等超时);
+// ②非空 → 等归还 give(≤50ms 典型)。stale give(上次环空遗留的置位信号量)
+// 只会造成一次无效唤醒,循环再查环判定——绝不会因陈旧事件误判排空。
+// 返回 true ⇔ 判定时环确实空。回绕安全:deadline 差转 int32,负即到期。
+static bool wait_ring_empty(uint32_t ms) {
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(ms);
+    for (;;) {
+        if (xRingbufferGetCurFreeSize(s_ring) == RING_BYTES) return true;
+        TickType_t remain = (TickType_t)(deadline - xTaskGetTickCount());
+        if ((int32_t)remain <= 0) return false;
+        xSemaphoreTake(s_ring_empty_sem, remain);
+    }
+}
+
 static void audio_worker(void *arg);
 static void ble_worker(void *arg);
 
@@ -60,6 +93,10 @@ esp_err_t audio_streamer_init(void) {
     if (!s_ring) return ESP_FAIL;
     s_sem = xSemaphoreCreateBinary();
     if (!s_sem) return ESP_FAIL;
+    s_worker_exit_sem = xSemaphoreCreateBinary();
+    if (!s_worker_exit_sem) return ESP_FAIL;
+    s_ring_empty_sem = xSemaphoreCreateBinary();
+    if (!s_ring_empty_sem) return ESP_FAIL;
 
     // 音频优先:采集(6) > 发送(5),麦克风数据永不因发送慢而丢失采集节奏。
     // 栈:audio 3072 单元(≈12KB;深路径为 bsp_audio_read→esp_codec_dev_read,
@@ -73,15 +110,14 @@ esp_err_t audio_streamer_init(void) {
 
 void audio_streamer_start(void) {
     // 上一个取消若排空超时,丢帧模式残留:先等 worker 丢完环内残留(环空)再恢复。
-    // 这是 s_cancel 的唯一清除点——残留不排空绝不发送(防流入下一次会话)。
+    // s_cancel 的清除点:①cancel 排空成功时②此处兜底(超时残留场景)。
+    // 残留不排空绝不发送(防流入下一次会话)。
     if (s_cancel) {
-        bool drained = false;
-        for (int i = 0; i < CANCEL_DRAIN_POLLS; i++) {
-            if (xRingbufferGetCurFreeSize(s_ring) == RING_BYTES) { drained = true; break; }
-            vTaskDelay(pdMS_TO_TICKS(5));
-        }
+        // 等环空(残留/在途被 worker 归还时 give 唤醒;环已空则直过)。
+        // 超时 → 拒绝启动,丢帧模式保持——旧帧绝不流入新会话。
+        bool drained = wait_ring_empty(CANCEL_DRAIN_TIMEOUT_MS);
         if (!drained) {
-            // 残留未排空(notify 在途 >2s / worker 卡死等系统级异常):拒绝启动,
+            // 残留未排空(notify 在途 >200ms / worker 卡死等系统级异常):拒绝启动,
             // 不置 s_active,丢帧模式保持——旧帧绝不流入新会话;下次 start 重试。
             // 若 notify 卡死本也无音频可发,拒绝比泄漏正确。
             ESP_LOGE(TAG, "启动被拒:上一次取消残留未排空(异常)");
@@ -101,9 +137,10 @@ void audio_streamer_start(void) {
 void audio_streamer_stop(void) {
     if (!s_active) return;
     s_active = false;             // audio worker 在下一次循环退出
-    // 等 worker 退出阻塞读(≤100ms),避免 SEND 提示音与采集尾部重叠写码片
-    for (int i = 0; i < 30 && s_worker_busy; i++) {
-        vTaskDelay(pdMS_TO_TICKS(5));
+    // 等 worker 退出阻塞读(≤100ms,信号量即时返回),避免 SEND 提示音与采集
+    // 尾部重叠写码片。worker 空闲时信号量已置位,take 立即返回。
+    if (s_worker_busy) {
+        xSemaphoreTake(s_worker_exit_sem, pdMS_TO_TICKS(WORKER_EXIT_TIMEOUT_MS));
     }
     if (s_audio_task) {   // 首会话后即达深路径;真机据 HWM 再缩栈(见 init 注释)
         ESP_LOGI(TAG, "栈余量: audio %u/3072, ble %u/4096",
@@ -120,19 +157,23 @@ void audio_streamer_cancel(void) {
     // ③等 audio_worker 退出阻塞读(此后环稳定,不再有新写入)
     // ④等环空(free==RING_BYTES ⇔ 无数据且无在途):残留与在途块已被 worker 归还丢弃。
     // 不用 ring reset API(ESP-IDF 无 xRingbufferReset;且任何"清空"实现都会与
-    // ble_worker 已取未还的在途块冲突)。轮询超时后丢帧模式保留,由 start() 收尾
-    // (先等环空再清标志)——残留绝不会流入下一次会话(正确性优先于及时返回)。
+    // ble_worker 已取未还的在途块冲突)。
+    // 等待为事件驱动(worker 退出信号 + 归还时环空信号),典型 <30ms 返回。
+    // 环可能本就为空(无残留无在途):没有归还 give 事件可等,先查实际状态直过,
+    // 否则会白等超时(信号量是事件不是状态)。排空成功 → 清 s_cancel:残留已
+    // 物理清除,丢弃模式使命完成;仅超时残留时保留,由 start() 兜底收尾——
+    // 残留绝不会流入下一次会话(正确性优先于及时返回)。
     s_active = false;
     s_cancel = true;
-    for (int i = 0; i < 30 && s_worker_busy; i++) {
-        vTaskDelay(pdMS_TO_TICKS(5));
+    if (s_worker_busy) {
+        xSemaphoreTake(s_worker_exit_sem, pdMS_TO_TICKS(WORKER_EXIT_TIMEOUT_MS));
     }
-    bool drained = false;
-    for (int i = 0; i < CANCEL_DRAIN_POLLS; i++) {
-        if (xRingbufferGetCurFreeSize(s_ring) == RING_BYTES) { drained = true; break; }
-        vTaskDelay(pdMS_TO_TICKS(5));
+    bool drained = wait_ring_empty(CANCEL_DRAIN_TIMEOUT_MS);
+    if (drained) {
+        s_cancel = false;
+    } else {
+        ESP_LOGW(TAG, "取消排空超时,start 前继续丢弃残留");
     }
-    if (!drained) ESP_LOGW(TAG, "取消排空超时,start 前继续丢弃残留");
     ESP_LOGI(TAG, "采集取消(残留已排空)");
 }
 
@@ -151,12 +192,12 @@ uint32_t audio_streamer_take_drops(void) {
 // 等环空(最多 ms 毫秒),用于 voice.end 前的帧序保证。
 // 只轮询不消费:环满即还有数据(含 ble_worker 已取走未归还的在飞块),取走不发送=丢队尾。
 void audio_streamer_drain(uint32_t ms) {
-    const TickType_t until = xTaskGetTickCount() + pdMS_TO_TICKS(ms);
-    while (xTaskGetTickCount() < until) {
-        if (xRingbufferGetCurFreeSize(s_ring) == RING_BYTES) return;  // 环已空(含在飞块已归还)
-        vTaskDelay(pdMS_TO_TICKS(10));
+    // 等环空(信号量事件驱动 + 环状态判定,见 wait_ring_empty)。超时仅记日志
+    // ——voice.end 帧序由调用方保证(drain 后发 end),残帧在飞时 end 仍会发,
+    // status 对账帧兜底。
+    if (!wait_ring_empty(ms)) {
+        ESP_LOGW(TAG, "drain 超时,可能仍有残帧在飞");
     }
-    ESP_LOGW(TAG, "drain 超时,可能仍有残帧在飞");
 }
 
 static void audio_worker(void *arg) {
@@ -197,6 +238,7 @@ static void audio_worker(void *arg) {
             }
         }
         s_worker_busy = false;
+        xSemaphoreGive(s_worker_exit_sem);   // F1: 通知 stop/cancel 等此处的等待者
     }
 }
 
@@ -212,10 +254,12 @@ static void ble_worker(void *arg) {
         if (s_cancel) {
             // 取消路径:在途帧直接归还(丢弃,不发送),防残留流入下一次会话
             vRingbufferReturnItem(s_ring, item);
+            ring_empty_give_if();
             continue;
         }
         int rc = ble_audio_notify_audio(item, len);
         vRingbufferReturnItem(s_ring, item);
+        ring_empty_give_if();
         if (rc == 0) {
             // 发送恢复且环已有余量(不再积压)才解除 BLE BUSY——
             // 只靠发送成功不够:若发送慢但一直成功,环满造成的丢帧永远不会被解除

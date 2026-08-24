@@ -35,8 +35,11 @@ SemaphoreHandle_t xSemaphoreCreateBinary(void) {
 }
 
 static void timedwait(FakeSem *s, int64_t ms) {
+    // pthread_cond_timedwait 的绝对超时按 CLOCK_REALTIME 解释(macOS 不支持
+    // MONOTONIC condattr);xTaskGetTickCount 才用 MONOTONIC。用错时钟会让
+    // 时间戳差出"系统启动至今",超时立即失效——F1 引入带超时 take 后必现。
     struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
+    clock_gettime(CLOCK_REALTIME, &ts);
     ts.tv_nsec += (long)(ms % 1000) * 1000000L;
     ts.tv_sec  += (time_t)(ms / 1000) + ts.tv_nsec / 1000000000L;
     ts.tv_nsec %= 1000000000L;
