@@ -182,6 +182,7 @@ typedef struct {
             char task_id[APP_TASK_ID_MAX];
             uint8_t decision;                           // app_approval_decision_t
         } agent_action;                                 // SEND_AGENT_ACTION
+        struct { char url[APP_WS_URL_MAX]; } ws_target; // WS_RETARGET
     } u;
 } app_action_t;
 
@@ -189,10 +190,11 @@ typedef struct {
 typedef struct {
     app_stage_t    state;
     app_workflow_t workflow;
-    bool           link_up;       // false → OFFLINE(BLE DISCONNECTED)横幅 + 禁 PTT;true = EVENT 已订阅
+    bool           link_up;       // false → OFFLINE(link_name DISCONNECTED)横幅 + 禁 PTT;true = 通道已通
     bool           screen_on;
-    bool           net_busy;      // 音频丢帧中 → BLE BUSY
+    bool           net_busy;      // 音频丢帧中 → BUSY 横幅
     bool           ble_connected; // BLE 连接是否建立(未订阅时图标灰色)
+    char           link_name[8];  // 当前链路通道名:"BLE"/"WiFi"(断线横幅按此渲染)
     bool           battery_available;
     uint8_t        battery_soc;   // 0..100
     uint8_t        mac_cpu;       // 0..100

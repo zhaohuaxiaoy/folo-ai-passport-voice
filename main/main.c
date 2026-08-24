@@ -10,7 +10,9 @@
 #include "audio_streamer.h"
 #include "ble_audio.h"
 #include "console_cmds.h"
+#include "mdns_resolver.h"
 #include "nvs_settings.h"
+#include "ws_client.h"
 #include "bsp_audio.h"
 #include "bsp_battery.h"
 #include "bsp_button.h"
@@ -100,6 +102,16 @@ static void run_actions(const app_action_t *acts, uint8_t n)
         case APP_ACT_STREAM_CANCEL:
             // 取消/断链:停采集 + 清残留 + 丢弃在途帧(残留不流入下一次会话)
             audio_streamer_cancel();
+            break;
+        case APP_ACT_WS_RETARGET:
+            // mDNS 发现新目标:运行时改 WS URL(不写 NVS,auto 模式语义)
+            if (ws_client_retarget(a->u.ws_target.url) != ESP_OK) {
+                ESP_LOGW(TAG, "WS retarget 失败: %s", a->u.ws_target.url);
+            }
+            break;
+        case APP_ACT_RESOLVE_SERVICE:
+            // WS 断开后触发 mDNS 重查(节流/退避在 mdns_resolver 内部)
+            mdns_resolver_request();
             break;
         case APP_ACT_PLAY_TONE:
             // S3:START 改异步播放,开流由 sound_worker 播完后的 TONE_DONE 事件驱动

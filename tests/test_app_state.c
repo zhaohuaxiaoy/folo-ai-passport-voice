@@ -666,6 +666,96 @@ static void test_snapshot_link_up(void) {
     assert(snap.ble_connected == false);
 }
 
+// ---- WiFi/WS 通道(Windows 移植):WS_CONNECTED = 链路通(与 BLE 对等) ----
+static void test_ws_link_up(void) {
+    reset();
+    app_event_t c = { .type = APP_EV_WS_CONNECTED };
+    app_state_reduce(&s, &c, now, out, &on);
+    assert(s.link_up == true);
+    assert(s.ble_connected == false);                      // 非 BLE 通道,图标保持灰
+    app_ui_snapshot_t snap;
+    app_state_snapshot(&s, now, &snap);
+    assert(strcmp(snap.link_name, "WiFi") == 0);           // 横幅按通道渲染
+
+    // WiFi 链路下 PTT 可用(HOME 单击进 READY,再按下开录)
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    assert(s.state == APP_ST_READY);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);
+    assert(s.state == APP_ST_LISTENING);
+    assert(has_action(APP_ACT_SEND_VOICE_START));
+}
+
+// ---- WS 断开:停流回 READY + 触发 mDNS 重查 + 通道名保留 ----
+static void test_ws_link_down(void) {
+    reset();
+    s.link_up = true;
+    s.link_channel = 1;
+    s.state = APP_ST_LISTENING;
+    s.state_since_ms = now;
+    app_event_t ev = { .type = APP_EV_WS_DISCONNECTED };
+    app_state_reduce(&s, &ev, now, out, &on);
+    assert(s.link_up == false);
+    assert(s.state == APP_ST_READY);
+    assert(has_action(APP_ACT_STREAM_CANCEL));             // 兜底停流,同 BLE 断连
+    assert(!has_action(APP_ACT_SEND_VOICE_END));           // 会话中止,不发 end
+    assert(has_action(APP_ACT_RESOLVE_SERVICE));           // mDNS 重查,Companion 重启自动重连
+    assert(strstr(s.toast, "offline"));
+
+    // APPROVAL 下断开:保持状态等待重连,但也要重查
+    reset();
+    s.link_up = true;
+    s.link_channel = 1;
+    s.state = APP_ST_APPROVAL;
+    app_state_reduce(&s, &ev, now, out, &on);
+    assert(s.state == APP_ST_APPROVAL);
+    assert(has_action(APP_ACT_RESOLVE_SERVICE));
+
+    // 快照横幅名:BLE 默认 → WiFi 断线后仍显示 WiFi
+    app_ui_snapshot_t snap;
+    app_state_snapshot(&s, now, &snap);
+    assert(strcmp(snap.link_name, "WiFi") == 0);
+}
+
+// ---- WiFi 失败 toast 按 reason 去重;链路恢复后允许再报 ----
+static void test_wifi_fail_dedup(void) {
+    reset();
+    app_event_t a = { .type = APP_EV_WIFI_CONNECT_FAIL, .u.wifi_fail = { .reason = 15 } };
+    app_state_reduce(&s, &a, now, out, &on);
+    assert(strstr(s.toast, "WiFi disconnected"));
+    const char *t1 = s.toast;
+
+    app_state_reduce(&s, &a, now + 10, out, &on);          // 同因重连风暴:不再重复
+    assert(strcmp(s.toast, t1) == 0);
+
+    app_event_t b = { .type = APP_EV_WIFI_CONNECT_FAIL, .u.wifi_fail = { .reason = 201 } };
+    app_state_reduce(&s, &b, now + 20, out, &on);          // 不同原因:允许再报
+    assert(strstr(s.toast, "WiFi disconnected"));
+
+    // 链路恢复(WS 连上)后清位:同因新片段允许再报
+    reset();
+    app_state_reduce(&s, &a, now, out, &on);
+    app_event_t c = { .type = APP_EV_WS_CONNECTED };
+    app_state_reduce(&s, &c, now + 10, out, &on);
+    app_state_reduce(&s, &a, now + 20, out, &on);
+    assert(strstr(s.toast, "WiFi disconnected"));
+}
+
+// ---- mDNS 发现新目标:产出 WS_RETARGET 动作(带 URL) ----
+static void test_ws_target_found(void) {
+    reset();
+    app_event_t ev = { .type = APP_EV_WS_TARGET_FOUND };
+    strcpy(ev.u.ws_target.url, "ws://10.0.0.8:8765");
+    app_state_reduce(&s, &ev, now, out, &on);
+    app_action_t *rt = find_action(APP_ACT_WS_RETARGET);
+    assert(rt != NULL);
+    assert(strcmp(rt->u.ws_target.url, "ws://10.0.0.8:8765") == 0);
+    // 仅改运行时目标,不置链路状态(WS 尚未连接)
+    assert(s.link_up == false);
+    app_ui_snapshot_t snap;
+    app_state_snapshot(&s, now, &snap);
+    assert(strcmp(snap.link_name, "BLE") == 0);
+}
+
 int main(void) {
     test_home_nav();
     test_workflow_cycle();
@@ -697,6 +787,10 @@ int main(void) {
     test_metrics();
     test_snapshot_agent_name();
     test_snapshot_link_up();
+    test_ws_link_up();
+    test_ws_link_down();
+    test_wifi_fail_dedup();
+    test_ws_target_found();
     test_bounded();
     printf("test_app_state: all assertions passed\n");
     return 0;

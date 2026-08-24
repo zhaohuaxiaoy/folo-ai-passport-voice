@@ -388,7 +388,12 @@ void app_ui_render(const app_ui_snapshot_t *snap, uint16_t mic_peak)
                              snap->mac_cpu, snap->mac_ram);
     label_set_if_changed(s_app_label, snap->active_app[0] ? snap->active_app : "");
 
-    // 横幅互斥:OFFLINE(BLE 断线)> BLE BUSY(同位置 BANNER_Y)
+    // 横幅互斥:OFFLINE(通道断线)> BUSY(同位置 BANNER_Y)
+    // 文案按当前链路通道渲染(BLE/WiFi;Windows 移植:WiFi 通道断线显示 WiFi 字样)
+    label_set_fmt_if_changed(s_offline_banner, "%s DISCONNECTED - reconnecting...",
+                             snap->link_name);
+    label_set_fmt_if_changed(s_netbusy_banner, "%s BUSY - dropping frames",
+                             snap->link_name);
     set_hidden(s_offline_banner, snap->link_up);
     set_hidden(s_netbusy_banner, !snap->net_busy || !snap->link_up);
 

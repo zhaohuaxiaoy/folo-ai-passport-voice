@@ -29,6 +29,8 @@ void app_state_init(app_state_t *s) {
     // 链路通 → PTT 可用但音频全丢且无离线横幅)。Mac 连入订阅 EVENT 后翻 true。
     s->ble_connected = false;
     s->link_up = false;
+    s->link_channel = 0;           // 缺省 BLE
+    s->wifi_fail_reason = 0;
 }
 
 static void emit(app_action_t *out, uint8_t *n, uint8_t max, app_action_t a) {
@@ -54,6 +56,8 @@ void app_state_snapshot(const app_state_t *s, uint64_t now_ms, app_ui_snapshot_t
     snap->screen_on        = s->screen_on;
     snap->net_busy         = s->net_busy;
     snap->ble_connected    = s->ble_connected;
+    str_cpy(snap->link_name, sizeof(snap->link_name),
+            s->link_channel == 1 ? "WiFi" : "BLE");
     snap->elapsed_ms       = (uint32_t)(now_ms - s->state_since_ms);
     snap->battery_available = true; // 由主循环在快照后补真实值,见 app_ui
     snap->mac_cpu          = s->mac_cpu;
@@ -440,6 +444,7 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
     case APP_EV_BLE_CONNECTED:
         // 语义:EVENT 特征已订阅(链路通,PTT 可用)
         s->ble_connected = true;
+        s->link_channel = 0;
         s->link_up = true;
         {
             app_action_t b = { .type = APP_ACT_UI_REFRESH };
@@ -449,6 +454,7 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
 
     case APP_EV_BLE_DISCONNECTED:
         s->ble_connected = false;
+        s->link_channel = 0;
         s->link_up = false;
         handle_link_down(s, now_ms, "Mac disconnected", out, out_n, max);
         break;
@@ -480,14 +486,54 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         handle_tick(s, now_ms, out, out_n, max);
         break;
 
-    // WiFi/WS 通道事件(Windows 移植):语义接入在下一步(P2)完成 ——
-    // link_up 对等、断连走 handle_link_down、WIFI_FAIL toast 去重、mDNS 重查动作。
-    // 显式占位以满足 -Wswitch,不产生任何动作。
+    // ---- WiFi/WS 通道(Windows 移植:无蓝牙 PC 走 WiFi,语义与 BLE 对等)----
+
     case APP_EV_WIFI_CONNECTED:
+        // 拿到 IP 只是链路半程:WS 尚未连上,link_up 仍由 WS_CONNECTED 置位。
+        // 无动作 —— 仅信息事件(WS 断开后的自动重连链由 wifi_app 驱动)。
+        break;
+
     case APP_EV_WIFI_CONNECT_FAIL:
+        // 按 reason 去重:重连风暴中同一原因只 toast 一次;不同原因(或链路已恢复
+        // 后的新失败,见 WS_CONNECTED 清位)允许再次提示。
+        if (s->wifi_fail_reason != ev->u.wifi_fail.reason) {
+            s->wifi_fail_reason = ev->u.wifi_fail.reason;
+            set_toast(s, now_ms, "WiFi disconnected");
+            app_action_t r = { .type = APP_ACT_UI_REFRESH };
+            emit(out, out_n, max, r);
+        }
+        break;
+
     case APP_EV_WS_CONNECTED:
+        // 与 BLE_CONNECTED 同构:WS 通道通 = 链路通,PTT 可用
+        s->link_channel = 1;
+        s->link_up = true;
+        s->wifi_fail_reason = 0;   // 链路已恢复:后续新失败允许再次 toast
+        {
+            app_action_t b = { .type = APP_ACT_UI_REFRESH };
+            emit(out, out_n, max, b);
+        }
+        break;
+
     case APP_EV_WS_DISCONNECTED:
+        s->link_up = false;
+        s->wifi_fail_reason = 0;   // 新的失败片段:允许再 toast
+        // 状态收束与 BLE 断连同路径(停流/回 READY/审批保持);toast 文案区分通道
+        handle_link_down(s, now_ms, "Companion offline", out, out_n, max);
+        {
+            // 触发 mDNS 重查:Companion 重启后自动重连(auto 模式)
+            app_action_t rs = { .type = APP_ACT_RESOLVE_SERVICE };
+            emit(out, out_n, max, rs);
+        }
+        break;
+
     case APP_EV_WS_TARGET_FOUND:
+        {
+            // 新目标 ≠ 缓存目标(去重在 mdns_resolver 内部),交给执行器 retarget
+            app_action_t rt = { .type = APP_ACT_WS_RETARGET };
+            str_cpy(rt.u.ws_target.url, sizeof(rt.u.ws_target.url), ev->u.ws_target.url);
+            emit(out, out_n, max, rt);
+        }
         break;
     }
 }
