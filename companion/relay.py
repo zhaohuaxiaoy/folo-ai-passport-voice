@@ -41,6 +41,8 @@ AUDIO_UUID = "0000A2B3-0000-1000-8000-00805F9B34FB"
 DEVICE_NAME = "AI Passport"
 AUDIO_FRAME_BYTES = 3200    # 100ms @16kHz/16bit/mono
 AUDIO_FRAME_SEC = 0.1
+AUDIO_Q_MAX = 100   # 音频帧(3200B)上限 ≈10s 积压;ASR 停顿时丢帧保内存
+EVENT_Q_MAX = 64    # 控制事件上限(正常秒级几条;兜底防失控)
 CTRL_LINE_MAX = 2048        # 对齐固件 APP_PROTO_RX_CAP
 SCAN_TIMEOUT = 15
 # 下行 transcript 单条文本上限 = APP_TRANSCRIPT_MAX(128) - 1(固件 str_take 的
@@ -166,7 +168,12 @@ class Relay:
         self.do_inject = do_inject
         self.do_approval = do_approval
         self.dry_run = dry_run
-        self._queue = asyncio.Queue()
+        # 音频与控制事件分开消费(见 _drain_audio/_drain_events):
+        # ASR 暂停时音频队列有界(丢帧而非无限增长),voice.end/status 等
+        # 控制事件不被音频帧压队(独立队列,即时处理)。
+        self._audio_q = asyncio.Queue(maxsize=AUDIO_Q_MAX)
+        self._event_q = asyncio.Queue(maxsize=EVENT_Q_MAX)
+        self._dropped_audio = 0     # 音频队列满丢弃计数(累计,进程内)
         self._stop = asyncio.Event()
         self._session = None        # 当前 voice 会话(None=空闲)
         self._approval_waiter = None
@@ -211,29 +218,54 @@ class Relay:
     def _on_disconnected(self, *_):
         print("[relay] BLE 连接已断开", file=sys.stderr)
         self._stop.set()
-        self._queue.put_nowait(("stop", b""))
+        self._audio_q.put_nowait(("stop", b""))
+        self._event_q.put_nowait(("stop", b""))
 
     def _cb(self, kind):
         def handler(data):
             # bleak 回调线程安全: 投递到事件循环队列, 由 drain 协程处理
-            self._queue.put_nowait((kind, bytes(data)))
+            payload = bytes(data)
+            if kind == "audio":
+                try:
+                    self._audio_q.put_nowait((kind, payload))
+                except asyncio.QueueFull:
+                    # 有界上限:ASR 卡住时丢音频帧(可容忍,会话级掉帧统计兜底)
+                    self._dropped_audio += 1
+                    if self._dropped_audio % 100 == 1:
+                        print(f"[relay] 音频队列满,丢弃 1 帧"
+                              f"(累计 {self._dropped_audio})", file=sys.stderr)
+            else:
+                try:
+                    self._event_q.put_nowait((kind, payload))
+                except asyncio.QueueFull:
+                    print("[relay] 事件队列满,丢弃控制帧(异常)",
+                          file=sys.stderr)
         return handler
 
     async def _drain(self):
+        # 音频(ASR 慢路径)与控制事件(快路径)各自独立消费:
+        # voice.end/status 等不再排在音频帧后面。
+        await asyncio.gather(self._drain_audio(), self._drain_events())
+
+    async def _drain_audio(self):
         audio_buf = bytearray()
-        event_buf = bytearray()
         while not self._stop.is_set():
-            kind, chunk = await self._queue.get()
+            kind, chunk = await self._audio_q.get()
             if kind == "stop":
                 break
-            if kind == "audio":
-                audio_buf, frames = reassemble_audio(audio_buf, chunk)
-                for fr in frames:
-                    await self._on_audio_frame(fr)
-            else:
-                event_buf, lines = reassemble_event(event_buf, chunk)
-                for ln in lines:
-                    await self._on_event_line(ln)
+            audio_buf, frames = reassemble_audio(audio_buf, chunk)
+            for fr in frames:
+                await self._on_audio_frame(fr)
+
+    async def _drain_events(self):
+        event_buf = bytearray()
+        while not self._stop.is_set():
+            kind, chunk = await self._event_q.get()
+            if kind == "stop":
+                break
+            event_buf, lines = reassemble_event(event_buf, chunk)
+            for ln in lines:
+                await self._on_event_line(ln)
 
     # -- 事件处理 --
 
@@ -279,9 +311,14 @@ class Relay:
         await self._session.begin()
 
     async def _on_audio_frame(self, frame):
-        if self._session is not None:
-            await self._session.feed(frame)
-        # 空闲期音频帧直接丢弃(不计入统计)
+        s = self._session
+        if s is None:
+            return   # 空闲期音频帧直接丢弃(不计入统计)
+        try:
+            await s.feed(frame)
+        except Exception as e:
+            # 会话边界并发:voice.end 已关 ASR 流时在途帧投喂失败——丢弃即可
+            print(f"[audio] 帧投喂失败(会话已结束?): {e}", file=sys.stderr)
 
     async def _on_voice_end(self):
         if self._session is None:

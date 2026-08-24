@@ -37,6 +37,14 @@ static bool s_drop_active = false;           // 共享丢帧标志:采集/发送
 static portMUX_TYPE s_drop_mux = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t s_drop_count = 0;            // 本会话丢帧计数(start 清零;voice.end 后取走上报)
 
+// 发送失败日志限频:拥塞时(无订阅/流控超时)每帧刷 Warning 会反向加重负载。
+// 首帧立即打,之后每秒聚合一条(帧数 = 该 1s 窗口内丢弃数,累计统计走 s_drop_count)。
+static uint32_t s_fail_log_n = 0;
+static TickType_t s_fail_log_at = 0;
+
+static TaskHandle_t s_audio_task = NULL;
+static TaskHandle_t s_ble_task = NULL;
+
 static void drop_inc(void) {
     portENTER_CRITICAL(&s_drop_mux);
     s_drop_count++;
@@ -53,9 +61,12 @@ esp_err_t audio_streamer_init(void) {
     s_sem = xSemaphoreCreateBinary();
     if (!s_sem) return ESP_FAIL;
 
-    // 音频优先:采集(6) > 发送(5),麦克风数据永不因发送慢而丢失采集节奏
-    xTaskCreate(audio_worker, "audio_worker", 4096, NULL, 6, NULL);
-    xTaskCreate(ble_worker, "ble_worker", 4096, NULL, 5, NULL);
+    // 音频优先:采集(6) > 发送(5),麦克风数据永不因发送慢而丢失采集节奏。
+    // 栈:audio 3072 单元(≈12KB;深路径为 bsp_audio_read→esp_codec_dev_read,
+    // 驱动调用栈约 1-1.5KB,余量充足);ble 保留 4096(NimBLE notify 调用链最深,
+    // 不盲砍——stop() 的 uxTaskGetStackHighWaterMark 日志实测后再缩)。
+    xTaskCreate(audio_worker, "audio_worker", 3072, NULL, 6, &s_audio_task);
+    xTaskCreate(ble_worker, "ble_worker", 4096, NULL, 5, &s_ble_task);
     ESP_LOGI(TAG, "流式管线就绪(静态环 %d B,块 %d B)", RING_BYTES, CHUNK_BYTES);
     return ESP_OK;
 }
@@ -93,6 +104,11 @@ void audio_streamer_stop(void) {
     // 等 worker 退出阻塞读(≤100ms),避免 SEND 提示音与采集尾部重叠写码片
     for (int i = 0; i < 30 && s_worker_busy; i++) {
         vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    if (s_audio_task) {   // 首会话后即达深路径;真机据 HWM 再缩栈(见 init 注释)
+        ESP_LOGI(TAG, "栈余量: audio %u/3072, ble %u/4096",
+                 (unsigned)uxTaskGetStackHighWaterMark(s_audio_task),
+                 (unsigned)uxTaskGetStackHighWaterMark(s_ble_task));
     }
     ESP_LOGI(TAG, "采集停止");
 }
@@ -169,9 +185,9 @@ static void audio_worker(void *arg) {
             }
             s_peak = peak;
 
-            if (xRingbufferSend(s_ring, s_chunk, CHUNK_BYTES,
-                                pdMS_TO_TICKS(50)) != pdTRUE) {
-                // 环满:源端丢弃(麦克风继续跑,I2S 驱动自动落样),报 BLE BUSY
+            if (xRingbufferSend(s_ring, s_chunk, CHUNK_BYTES, 0) != pdTRUE) {
+                // 环满:源端立即丢弃(非阻塞——阻塞等空间会拖延下一块采集,
+                // 破坏 100ms 采集节奏;麦克风继续跑,I2S 驱动自动落样),报 BLE BUSY
                 drop_inc();
                 if (!s_drop_active) {
                     s_drop_active = true;
@@ -217,7 +233,13 @@ static void ble_worker(void *arg) {
                 app_event_t ev = { .type = APP_EV_AUDIO_DROP_START };
                 app_event_post(&ev);
             }
-            ESP_LOGW(TAG, "音频帧 BLE 发送失败,丢弃");
+            s_fail_log_n++;
+            if (s_fail_log_at == 0 ||   // 首次失败立即打(之后按 1s 窗口聚合)
+                xTaskGetTickCount() - s_fail_log_at >= pdMS_TO_TICKS(1000)) {
+                ESP_LOGW(TAG, "音频帧 BLE 发送失败,丢弃(%u 帧/窗口)", s_fail_log_n);
+                s_fail_log_n = 0;
+                s_fail_log_at = xTaskGetTickCount();
+            }
         }
     }
 }

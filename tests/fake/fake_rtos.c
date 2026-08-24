@@ -162,9 +162,15 @@ size_t xRingbufferGetCurFreeSize(RingbufHandle_t h) {
 }
 
 // ==================== 任务(线程) ====================
-static int64_t s_ticks_ms = 0;
+// 真实单调毫秒:测试进程内限频类逻辑(如发送失败日志 1s 窗口)需要真实时间;
+// 虚拟 tick(vTaskDelay 推进)在 worker spin 窗口内冻结,会让窗口判定失效。
+static int64_t s_ticks_ms = 0;   // 仅 vTaskDelay 推进(兼容旧语义,不再被读取)
 
-TickType_t xTaskGetTickCount(void) { return (TickType_t)s_ticks_ms; }
+TickType_t xTaskGetTickCount(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (TickType_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}
 
 void vTaskDelay(TickType_t ticks) {
     usleep((useconds_t)(ticks * 1000));
@@ -233,4 +239,9 @@ void fake_reset(void) {
     g_event_count = 0;
     s_ticks_ms = 0;
     memset(g_events, 0, sizeof(g_events));
+}
+
+UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t h) {
+    (void)h;
+    return 2048;
 }

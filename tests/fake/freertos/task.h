@@ -13,3 +13,8 @@ void vTaskDelay(TickType_t ticks);
 
 // 单调递增毫秒计数(vTaskDelay 推进;供 drain 类轮询用)。
 TickType_t xTaskGetTickCount(void);
+
+typedef void *TaskHandle_t;
+
+// 最小宿主桩:返回固定余量(测试仅保证符号可链;真机由 ESP-IDF 实测)。
+UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t h);
