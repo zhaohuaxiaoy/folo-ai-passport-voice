@@ -14,6 +14,11 @@ static const char *TAG = "audio";
 // 100ms @ 16kHz/16bit/mono = 3200B(与 ble_audio AUDIO_FRAME_BYTES 对齐)
 #define CHUNK_BYTES  3200
 #define RING_BYTES   4096   // 静态环,约可容一块
+// 取消排空轮询上限:在途 notify ≤50ms,环内残留 ≤2 块——2s 余量充足。
+// 超时不破坏语义:丢帧模式保留,start() 会先等环空再清标志(见两处)。
+#ifndef CANCEL_DRAIN_POLLS
+#define CANCEL_DRAIN_POLLS 400   // 400 × 5ms = 2s
+#endif
 
 static StaticRingbuffer_t s_ring_struct;
 static uint8_t s_ring_storage[RING_BYTES];
@@ -21,9 +26,10 @@ static RingbufHandle_t s_ring;
 static uint8_t s_chunk[CHUNK_BYTES];     // 采集暂存(静态,零堆)
 static SemaphoreHandle_t s_sem;          // 二值:空闲时两 worker 同等的等待信号
 static volatile bool s_active = false;
-static volatile bool s_worker_busy = false;  // audio_worker 是否仍在阻塞读中(供 stop 等待)
-static volatile bool s_ble_busy = false;     // ble_worker 是否持有在途块(供 cancel 等待)
-static volatile bool s_cancel = false;       // cancel 请求:ble_worker 跳过发送直接归还
+static volatile bool s_worker_busy = false;  // audio_worker 是否仍在阻塞读中(供 stop/cancel 等待)
+// 丢帧模式:ble_worker 取到块只归还不发送。清除点唯一——start() 在确认环空后清
+// (cancel 超时残留时,start 先等 worker 丢完残留再恢复,残留绝不流入下一次会话)。
+static volatile bool s_cancel = false;
 static volatile uint16_t s_peak = 0;
 static bool s_drop_active = false;           // 共享丢帧标志:采集/发送两侧共用一个边沿
 // 丢帧计数由两个 worker(采集环满/发送失败)++、app task 取走——单核下 ++ 非原子,
@@ -55,6 +61,17 @@ esp_err_t audio_streamer_init(void) {
 }
 
 void audio_streamer_start(void) {
+    // 上一个取消若排空超时,丢帧模式残留:先等 worker 丢完环内残留(环空)再恢复。
+    // 这是 s_cancel 的唯一清除点——残留不排空绝不发送(防流入下一次会话)。
+    if (s_cancel) {
+        bool drained = false;
+        for (int i = 0; i < CANCEL_DRAIN_POLLS; i++) {
+            if (xRingbufferGetCurFreeSize(s_ring) == RING_BYTES) { drained = true; break; }
+            vTaskDelay(pdMS_TO_TICKS(5));
+        }
+        if (!drained) ESP_LOGW(TAG, "启动前残留未排空(异常),强制恢复丢帧模式");
+        s_cancel = false;
+    }
     if (s_active) return;
     s_active = true;
     s_peak = 0;
@@ -75,17 +92,26 @@ void audio_streamer_stop(void) {
 }
 
 void audio_streamer_cancel(void) {
-    if (!s_active) return;
-    s_active = false;             // audio worker 在下一次循环退出
-    s_cancel = true;              // ble_worker 跳过发送直接归还(丢弃在途帧)
-    xRingbufferReset(s_ring);     // 清空未发送残留
-    // 等两个 worker 退出(≤150ms):audio 退出阻塞读、ble 归还已取出的块。
-    // 之后环空且在途块已丢弃,残留不会流入下一次会话。
-    for (int i = 0; i < 30 && (s_worker_busy || s_ble_busy); i++) {
+    // 幂等:不检查 s_active——采集可能已停(STOP 后断链),环里残留同样要清。
+    // 语义:①停采集(环不再有新写入;audio_worker 退出前可能已送出最后一块)
+    // ②进丢帧模式(ble_worker 取到块只归还不发送)
+    // ③等 audio_worker 退出阻塞读(此后环稳定,不再有新写入)
+    // ④等环空(free==RING_BYTES ⇔ 无数据且无在途):残留与在途块已被 worker 归还丢弃。
+    // 不用 ring reset API(ESP-IDF 无 xRingbufferReset;且任何"清空"实现都会与
+    // ble_worker 已取未还的在途块冲突)。轮询超时后丢帧模式保留,由 start() 收尾
+    // (先等环空再清标志)——残留绝不会流入下一次会话(正确性优先于及时返回)。
+    s_active = false;
+    s_cancel = true;
+    for (int i = 0; i < 30 && s_worker_busy; i++) {
         vTaskDelay(pdMS_TO_TICKS(5));
     }
-    s_cancel = false;
-    ESP_LOGI(TAG, "采集取消(残留已清)");
+    bool drained = false;
+    for (int i = 0; i < CANCEL_DRAIN_POLLS; i++) {
+        if (xRingbufferGetCurFreeSize(s_ring) == RING_BYTES) { drained = true; break; }
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    if (!drained) ESP_LOGW(TAG, "取消排空超时,start 前继续丢弃残留");
+    ESP_LOGI(TAG, "采集取消(残留已排空)");
 }
 
 bool audio_streamer_active(void) { return s_active; }
@@ -156,22 +182,18 @@ static void ble_worker(void *arg) {
     (void)arg;
     for (;;) {
         size_t len = 0;
-        s_ble_busy = true;                       // 在途块持有标记(cancel 等待用)
         void *item = xRingbufferReceiveUpTo(s_ring, &len, pdMS_TO_TICKS(100),
                                             CHUNK_BYTES);
         if (!item) {
-            s_ble_busy = false;
-            continue;
+            continue;   // 环空:自然态(丢帧模式由 cancel/start 轮询环空收尾)
         }
         if (s_cancel) {
-            // 取消路径:直接归还不发送(在途帧丢弃,防残留流入下一次会话)
+            // 取消路径:在途帧直接归还(丢弃,不发送),防残留流入下一次会话
             vRingbufferReturnItem(s_ring, item);
-            s_ble_busy = false;
             continue;
         }
         int rc = ble_audio_notify_audio(item, len);
         vRingbufferReturnItem(s_ring, item);
-        s_ble_busy = false;
         if (rc == 0) {
             // 发送恢复且环已有余量(不再积压)才解除 BLE BUSY——
             // 只靠发送成功不够:若发送慢但一直成功,环满造成的丢帧永远不会被解除
