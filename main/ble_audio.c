@@ -219,7 +219,13 @@ static const struct ble_gatt_svc_def gatt_defs[] = {
                 .val_handle = &s_event_val_handle,
                 .descriptors = (struct ble_gatt_dsc_def[]) {
                     { .uuid = &(ble_uuid16_t){ BLE_UUID16_INIT(0x2902) }.u,
-                      .att_flags = BLE_ATT_F_READ | BLE_ATT_F_WRITE, },
+                      // WRITE_ENC: 订阅(写 CCCD)要求已加密连接。
+                      // NimBLE 无 NOTIFY_ENC 特征 flag;在描述符上要求加密 →
+                      // 未配对连接订阅被拒(0x0F), macOS 中央访问需加密属性时
+                      // 自动发起配对(Just Works SC), 配对后通知自动加密。
+                      // 防止未配对连接收到明文音频/事件流。
+                      .att_flags = BLE_ATT_F_READ | BLE_ATT_F_WRITE
+                                 | BLE_ATT_F_WRITE_ENC, },
                     { 0 },
                 },
             },
@@ -230,7 +236,8 @@ static const struct ble_gatt_svc_def gatt_defs[] = {
                 .val_handle = &s_audio_val_handle,
                 .descriptors = (struct ble_gatt_dsc_def[]) {
                     { .uuid = &(ble_uuid16_t){ BLE_UUID16_INIT(0x2902) }.u,
-                      .att_flags = BLE_ATT_F_READ | BLE_ATT_F_WRITE, },
+                      .att_flags = BLE_ATT_F_READ | BLE_ATT_F_WRITE
+                                 | BLE_ATT_F_WRITE_ENC, },
                     { 0 },
                 },
             },
