@@ -1,0 +1,414 @@
+// main/app_ui.c —— 产品 UI 实现。见 app_ui.h 布局说明。
+#include "app_ui.h"
+#include "bsp_battery.h"     // 电量(主循环已把真实值补进快照,此处仅渲染)
+#include "bsp_display.h"
+#include "ui_pixel.h"
+#include "lvgl.h"
+#include <string.h>
+
+// ---- 布局常量 ----
+#define BAR_H        26   // 顶栏高
+#define BANNER_Y     28   // OFFLINE / NET BUSY 横幅
+#define BANNER_H     18
+#define CONTENT_Y    48   // 内容区起点
+#define HINT_Y       286  // 各页底部提示行
+#define W            240
+#define H            320
+
+// 顶栏左→右:BLE 图标 12px、电量、CPU/RAM、活跃应用(右对齐截断)
+#define BLE_X        6
+#define BATT_X       24
+#define METRICS_X    64
+
+// ---- 页内部件索引(与 page 切换共用) ----
+typedef struct {
+    lv_obj_t *root;                       // 本页容器(显隐切换)
+    lv_obj_t *home_wf;                    // HOME:当前工作流名
+    lv_obj_t *ready_rows[APP_WF_COUNT];   // READY:行面板(选中态用)
+    lv_obj_t *ready_names[APP_WF_COUNT];  // READY:行文本
+    lv_obj_t *rec_bar_fill;               // LISTENING:音量条填充
+    lv_obj_t *rec_elapsed;                // LISTENING:计时
+    lv_obj_t *tr_message;                 // TRANSCRIBING:消息
+    lv_obj_t *run_state;                  // AGENT_RUNNING:状态名
+    lv_obj_t *run_message;                // AGENT_RUNNING:消息
+    lv_obj_t *ap_risk_banner;             // APPROVAL:风险条
+    lv_obj_t *ap_risk_label;              // APPROVAL:风险文本
+    lv_obj_t *ap_title;                   // APPROVAL:标题
+    lv_obj_t *ap_target;                  // APPROVAL:目标
+    lv_obj_t *ap_diff;                    // APPROVAL:摘要/详情
+} page_t;
+
+static lv_obj_t *s_chrome;                // 顶层容器(lv_layer_top)
+static lv_obj_t *s_ble_icon;
+static lv_obj_t *s_batt_label;
+static lv_obj_t *s_metrics_label;
+static lv_obj_t *s_app_label;
+static lv_obj_t *s_offline_banner;
+static lv_obj_t *s_netbusy_banner;
+static lv_obj_t *s_toast;
+
+static page_t s_pages[APP_ST_COUNT];
+static app_stage_t s_cur_page = APP_ST_COUNT;
+static bool s_last_screen_on = true;
+static lv_obj_t *s_bg;   // 基底屏:所有状态页都是它的子对象(单屏方案)
+
+static const char *const RISK_NAMES[APP_RISK_COUNT] = { "LOW RISK", "MEDIUM RISK", "HIGH RISK" };
+static const uint32_t RISK_COLORS[APP_RISK_COUNT] = { UI_GRASS, UI_YELLOW, UI_RED };
+
+// ---- 基础块(无 LVGL 样式噪音) ----
+static lv_obj_t *block(lv_obj_t *parent, int x, int y, int w, int h, uint32_t color)
+{
+    lv_obj_t *obj = lv_obj_create(parent);
+    lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(obj, x, y);
+    lv_obj_set_size(obj, w, h);
+    lv_obj_set_style_radius(obj, 0, 0);
+    lv_obj_set_style_border_width(obj, 0, 0);
+    lv_obj_set_style_pad_all(obj, 0, 0);
+    lv_obj_set_style_bg_color(obj, lv_color_hex(color), 0);
+    return obj;
+}
+
+static lv_obj_t *label(lv_obj_t *parent, const char *text, const lv_font_t *font,
+                       uint32_t color, int x, int y, int w)
+{
+    lv_obj_t *l = lv_label_create(parent);
+    lv_label_set_text(l, text);
+    lv_obj_set_style_text_font(l, font, 0);
+    lv_obj_set_style_text_color(l, lv_color_hex(color), 0);
+    lv_obj_set_pos(l, x, y);
+    lv_obj_set_width(l, w);
+    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+    return l;
+}
+
+static lv_obj_t *hint_label(lv_obj_t *parent, const char *text)
+{
+    return label(parent, text, &lv_font_montserrat_14, UI_MUTED, 0, HINT_Y, W);
+}
+
+// ---- 基底屏:天空 + 云 + 草地(复用 ui_pixel 视觉语言) ----
+static void build_background(void)
+{
+    lv_obj_t *scr = lv_screen_create();   // v9 规范 API(lv_obj_create(NULL) 亦可,语义不显式)
+    s_bg = scr;
+    lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(UI_SKY), 0);
+    lv_obj_set_style_border_width(scr, 0, 0);
+    lv_obj_set_style_pad_all(scr, 0, 0);
+
+    // 云(简版,取自 ui_pixel_screen_create)
+    block(scr, 189, 15, 43, 10, UI_INK);
+    block(scr, 193, 12, 35, 10, 0xFFFFFF);
+    block(scr, 200, 8, 10, 9, 0xFFFFFF);
+    block(scr, 215, 9, 9, 8, 0xFFFFFF);
+
+    // 草地 + 纹理
+    block(scr, 0, 286, 240, 34, UI_GRASS);
+    block(scr, 0, 286, 240, 4, 0xA7D93E);
+    for (int x = 0; x < 240; x += 30) {
+        block(scr, x, 312, 18, 8, UI_GRASS_DARK);
+        block(scr, x + 18, 316, 12, 4, 0x75452E);
+    }
+    lv_screen_load(scr);
+}
+
+// ---- chrome:常驻顶栏 / 横幅 / Toast(顶层,所有页共用) ----
+static void build_chrome(void)
+{
+    s_chrome = lv_display_layer_top(lv_display_get_default());
+    lv_obj_remove_flag(s_chrome, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(s_chrome, 0, 0);
+
+    // 顶栏
+    lv_obj_t *bar = block(s_chrome, 0, 0, W, BAR_H, UI_INK);
+    (void)bar;
+    s_ble_icon = block(s_chrome, BLE_X, 7, 12, 12, UI_MUTED);   // 断开=灰,连接后改亮色
+    s_batt_label = label(s_chrome, "--", &lv_font_montserrat_14, 0xFFFFFF,
+                         BATT_X, 5, 36);
+    s_metrics_label = label(s_chrome, "", &lv_font_montserrat_14, 0xFFFFFF,
+                            METRICS_X, 5, 104);
+    s_app_label = label(s_chrome, "", &lv_font_montserrat_14, UI_MUTED,
+                        168, 5, 68);
+
+    // OFFLINE 横幅(断线时整宽显示)
+    s_offline_banner = block(s_chrome, 0, BANNER_Y, W, BANNER_H, UI_RED);
+    label(s_offline_banner, "OFFLINE - reconnecting...", &lv_font_montserrat_14,
+          0xFFFFFF, 0, 0, W);
+
+    // NET BUSY(音频丢帧中)
+    s_netbusy_banner = block(s_chrome, 0, BANNER_Y, W, BANNER_H, UI_ORANGE);
+    label(s_netbusy_banner, "NET BUSY - dropping frames", &lv_font_montserrat_14,
+          UI_INK, 0, 0, W);
+
+    // Toast(底部浮层,空文本即隐藏)
+    lv_obj_t *tbg = block(s_chrome, 30, 272, 180, 30, UI_INK);
+    s_toast = label(tbg, "", &lv_font_montserrat_14, 0xFFFFFF, 0, 5, 180);
+}
+
+// ---- 各状态页 ----
+static void build_home(void)
+{
+    page_t *p = &s_pages[APP_ST_HOME];
+    p->root = lv_obj_create(s_bg);   // 基底屏的子对象:切换只显隐,不动活动屏
+    lv_obj_remove_flag(p->root, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(p->root, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(p->root, 0, 0);
+    lv_obj_set_style_pad_all(p->root, 0, 0);
+    lv_obj_set_size(p->root, W, H);
+    lv_obj_set_pos(p->root, 0, 0);
+
+    lv_obj_t *plate = ui_pixel_panel_create(p->root, 20, CONTENT_Y + 8, 200, 40, UI_PAPER);
+    label(plate, "AI PASSPORT", &lv_font_montserrat_20, UI_INK, 0, 8, 200);
+    ui_pixel_mascot_create(p->root, 101, 100);
+    p->home_wf = label(p->root, "", &lv_font_montserrat_20, UI_SKY_DARK, 0, 168, W);
+    label(p->root, "hold OK to enter", &lv_font_montserrat_14, UI_MUTED, 0, 200, W);
+    hint_label(p->root, "OK: ENTER   UP/DOWN: WORKFLOW");
+}
+
+static void build_ready(void)
+{
+    page_t *p = &s_pages[APP_ST_READY];
+    p->root = lv_obj_create(s_bg);   // 基底屏的子对象:切换只显隐,不动活动屏
+    lv_obj_remove_flag(p->root, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(p->root, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(p->root, 0, 0);
+    lv_obj_set_style_pad_all(p->root, 0, 0);
+    lv_obj_set_size(p->root, W, H);
+    lv_obj_set_pos(p->root, 0, 0);
+
+    for (int i = 0; i < APP_WF_COUNT; i++) {
+        int y = CONTENT_Y + 8 + i * 44;
+        lv_obj_t *row = ui_pixel_panel_create(p->root, 20, y, 200, 36, UI_PAPER);
+        p->ready_rows[i] = row;
+        lv_obj_t *l = label(row, APP_WORKFLOW_NAMES[i], &lv_font_montserrat_20,
+                            UI_INK, 0, 6, 200);
+        p->ready_names[i] = l;
+    }
+    hint_label(p->root, "HOLD OK: SPEAK   UP/DOWN: SWITCH");
+}
+
+static void build_listening(void)
+{
+    page_t *p = &s_pages[APP_ST_LISTENING];
+    p->root = lv_obj_create(s_bg);   // 基底屏的子对象:切换只显隐,不动活动屏
+    lv_obj_remove_flag(p->root, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(p->root, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(p->root, 0, 0);
+    lv_obj_set_style_pad_all(p->root, 0, 0);
+    lv_obj_set_size(p->root, W, H);
+    lv_obj_set_pos(p->root, 0, 0);
+
+    block(p->root, 112, CONTENT_Y + 16, 16, 16, UI_RED);       // REC 圆点
+    label(p->root, "REC", &lv_font_montserrat_20, UI_INK, 0, CONTENT_Y + 40, W);
+
+    // 音量条:底框 + 填充(宽度随峰值)
+    block(p->root, 20, 172, 200, 18, UI_INK);
+    p->rec_bar_fill = block(p->root, 22, 174, 0, 14, UI_GRASS);
+
+    p->rec_elapsed = label(p->root, "0s", &lv_font_montserrat_20, UI_INK, 0, 200, W);
+    hint_label(p->root, "RELEASE OK: SEND   DOUBLE-CLICK: CANCEL");
+}
+
+static void build_transcribing(void)
+{
+    page_t *p = &s_pages[APP_ST_TRANSCRIBING];
+    p->root = lv_obj_create(s_bg);   // 基底屏的子对象:切换只显隐,不动活动屏
+    lv_obj_remove_flag(p->root, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(p->root, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(p->root, 0, 0);
+    lv_obj_set_style_pad_all(p->root, 0, 0);
+    lv_obj_set_size(p->root, W, H);
+    lv_obj_set_pos(p->root, 0, 0);
+
+    label(p->root, "Transcribing...", &lv_font_montserrat_20, UI_INK, 0, 96, W);
+    p->tr_message = label(p->root, "", &lv_font_montserrat_14, UI_MUTED, 20, 140, 200);
+    hint_label(p->root, "PLEASE WAIT");
+}
+
+static void build_running(void)
+{
+    page_t *p = &s_pages[APP_ST_AGENT_RUNNING];
+    p->root = lv_obj_create(s_bg);   // 基底屏的子对象:切换只显隐,不动活动屏
+    lv_obj_remove_flag(p->root, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(p->root, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(p->root, 0, 0);
+    lv_obj_set_style_pad_all(p->root, 0, 0);
+    lv_obj_set_size(p->root, W, H);
+    lv_obj_set_pos(p->root, 0, 0);
+
+    block(p->root, 108, 76, 24, 24, UI_SKY_DARK);              // 静态"spinner"块
+    p->run_state = label(p->root, "running", &lv_font_montserrat_20, UI_INK,
+                         0, 112, W);
+    p->run_message = label(p->root, "", &lv_font_montserrat_14, UI_MUTED,
+                           20, 148, 200);
+    hint_label(p->root, "AGENT WORKING...");
+}
+
+static void build_approval(void)
+{
+    page_t *p = &s_pages[APP_ST_APPROVAL];
+    p->root = lv_obj_create(s_bg);   // 基底屏的子对象:切换只显隐,不动活动屏
+    lv_obj_remove_flag(p->root, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(p->root, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(p->root, 0, 0);
+    lv_obj_set_style_pad_all(p->root, 0, 0);
+    lv_obj_set_size(p->root, W, H);
+    lv_obj_set_pos(p->root, 0, 0);
+
+    p->ap_risk_banner = block(p->root, 20, CONTENT_Y + 8, 200, 28, UI_GRASS);
+    p->ap_risk_label = label(p->ap_risk_banner, "", &lv_font_montserrat_14, UI_INK,
+                             0, 5, 200);
+
+    p->ap_title = label(p->root, "", &lv_font_montserrat_20, UI_INK, 20, 108, 200);
+    lv_obj_set_style_text_align(p->ap_title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(p->ap_title, LV_LABEL_LONG_WRAP);
+
+    p->ap_target = label(p->root, "", &lv_font_montserrat_14, UI_SKY_DARK, 20, 150, 200);
+    p->ap_diff = label(p->root, "", &lv_font_montserrat_14, UI_MUTED, 20, 176, 200);
+    lv_obj_set_style_text_align(p->ap_diff, LV_TEXT_ALIGN_LEFT, 0);
+    lv_label_set_long_mode(p->ap_diff, LV_LABEL_LONG_WRAP);
+    lv_obj_set_height(p->ap_diff, 88);
+
+    hint_label(p->root, "OK: APPROVE   UP: REJECT   DOWN: DETAILS");
+}
+
+static void build_done(void)
+{
+    page_t *p = &s_pages[APP_ST_DONE];
+    p->root = lv_obj_create(s_bg);   // 基底屏的子对象:切换只显隐,不动活动屏
+    lv_obj_remove_flag(p->root, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(p->root, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(p->root, 0, 0);
+    lv_obj_set_style_pad_all(p->root, 0, 0);
+    lv_obj_set_size(p->root, W, H);
+    lv_obj_set_pos(p->root, 0, 0);
+
+    // 对勾块状画
+    block(p->root, 96, 96, 48, 48, UI_GRASS);
+    block(p->root, 108, 112, 8, 18, 0xFFFFFF);
+    block(p->root, 108, 122, 22, 8, 0xFFFFFF);
+    block(p->root, 122, 108, 8, 8, 0xFFFFFF);
+    block(p->root, 122, 116, 8, 8, 0xFFFFFF);
+
+    label(p->root, "DONE", &lv_font_montserrat_20, UI_INK, 0, 164, W);
+    label(p->root, "text injected into your editor", &lv_font_montserrat_14,
+          UI_MUTED, 0, 196, W);
+    hint_label(p->root, "OK OR DOWN: BACK TO HOME");
+}
+
+static void set_hidden(lv_obj_t *o, bool hidden)
+{
+    if (hidden) lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_remove_flag(o, LV_OBJ_FLAG_HIDDEN);
+}
+
+// ---- 页切换 ----
+static void show_page(app_stage_t st)
+{
+    if (st == s_cur_page) return;
+    if (s_cur_page < APP_ST_COUNT) lv_obj_add_flag(s_pages[s_cur_page].root, LV_OBJ_FLAG_HIDDEN);
+    if (st < APP_ST_COUNT) lv_obj_remove_flag(s_pages[st].root, LV_OBJ_FLAG_HIDDEN);
+    s_cur_page = st;
+}
+
+esp_err_t app_ui_init(void)
+{
+    build_background();
+    build_chrome();
+    build_home();
+    build_ready();
+    build_listening();
+    build_transcribing();
+    build_running();
+    build_approval();
+    build_done();
+    for (int i = 0; i < APP_ST_COUNT; i++) {
+        lv_obj_add_flag(s_pages[i].root, LV_OBJ_FLAG_HIDDEN);
+    }
+    show_page(APP_ST_HOME);
+    return ESP_OK;
+}
+
+// ---- 渲染 ----
+void app_ui_render(const app_ui_snapshot_t *snap, uint16_t mic_peak)
+{
+    // 息屏/唤醒:背光切换(内容照常更新,唤醒后即为最新)
+    if (snap->screen_on != s_last_screen_on) {
+        bsp_display_backlight(snap->screen_on ? 100 : 0);
+        s_last_screen_on = snap->screen_on;
+    }
+    if (!snap->screen_on) return;
+
+    // ---- chrome ----
+    lv_obj_set_style_bg_color(s_ble_icon,
+        lv_color_hex(snap->ble_connected ? 0x7CD6FF : UI_MUTED), 0);
+    if (snap->battery_available) {
+        lv_label_set_text_fmt(s_batt_label, "%d%%", snap->battery_soc);
+    } else {
+        lv_label_set_text(s_batt_label, "--");
+    }
+    lv_label_set_text_fmt(s_metrics_label, "CPU %d  RAM %d",
+                          snap->mac_cpu, snap->mac_ram);
+    lv_label_set_text(s_app_label, snap->active_app[0] ? snap->active_app : "");
+
+    set_hidden(s_offline_banner, snap->ws_connected);
+    set_hidden(s_netbusy_banner, !snap->net_busy);
+
+    if (snap->toast[0]) {
+        lv_label_set_text(s_toast, snap->toast);
+        set_hidden(lv_obj_get_parent(s_toast), false);
+    } else {
+        set_hidden(lv_obj_get_parent(s_toast), true);
+    }
+
+    // ---- 页内容 ----
+    show_page(snap->state);
+    switch (snap->state) {
+    case APP_ST_HOME:
+        lv_label_set_text(s_pages[APP_ST_HOME].home_wf,
+                          APP_WORKFLOW_NAMES[snap->workflow]);
+        break;
+    case APP_ST_READY:
+        for (int i = 0; i < APP_WF_COUNT; i++) {
+            ui_pixel_set_selected(s_pages[APP_ST_READY].ready_rows[i],
+                                  i == (int)snap->workflow, true);
+        }
+        break;
+    case APP_ST_LISTENING: {
+        uint16_t peak = mic_peak > 32768 ? 32768 : mic_peak;
+        int w = (int)((uint32_t)peak * 196 / 32768);
+        lv_obj_set_width(s_pages[APP_ST_LISTENING].rec_bar_fill, w);
+        // 音量高时条变橙/红
+        uint32_t c = w > 150 ? UI_RED : (w > 70 ? UI_ORANGE : UI_GRASS);
+        lv_obj_set_style_bg_color(s_pages[APP_ST_LISTENING].rec_bar_fill,
+                                  lv_color_hex(c), 0);
+        lv_label_set_text_fmt(s_pages[APP_ST_LISTENING].rec_elapsed, "%ds",
+                              snap->elapsed_ms / 1000);
+        break;
+    }
+    case APP_ST_TRANSCRIBING:
+        lv_label_set_text(s_pages[APP_ST_TRANSCRIBING].tr_message,
+                          snap->agent_message);
+        break;
+    case APP_ST_AGENT_RUNNING:
+        lv_label_set_text(s_pages[APP_ST_AGENT_RUNNING].run_state,
+                          snap->agent_state_name);
+        lv_label_set_text(s_pages[APP_ST_AGENT_RUNNING].run_message,
+                          snap->agent_message);
+        break;
+    case APP_ST_APPROVAL: {
+        uint8_t r = snap->approval_risk < APP_RISK_COUNT ? snap->approval_risk : APP_RISK_MEDIUM;
+        lv_obj_set_style_bg_color(s_pages[APP_ST_APPROVAL].ap_risk_banner,
+                                  lv_color_hex(RISK_COLORS[r]), 0);
+        lv_label_set_text(s_pages[APP_ST_APPROVAL].ap_risk_label, RISK_NAMES[r]);
+        lv_label_set_text(s_pages[APP_ST_APPROVAL].ap_title, snap->approval_title);
+        lv_label_set_text_fmt(s_pages[APP_ST_APPROVAL].ap_target, "target: %s",
+                              snap->approval_target);
+        lv_label_set_text(s_pages[APP_ST_APPROVAL].ap_diff, snap->approval_diff);
+        break;
+    }
+    default:
+        break;
+    }
+}
