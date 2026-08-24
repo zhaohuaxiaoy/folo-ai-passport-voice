@@ -25,9 +25,10 @@ void app_state_init(app_state_t *s) {
     s->state = APP_ST_HOME;
     s->workflow = APP_WF_BUILD;
     s->screen_on = true;
-    // 启动瞬间无从判断,先按"链路通"渲染;未订阅时由 BLE 事件翻为 false
-    s->ble_connected = true;
-    s->link_up = true;
+    // 开机即按"未连接"渲染(无 Mac 时不会收到断开事件,初始 true 会一直误判为
+    // 链路通 → PTT 可用但音频全丢且无离线横幅)。Mac 连入订阅 EVENT 后翻 true。
+    s->ble_connected = false;
+    s->link_up = false;
 }
 
 static void emit(app_action_t *out, uint8_t *n, uint8_t max, app_action_t a) {
@@ -173,9 +174,13 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             app_action_t r = { .type = APP_ACT_UI_REFRESH };
             emit(out, n, max, r);
         } else if (ev->type == APP_EV_KEY_PRESS && b == APP_BTN_OK && s->ptt_pending_end) {
-            // 双击的第二次按下:立即取消(不用等 DOUBLE 事件,响应更快)
-            app_action_t st = { .type = APP_ACT_STREAM_STOP };
+            // 双击的第二次按下:立即取消(不用等 DOUBLE 事件,响应更快)。
+            // CANCEL 清残留(防流入下一次会话) + voice.end 结束 Mac 端会话
+            // (否则 relay 的 ASR 会话悬挂到超时)。
+            app_action_t st = { .type = APP_ACT_STREAM_CANCEL };
             emit(out, n, max, st);
+            app_action_t v = { .type = APP_ACT_SEND_VOICE_END };
+            emit(out, n, max, v);
             s->ptt_pending_end = false;
             set_toast(s, now_ms, "Recording cancelled");
             abort_to_ready(s, now_ms, NULL, out, n, max); // toast 已设,不再覆盖
@@ -196,8 +201,10 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             emit(out, n, max, r);
         } else if (ev->type == APP_EV_KEY_DOUBLE && b == APP_BTN_OK) {
             // 防御分支:某些驱动在双击检测中抑制第二次 PRESS_DOWN,届时由 DOUBLE 取消
-            app_action_t st = { .type = APP_ACT_STREAM_STOP };
+            app_action_t st = { .type = APP_ACT_STREAM_CANCEL };
             emit(out, n, max, st);
+            app_action_t v = { .type = APP_ACT_SEND_VOICE_END };
+            emit(out, n, max, v);
             s->ptt_pending_end = false;
             set_toast(s, now_ms, "Recording cancelled");
             abort_to_ready(s, now_ms, NULL, out, n, max);
@@ -294,7 +301,8 @@ static void handle_tick(app_state_t *s, uint64_t now_ms, app_action_t *out, uint
 // 审批保持:等待 Mac 重连后重发请求。
 static void handle_link_down(app_state_t *s, uint64_t now_ms, const char *toast,
                              app_action_t *out, uint8_t *n, uint8_t max) {
-    app_action_t st = { .type = APP_ACT_STREAM_STOP };
+    // CANCEL:断链时无 Mac 可发,清残留防断链前的帧流入下一次会话
+    app_action_t st = { .type = APP_ACT_STREAM_CANCEL };
     emit(out, n, max, st);   // 幂等,未开流时执行器无副作用
     set_toast(s, now_ms, toast);   // 任何状态都提示断开(审批保持等场景也可见)
     switch (s->state) {

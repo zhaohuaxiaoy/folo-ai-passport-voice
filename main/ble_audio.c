@@ -26,8 +26,10 @@ size_t ble_audio_chunk_count(size_t frame_len, uint16_t mtu) {
 size_t ble_audio_chunk_len(size_t frame_len, uint16_t mtu, size_t idx) {
     if (!frame_valid(frame_len, mtu)) return 0;
     size_t chunk = (size_t)mtu - PAYLOAD_OVERHEAD;
+    // 越界预判用除法(避免 idx*chunk 在超大 idx 时乘法回绕溢出后误判未越界)
+    size_t count = frame_len / chunk + (frame_len % chunk != 0);
+    if (idx >= count) return 0;
     size_t off = idx * chunk;
-    if (off >= frame_len) return 0;
     size_t remain = frame_len - off;
     return remain < chunk ? remain : chunk;
 }
@@ -113,6 +115,7 @@ static const char *TAG = "ble_audio";
 
 #define DEVICE_NAME "AI Passport"
 #define TX_CHUNK_TIMEOUT_MS 50   // 单片 NOTIFY_TX 等待上限(2M 加密 ~10ms/514B,留余量;超时=拥塞丢帧)
+#define TX_MUTEX_TIMEOUT_MS 100  // 发送互斥等待上限(另一发送者单片 ≤50ms,此值留双倍余量)
 
 // 服务 128-bit:0000A2B0-0000-1000-8000-00805F9B34FB(BLE_UUID128_INIT 为小端字节序,
 // 写法仿旧 ble_provisioning 的 prov_svc_uuid)
@@ -135,8 +138,12 @@ static volatile bool s_event_subscribed = false;   // EVENT CCCD 已订阅(链�
 static volatile uint32_t s_drop_audio = 0;         // 音频 notify 失败丢弃累计
 static volatile uint32_t s_drop_event = 0;         // 事件行 notify 失败丢弃累计
 
-// NOTIFY_TX 流控:host 回调每片给一次信号量,发送任务等(超时=链路异常)
+// NOTIFY_TX 流控:host 回调每片给一次信号量,发送任务等(超时=链路异常)。
+// 发送者有两个:audio worker(音频帧)与 app task(事件行)。完成信号是共享的,
+// 并发发送会互相消费信号 → 误判超时/丢帧。用互斥锁把"清残留→notify→等完成"
+// 串行化,信号消费与发送一一对应。
 static SemaphoreHandle_t s_tx_done_sem;
+static SemaphoreHandle_t s_tx_mutex;
 static volatile uint16_t s_tx_status = 0;
 
 static void start_advertising(void);
@@ -144,23 +151,34 @@ static void start_advertising(void);
 // ---- 单片 notify:发完等 NOTIFY_TX 完成再返回(调用方按返回值决定是否继续下一片) ----
 static bool notify_one(uint16_t conn_handle, uint16_t val_handle,
                        const void *data, size_t len) {
+    // 互斥等待超时 = 另一发送者长时间占用(链路拥塞),按丢帧处理
+    if (xSemaphoreTake(s_tx_mutex, pdMS_TO_TICKS(TX_MUTEX_TIMEOUT_MS)) != pdTRUE) {
+        ESP_LOGW(TAG, "TX 互斥等待超时(handle=%u),按丢帧处理", val_handle);
+        return false;
+    }
     struct os_mbuf *om = ble_hs_mbuf_from_flat(data, len);
-    if (!om) { ESP_LOGW(TAG, "mbuf 分配失败"); return false; }
+    if (!om) {
+        xSemaphoreGive(s_tx_mutex);
+        ESP_LOGW(TAG, "mbuf 分配失败");
+        return false;
+    }
     xSemaphoreTake(s_tx_done_sem, 0);   // 清残留完成信号(上片超时遗留)
     int rc = ble_gatts_notify_custom(conn_handle, val_handle, om);
     if (rc != 0) {
+        xSemaphoreGive(s_tx_mutex);
         ESP_LOGW(TAG, "notify 失败 %d(handle=%u len=%u)", rc, val_handle, (unsigned)len);
         return false;
     }
+    bool ok = true;
     if (xSemaphoreTake(s_tx_done_sem, pdMS_TO_TICKS(TX_CHUNK_TIMEOUT_MS)) != pdTRUE) {
         ESP_LOGW(TAG, "NOTIFY_TX 超时(handle=%u len=%u),按丢帧处理", val_handle, (unsigned)len);
-        return false;
-    }
-    if (s_tx_status != 0) {
+        ok = false;
+    } else if (s_tx_status != 0) {
         ESP_LOGW(TAG, "NOTIFY_TX 错误 status=%u(handle=%u)", s_tx_status, val_handle);
-        return false;
+        ok = false;
     }
-    return true;
+    xSemaphoreGive(s_tx_mutex);
+    return ok;
 }
 
 // ---- GATT server 事件:NimBLE 完成一次 notify 传输后回调(host 任务上下文) ----
@@ -361,6 +379,8 @@ int ble_audio_init(void) {
 
     s_tx_done_sem = xSemaphoreCreateBinary();
     if (!s_tx_done_sem) { ESP_LOGE(TAG, "TX 完成信号量创建失败"); return -1; }
+    s_tx_mutex = xSemaphoreCreateMutex();
+    if (!s_tx_mutex) { ESP_LOGE(TAG, "TX 互斥锁创建失败"); return -1; }
 
     ble_hs_cfg.sync_cb = on_sync;
     // Just Works 无输入输出配对(macOS 主动发起);CONFIG_BT_NIMBLE_SM_SC=y 只允许 SC 配对

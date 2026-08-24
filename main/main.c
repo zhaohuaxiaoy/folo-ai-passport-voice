@@ -58,13 +58,15 @@ static void run_actions(const app_action_t *acts, uint8_t n)
             send_event_line(buf, len);
             break;
         case APP_ACT_SEND_VOICE_END:
-            // 帧序保证:等残留音频块先出环,再发 voice.end;随后补发 status 帧(会话丢帧对账)
+            // 帧序保证:等残留音频块先出环,再发 voice.end;随后补发 status 帧(会话丢帧对账)。
+            // drain 之后采集已停(前面 STOP/CANCEL 已执行)且环已排空,丢帧计数稳定,
+            // 此刻取走才是本会话完整计数(此前取会漏掉 worker 最后一次丢帧)。
             audio_streamer_drain(500);
+            s_last_drop_count = audio_streamer_take_drops();
             len = app_protocol_voice_end(buf, sizeof(buf));
             send_event_line(buf, len);
             len = app_protocol_device_status(buf, sizeof(buf), s_last_drop_count);
             send_event_line(buf, len);
-            s_last_drop_count = 0;
             break;
         case APP_ACT_SEND_WORKFLOW_SWITCH:
             len = app_protocol_workflow_switch(buf, sizeof(buf),
@@ -78,12 +80,17 @@ static void run_actions(const app_action_t *acts, uint8_t n)
             send_event_line(buf, len);
             break;
         case APP_ACT_STREAM_START:
+            // 新会话:清零对账计数(上一次会话若断链无 voice.end,计数在此丢弃)
+            s_last_drop_count = 0;
             audio_streamer_start();
             break;
         case APP_ACT_STREAM_STOP:
-            // 取走本会话丢帧数(取消/结束/断链兜底都走这里;取消时无 voice.end,计数不残留)
-            s_last_drop_count = audio_streamer_take_drops();
+            // 正常结束:只停采集,残留帧由后续 SEND_VOICE_END 的 drain 排空并取计数
             audio_streamer_stop();
+            break;
+        case APP_ACT_STREAM_CANCEL:
+            // 取消/断链:停采集 + 清残留 + 丢弃在途帧(残留不流入下一次会话)
+            audio_streamer_cancel();
             break;
         case APP_ACT_PLAY_TONE:
             // START 音同步播完才开流(动作顺序保证),其余异步

@@ -3,6 +3,7 @@
 // CTRL 下行解析复用 app_protocol_parse,断言 app_types 事件字段。
 #include <assert.h>
 #include <stdio.h>
+#include <stdint.h>   // SIZE_MAX
 #include <string.h>
 #include "ble_audio.h"
 #include "app_protocol.h"
@@ -48,6 +49,12 @@ static void test_chunk_len_sequence(void) {
     // 非法参数
     assert(ble_audio_chunk_len(0, 247, 0) == 0);
     assert(ble_audio_chunk_len(3200, 10, 0) == 0);
+
+    // #6 越界预判:除法求 count,超大 idx 不得经乘法回绕后误判"未越界"返回非零。
+    // (旧实现 idx*chunk 在 idx≈SIZE_MAX 时回绕到低地址,off < frame_len 误通过)
+    assert(ble_audio_chunk_count(SIZE_MAX, 517) == SIZE_MAX / 514 + 1);   // ceil 无溢出
+    assert(ble_audio_chunk_len(SIZE_MAX, 517, SIZE_MAX / 514 + 1) == 0);  // 恰等于 count:越界
+    assert(ble_audio_chunk_len(SIZE_MAX, 517, SIZE_MAX) == 0);            // 极端 idx:越界
 }
 
 // 一次性打包 → 重拼 → 与原始帧逐字节一致;同时断言每片 ≤ MTU-3、指针零拷贝落在帧内

@@ -155,6 +155,7 @@ typedef enum {
     APP_ACT_SEND_AGENT_ACTION,
     APP_ACT_STREAM_START,
     APP_ACT_STREAM_STOP,
+    APP_ACT_STREAM_CANCEL,   // 取消/断链:停采集 + 清空 ring + 丢弃在途帧(与 STOP 区别:不排空发送)
     APP_ACT_PLAY_TONE,
 } app_action_type_t;
 

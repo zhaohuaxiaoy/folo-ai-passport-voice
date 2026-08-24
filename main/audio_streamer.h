@@ -14,13 +14,15 @@ extern "C" {
 
 esp_err_t audio_streamer_init(void);   // 建环形缓冲与两个 worker(空闲等待)
 void audio_streamer_start(void);       // 开始采集与发送(清零会话丢帧计数)
-void audio_streamer_stop(void);        // 停止采集(发送 worker 继续排空)
+void audio_streamer_stop(void);        // 停止采集(发送 worker 继续排空,voice.end 前须 drain)
+// 取消/断链:停采集 + 清空 ring + 丢弃在途帧(不等残留发送,防残留流入下一次会话)。
+void audio_streamer_cancel(void);
 // 等待环内残留数据发送完(最多 ms)。voice.end 前调用保证帧序。
 void audio_streamer_drain(uint32_t ms);
 bool audio_streamer_active(void);
 uint16_t audio_streamer_peak(void);    // 最近一块的峰值采样(UI 音量条用)
-// 读走本会话(自上次 start)累计丢帧数并清零。main.c 在 STREAM_STOP 后取走,
-// 随 voice.end 后的 status 帧上报 Mac(掉帧对账)。
+// 读走本会话(自上次 start)累计丢帧数并清零。main.c 在 SEND_VOICE_END 的 drain 之后
+// 取走(采集已停 + 环已排空,计数稳定),随 voice.end 后的 status 帧上报 Mac(掉帧对账)。
 uint32_t audio_streamer_take_drops(void);
 
 #ifdef __cplusplus

@@ -142,8 +142,8 @@ static void test_listening_double_cancel(void) {
     assert(s.state == APP_ST_LISTENING);
     reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 200);   // 按下 #2:取消
     assert(s.state == APP_ST_READY);
-    assert(has_action(APP_ACT_STREAM_STOP));
-    assert(!has_action(APP_ACT_SEND_VOICE_END));           // 丢弃会话,不发 end
+    assert(has_action(APP_ACT_STREAM_CANCEL));             // 清残留,防流入下一次会话
+    assert(has_action(APP_ACT_SEND_VOICE_END));            // 结束 Mac 端会话(防 ASR 悬挂)
     assert(strstr(s.toast, "cancelled"));
     // 双击窗口后的收尾事件(松开 #2 / DOUBLE)在 READY 下全部忽略
     reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 500);
@@ -356,7 +356,7 @@ static void test_ble_link_down(void) {
     assert(s.link_up == false);
     assert(s.ble_connected == false);
     assert(s.state == APP_ST_READY);
-    assert(has_action(APP_ACT_STREAM_STOP));
+    assert(has_action(APP_ACT_STREAM_CANCEL));             // 断链无 Mac 可发,清残留防流入下次会话
     assert(!has_action(APP_ACT_SEND_VOICE_END));           // 会话中止,不发 end
     assert(strstr(s.toast, "Mac disconnected"));
 
@@ -425,7 +425,7 @@ static void test_ble_disconnect_transcribing(void) {
     app_event_t ev = { .type = APP_EV_BLE_DISCONNECTED };
     app_state_reduce(&s, &ev, now, out, &on);
     assert(s.state == APP_ST_READY);
-    assert(has_action(APP_ACT_STREAM_STOP));               // 兜底停流(幂等)
+    assert(has_action(APP_ACT_STREAM_CANCEL));             // 兜底:停流 + 清残留(幂等)
     assert(strstr(s.toast, "Mac disconnected"));
 
     // 重连后回 ONLINE
@@ -560,7 +560,7 @@ static void test_snapshot_link_up(void) {
     reset();
     app_ui_snapshot_t snap;
     app_state_snapshot(&s, now, &snap);
-    assert(snap.link_up == true);                           // init 默认通(断开后由事件翻)
+    assert(snap.link_up == false);                          // init 默认断(开机无 Mac 不会收到断开事件,不能假设通)
 
     app_event_t d = { .type = APP_EV_BLE_DISCONNECTED };
     app_state_reduce(&s, &d, now, out, &on);
