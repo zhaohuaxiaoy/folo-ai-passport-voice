@@ -38,6 +38,12 @@ async def wait_until(cond, timeout=3.0, what="condition"):
         await asyncio.sleep(0.01)
 
 
+async def wait_session_done(relay, what="会话收尾完成"):
+    """收尾后台化后:统计占位立即出现,done=True 才是收尾完成。"""
+    await wait_until(lambda: relay.session_stats and relay.session_stats[-1]["done"],
+                     what=what)
+
+
 # ---- 模拟件 ----
 
 class FakeTransport:
@@ -127,6 +133,18 @@ class FakeInjector:
 
     def __call__(self, text):
         self.calls.append(text)
+
+
+class GatedASR(FakeASR):
+    """connect 由门控制(测慢握手:ASR 连接未就绪不阻塞事件消费)。"""
+
+    def __init__(self, script):
+        super().__init__(script)
+        self.gate = asyncio.Event()
+
+    async def connect(self):
+        await self.gate.wait()
+        self.connected = True
 
 
 def make_fake_asr_factory(script, holder):
@@ -232,6 +250,8 @@ async def test_voice_flow():
 
     # voice.start + 音频分片(MTU247: 13×244+28) + 第二帧整帧 + voice.end + status
     t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    # 屏障:等待 voice.start 处理完(会话已建),否则音频帧可能被 drain 丢弃
+    await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
     for _ in range(13):
         t.notify_audio(bytes(244))
     t.notify_audio(bytes(28))
@@ -241,8 +261,9 @@ async def test_voice_flow():
                      what="中间结果下行预览")
 
     t.notify_event(b'{"event":"voice.end"}\n')
-    await wait_until(lambda: len(relay.session_stats) >= 1, what="会话统计")
+    await wait_until(lambda: len(relay.session_stats) >= 1, what="会话统计(占位)")
     await wait_until(lambda: len(injector.calls) >= 1, what="定稿注入")
+    await wait_session_done(relay)   # 收尾后台化:final_text/rx 需等收尾完成
 
     asr = holder["asr"]
     check("ASR 收到 2 个整帧", len(asr.sent_frames), 2)
@@ -285,14 +306,18 @@ async def test_approval_flow():
     await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
 
     t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
     t.notify_audio(bytes(3200))
     t.notify_event(b'{"event":"voice.end"}\n')
 
-    # 会话结束后自动发 approval_request(CTRL)
-    await wait_until(lambda: any(e[0] == "write" and e[1] == CTRL_UUID
-                                 for e in t.events), what="approval_request 写入")
+    # 会话结束后自动发 approval_request(CTRL);转写下行也是 CTRL 写,按
+    # type 精确等待,不依赖写序(转写/审批两任务并发,谁先落盘不确定)
+    await wait_until(lambda: any(
+        e[0] == "write" and json.loads(e[2]).get("type") == "agent.approval_request"
+        for e in t.events), what="approval_request 写入")
     writes = [e for e in t.events if e[0] == "write"]
-    req = json.loads(writes[-1][2])
+    req = next(json.loads(w[2]) for w in writes
+               if json.loads(w[2]).get("type") == "agent.approval_request")
     check("approval_request 载荷 type", req.get("type"), "agent.approval_request")
     check("approval_request 载荷 taskId", req.get("taskId"), "task-001")
     check("approval_request 载荷 riskLevel", req.get("riskLevel"), "high")
@@ -320,9 +345,11 @@ async def test_no_approval_and_no_inject():
     await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
 
     t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
     t.notify_audio(bytes(3200))
     t.notify_event(b'{"event":"voice.end"}\n')
-    await wait_until(lambda: len(relay.session_stats) >= 1, what="会话统计")
+    await wait_until(lambda: len(relay.session_stats) >= 1, what="会话统计(占位)")
+    await wait_session_done(relay)
     await asyncio.sleep(0.05)   # 给审批窗口一点时间(应不发生)
     writes = [json.loads(e[2]) for e in t.events if e[0] == "write"]
     check("no-inject 不调用注入", injector.calls, [])
@@ -377,9 +404,11 @@ async def test_transcript_downlink_long():
     await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
 
     t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
     t.notify_audio(bytes(3200))
     t.notify_event(b'{"event":"voice.end"}\n')
-    await wait_until(lambda: len(relay.session_stats) >= 1, what="会话统计")
+    await wait_until(lambda: len(relay.session_stats) >= 1, what="会话统计(占位)")
+    await wait_session_done(relay)
 
     tx = transcript_writes(t.events)
     ascii_segs = [w["text"] for w in tx if w["text"].startswith("x")]
@@ -414,9 +443,11 @@ async def test_downlink_write_failure():
     await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
 
     t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
     t.notify_audio(bytes(3200))
     t.notify_event(b'{"event":"voice.end"}\n')
-    await wait_until(lambda: len(relay.session_stats) >= 1, what="会话统计")
+    await wait_until(lambda: len(relay.session_stats) >= 1, what="会话统计(占位)")
+    await wait_session_done(relay)
 
     tx = transcript_writes(t.events)
     check("写失败仍记录下行意图", [(w["text"], w.get("final")) for w in tx],
@@ -438,13 +469,116 @@ async def test_final_timeout():
     await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
 
     t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
     t.notify_audio(bytes(3200))
     t.notify_event(b'{"event":"voice.end"}\n')
     await wait_until(lambda: len(relay.session_stats) >= 1,
-                     what="超时收尾", timeout=3)
+                     what="超时收尾占位", timeout=3)
     check("超时后会话仍统计", len(relay.session_stats), 1)
+    await wait_session_done(relay)   # 0.2s 超时后收尾完成
     check("超时 final_text 为空", relay.session_stats[0]["final_text"], "")
     check("超时 ASR 已关闭", holder["asr"].closed, True)
+
+    t.disconnect_cb()
+    await wait_until(task.done, what="断开退出")
+
+
+async def test_slow_connect_does_not_block_events():
+    """ASR 握手挂起(数百 ms)时 voice.end/status 照常处理,不压事件队列。
+
+    回归第 5 轮卡顿修复:connect 曾同步 await 在事件消费路径上,握手期间
+    事件队列冻结。现在连接后台化,feed 挂起等就绪(帧不丢只延迟)。
+    """
+    t = FakeTransport()
+    asr = GatedASR([("结果", True)])
+    relay = Relay(t, asr_factory=lambda: asr, inject_fn=FakeInjector(),
+                  timeout=5, do_approval=False)
+    task = asyncio.create_task(relay.run())
+    await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
+
+    t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
+    t.notify_audio(bytes(3200))
+    t.notify_event(b'{"event":"voice.end"}\n')
+    await wait_until(lambda: len(relay.session_stats) >= 1, what="收尾占位")
+    check("收尾在等连接(done=False)", relay.session_stats[-1]["done"], False)
+
+    # connect 未放行:status 帧照常即时挂载(不被握手阻塞)
+    t.notify_event(b'{"event":"status","drop":5}\n')
+    await wait_until(lambda: relay.session_stats[-1]["device_drop"] == 5,
+                     what="握手未完成时 status 仍即时挂载")
+    check("慢连接不阻塞 status 挂载", relay.session_stats[-1]["device_drop"], 5)
+
+    asr.gate.set()   # 放行连接 → 会话继续,收尾完成
+    await wait_session_done(relay)
+    check("连接放行后会话有结果", relay.session_stats[-1]["final_text"], "结果")
+    check("帧未丢(挂起等待后仍喂入)", len(asr.sent_frames), 1)
+
+    t.disconnect_cb()
+    await wait_until(task.done, what="断开退出")
+
+
+async def test_slow_final_does_not_block_status():
+    """voice.end 后等最终结果(最长 timeout)期间,status 对账帧照常即时处理。
+
+    回归第 5 轮卡顿修复:收尾曾同步 await 在事件消费路径上,60s 等最终
+    结果会把 status 帧压住(与 _demo_approval 后台化是同一问题的残留)。
+    """
+    t = FakeTransport()
+    holder = {}
+    relay = Relay(t, asr_factory=make_fake_asr_factory([("中间", False)], holder),
+                  inject_fn=FakeInjector(), timeout=30, do_approval=False)
+    task = asyncio.create_task(relay.run())
+    await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
+
+    t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
+    t.notify_audio(bytes(3200))
+    t.notify_event(b'{"event":"voice.end"}\n')
+    await wait_until(lambda: len(relay.session_stats) >= 1, what="收尾占位")
+    check("收尾进行中(done=False)", relay.session_stats[-1]["done"], False)
+
+    t.notify_event(b'{"event":"status","drop":7}\n')
+    await wait_until(lambda: relay.session_stats[-1]["device_drop"] == 7,
+                     what="等最终结果期间 status 即时处理")
+    check("慢 final 不阻塞 status", relay.session_stats[-1]["device_drop"], 7)
+    check("收尾仍未完成(done=False)", relay.session_stats[-1]["done"], False)
+
+    t.disconnect_cb()
+    await wait_until(task.done, what="断开退出")
+
+
+async def test_duplicate_voice_start_no_cross_talk():
+    """重复 voice.start:旧会话后台收尾,新会话独立,统计/注入不串台。"""
+    t = FakeTransport()
+    injector = FakeInjector()
+    asrs = [FakeASR([("旧段", True)]), FakeASR([("第二段", True)])]
+
+    def factory():
+        return asrs.pop(0)
+
+    relay = Relay(t, asr_factory=factory, inject_fn=injector,
+                  timeout=5, do_approval=False)
+    task = asyncio.create_task(relay.run())
+    await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
+
+    t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
+    t.notify_audio(bytes(3200))
+    # 重复 start(异常/快速连续会话):旧会话收尾不阻塞事件消费
+    t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    # 屏障:等旧会话收尾占位入列(仍存在旧 _session,不能用 _session is None)
+    await wait_until(lambda: len(relay.session_stats) >= 1, what="旧会话已收尾占位")
+    t.notify_audio(bytes(3200))
+    t.notify_event(b'{"event":"voice.end"}\n')
+    await wait_session_done(relay)
+    await wait_until(lambda: len(relay.session_stats) >= 2 and relay.session_stats[-1]["done"],
+                     what="两会话收尾完成")
+    check("两会话独立统计", [s["done"] for s in relay.session_stats],
+          [True, True])
+    check("两会话各自注入", sorted(injector.calls), ["旧段", "第二段"])
+    check("两会话各有最终文本", [s["final_text"] for s in relay.session_stats],
+          ["旧段", "第二段"])
 
     t.disconnect_cb()
     await wait_until(task.done, what="断开退出")
@@ -477,6 +611,9 @@ async def main():
     await test_transcript_downlink_long()
     await test_downlink_write_failure()
     await test_final_timeout()
+    await test_slow_connect_does_not_block_events()
+    await test_slow_final_does_not_block_status()
+    await test_duplicate_voice_start_no_cross_talk()
     await test_no_device()
     if FAILURES:
         print(f"\n{len(FAILURES)} 项失败:")

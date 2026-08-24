@@ -61,38 +61,39 @@ class RelayError(Exception):
 # ---- 分片重组(纯函数, 独立可测) ----
 
 def reassemble_audio(buf, chunk, max_buf=REASSEMBLE_AUDIO_MAX):
-    """AUDIO 分片重组: (累积缓冲, 一段 ATT 载荷) -> (新缓冲, 整帧列表)。
+    """AUDIO 分片重组: (累积缓冲 bytearray, 一段 ATT 载荷) -> (新缓冲, 整帧列表)。
 
     设备按 MTU-3 chunk 逐片 notify, 一帧 3200B 可能跨多个 chunk, 一个
     chunk 也可能横跨两帧边界; 尾部不足一帧的字节留在缓冲等下一 chunk。
     未重组缓冲超过 max_buf(默认 64KB)视为链路失步: 清空缓冲等下一 chunk
-    重新对齐, 防内存无限增长。
+    重新对齐, 防内存无限增长。原地 extend/del: 避免每 chunk 整缓冲拷贝
+    (buf + bytes 是 O(n) 重分配)。
     """
-    buf = buf + bytes(chunk)
+    buf.extend(chunk)
     frames = []
     while len(buf) >= AUDIO_FRAME_BYTES:
         frames.append(buf[:AUDIO_FRAME_BYTES])
-        buf = buf[AUDIO_FRAME_BYTES:]
+        del buf[:AUDIO_FRAME_BYTES]
     if len(buf) > max_buf:
-        buf = bytearray()   # 失步: 丢弃, 下一 chunk 重新对齐
+        buf.clear()   # 失步: 丢弃, 下一 chunk 重新对齐
     return buf, frames
 
 
 def reassemble_event(buf, chunk, max_buf=REASSEMBLE_EVENT_MAX):
-    """EVENT 分片重组: (累积缓冲, 一段 ATT 载荷) -> (新缓冲, 整行列表)。
+    """EVENT 分片重组: (累积缓冲 bytearray, 一段 ATT 载荷) -> (新缓冲, 整行列表)。
 
     事件行以 '\\n' 结尾, 可能跨 chunk; 未带结尾的尾部留在缓冲。
     未成行缓冲超过 max_buf(默认 4KB, 远大于 EVENT_LINE_MAX 512)视为失步:
-    清空缓冲, 防内存无限增长。
+    清空缓冲, 防内存无限增长。原地 extend/partition, 无整缓冲重分配。
     """
-    buf = buf + bytes(chunk)
+    buf.extend(chunk)
     lines = []
     while b"\n" in buf:
         line, _, rest = buf.partition(b"\n")
         lines.append(line)
         buf = rest
     if len(buf) > max_buf:
-        buf = bytearray()   # 失步: 丢弃
+        buf.clear()   # 失步: 丢弃
     return buf, lines
 
 
@@ -305,10 +306,12 @@ class Relay:
         if self._session is not None:
             print("[voice] 收到重复 voice.start, 先结束上一个会话",
                   file=sys.stderr)
-            await self._end_session()
+            s = self._session
+            self._session = None
+            asyncio.create_task(s.end())   # 旧会话后台收尾(不阻塞)
         print(f"[voice] start workflow={ev.get('workflow')}")
         self._session = _VoiceSession(self, self._asr_factory())
-        await self._session.begin()
+        await self._session.begin()        # 立即返回(ASR 连接后台化)
 
     async def _on_audio_frame(self, frame):
         s = self._session
@@ -325,17 +328,17 @@ class Relay:
             print("[voice] 收到 voice.end 但无进行中会话, 忽略",
                   file=sys.stderr)
             return
-        await self._end_session()
+        s = self._session
+        self._session = None
+        # 收尾后台化:send_end/等最终结果/close/统计最长可挂 60s,放在前台
+        # 会压住 status 对账帧与后续事件(与 _demo_approval 同源问题)。
+        # 会话统计先占位(session_stats 立即出现),status 帧挂到它——
+        # 收尾完成时只补 final_text 并打印(见 _VoiceSession.end)。
+        asyncio.create_task(s.end())
         # 审批演示放后台任务: 不阻塞 drain, status/agent.action 等后续事件
         # 照常处理(否则 status 对账帧会被压在队列里等按键)
         if self.do_approval and self._approval_task is None:
             self._approval_task = asyncio.create_task(self._demo_approval())
-
-    async def _end_session(self):
-        s = self._session
-        self._session = None
-        await s.end()
-        print("[relay] 等待下一次语音(Ctrl+C 退出)")
 
     # -- 注入 --
 
@@ -415,7 +418,15 @@ class Relay:
 
 
 class _VoiceSession:
-    """一次 voice.start..voice.end 会话: ASR 流 + 下行预览 + 定稿注入 + 掉帧统计。"""
+    """一次 voice.start..voice.end 会话: ASR 流 + 下行预览 + 定稿注入 + 掉帧统计。
+
+    生命周期全部后台化(Relay 事件路径零阻塞):
+      begin() 只起连接协程(握手数百 ms 不压事件队列);
+      feed() 在连接就绪前挂起(帧不丢,只延迟),连接失败抛错由调用方兜底;
+      end() 由 Relay 以 create_task 调用,在后台做 send_end/等最终/close/统计,
+      session_stats 在收尾开始时即占位(device_drop=None),status 帧可立即
+      挂到它——收尾完成只补 final_text/打印。
+    """
 
     def __init__(self, relay, asr):
         self.relay = relay
@@ -424,11 +435,28 @@ class _VoiceSession:
         self.end_mono = None
         self.rx_frames = 0
         self.final_text = ""
+        self._connected = asyncio.Event()   # ASR 连接就绪
+        self._conn_error = None             # 连接失败异常(非 None 后 feed 抛错)
         self._final_received = asyncio.Event()
         self._results_task = None
+        self._run_task = None
+        self._ended = False                 # end() 幂等
+        self._stats_ref = None              # 本会话的统计占位(收尾完成时补全)
 
     async def begin(self):
-        await self.asr.connect()
+        # 连接与结果循环后台化:握手(网络)数百 ms 内事件队列照常消费
+        self._run_task = asyncio.create_task(self._run())
+
+    async def _run(self):
+        try:
+            await self.asr.connect()
+        except Exception as e:
+            # 连接失败:让 feed/end 看到错误(不悬挂,不崩溃 relay)
+            self._conn_error = e
+            self._connected.set()
+            self._final_received.set()
+            return
+        self._connected.set()
         self._results_task = asyncio.create_task(self._results_loop())
 
     async def _results_loop(self):
@@ -455,11 +483,43 @@ class _VoiceSession:
             self._final_received.set()
 
     async def feed(self, frame):
+        # 连接未就绪:挂起等待(帧不丢只延迟);连接失败:抛错由 _on_audio_frame 兜底
+        if not self._connected.is_set():
+            await self._connected.wait()
+        if self._conn_error is not None:
+            raise self._conn_error
         self.rx_frames += 1
         await self.asr.send_frame(frame)
 
     async def end(self):
-        """voice.end: 结束 ASR 流, 等最终结果, 打印掉帧统计。"""
+        """voice.end 收尾(后台调用,非阻塞 Relay): 结束 ASR 流, 等最终结果,
+        关闭, 统计占位→补全。幂等: 重复 start/end 竞态下第二次调用直接返回。"""
+        if self._ended:
+            return
+        self._ended = True
+        self.end_mono = time.monotonic()   # voice.end 时刻(理论帧数基准)
+        # 占位立即入列:status 帧挂到 session_stats[-1] 不依赖收尾完成。
+        # 保存本会话的引用:收尾完成时经 _stats_ref 补全——并发收尾时
+        # session_stats[-1] 可能是其他会话的占位(重复 start/后台化后常见)。
+        stats = self._stats()
+        stats["done"] = False
+        self._stats_ref = stats
+        self.relay.session_stats.append(stats)
+        if len(self.relay.session_stats) > 100:
+            self.relay.session_stats.pop(0)   # 有界:长时间运行不无限增长
+
+        if self._conn_error is not None:
+            print(f"[voice] ASR 连接失败, 会话无结果: {self._conn_error}",
+                  file=sys.stderr)
+            await self._close_up()
+            return
+        if not self._connected.is_set():
+            await self._connected.wait()   # 等握手完成(本协程在后台,不阻塞 Relay)
+        if self._conn_error is not None:
+            print(f"[voice] ASR 连接失败, 会话无结果: {self._conn_error}",
+                  file=sys.stderr)
+            await self._close_up()
+            return
         try:
             await self.asr.send_end()
             try:
@@ -468,17 +528,26 @@ class _VoiceSession:
             except asyncio.TimeoutError:
                 print(f"[voice] {self.relay.timeout:.0f}s 内未收到最终结果, "
                       "结束会话(无定稿注入)", file=sys.stderr)
-        finally:
+        except Exception as e:
+            print(f"[voice] 收尾异常: {e}", file=sys.stderr)
+        await self._close_up()
+
+    async def _close_up(self):
+        """收尾收束: 关 ASR、取消结果循环、补全统计占位、打印。"""
+        try:
             await self.asr.close()
-            if self._results_task is not None:
-                self._results_task.cancel()
-                try:
-                    await self._results_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-            self.end_mono = time.monotonic()
-        stats = self._stats()
-        self.relay.session_stats.append(stats)
+        except Exception as e:
+            print(f"[voice] ASR close 异常: {e}", file=sys.stderr)
+        if self._results_task is not None:
+            self._results_task.cancel()
+            try:
+                await self._results_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        stats = self._stats_ref          # end() 预占位时保存的本会话引用
+        stats["rx_frames"] = self.rx_frames
+        stats["final_text"] = self.final_text
+        stats["done"] = True
         self.relay.print_stats(stats)
 
     def _stats(self):
