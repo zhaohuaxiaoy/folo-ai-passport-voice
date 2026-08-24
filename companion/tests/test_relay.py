@@ -195,6 +195,22 @@ def test_reassembly_event():
     check("EVENT JSON 内换行不误切", (len(lines), len(buf)), (1, 0))
 
 
+def test_reassembly_overflow():
+    """重组缓冲超限保护: 链路失步时清空缓冲, 不无限增长内存。"""
+    # audio 天然有界(整帧提取后余数恒 <3200B); 显式小上限验证保护逻辑
+    buf, frames = reassemble_audio(bytearray(), bytes(150), max_buf=100)
+    check("AUDIO 超限清空", (len(frames), len(buf)), (0, 0))
+    buf, frames = reassemble_audio(bytearray(), bytes(3200), max_buf=100)
+    check("AUDIO 失步后重新对齐", (len(frames), len(buf)), (1, 0))
+
+    # event 未成行尾部无界: 默认上限 4KB 触发清空
+    buf, lines = reassemble_event(bytearray(), b"x" * (4 * 1024 + 10))
+    check("EVENT 默认超限清空", (len(lines), len(buf)), (0, 0))
+    buf, lines = reassemble_event(bytearray(), b"x" * 100 + b"\n",
+                                  max_buf=100)
+    check("EVENT 失步后重组", (len(lines), len(buf)), (1, 0))
+
+
 # ---- relay 全流程 ----
 
 async def test_voice_flow():
@@ -220,11 +236,13 @@ async def test_voice_flow():
         t.notify_audio(bytes(244))
     t.notify_audio(bytes(28))
     t.notify_audio(bytes(3200))
-    await wait_until(lambda: len(injector.calls) >= 1, what="中间结果注入")
+    # 中间结果: 仅下行设备屏幕预览, 不注入输入框(用户确认: 输入框只落定稿)
+    await wait_until(lambda: len(transcript_writes(t.events)) >= 1,
+                     what="中间结果下行预览")
 
     t.notify_event(b'{"event":"voice.end"}\n')
     await wait_until(lambda: len(relay.session_stats) >= 1, what="会话统计")
-    await wait_until(lambda: len(injector.calls) >= 2, what="最终结果注入")
+    await wait_until(lambda: len(injector.calls) >= 1, what="定稿注入")
 
     asr = holder["asr"]
     check("ASR 收到 2 个整帧", len(asr.sent_frames), 2)
@@ -232,7 +250,7 @@ async def test_voice_flow():
                                for f in asr.sent_frames), True)
     check("ASR 已结束流", asr.ended, True)
     check("ASR 已关闭", asr.closed, True)
-    check("注入序列(中间+最终)", injector.calls, ["你好", "你好世界"])
+    check("注入只落定稿(无中间叠加)", injector.calls, ["你好世界"])
 
     tx = transcript_writes(t.events)
     check("下行条数", [(w["text"], w.get("final")) for w in tx],
@@ -403,7 +421,7 @@ async def test_downlink_write_failure():
     tx = transcript_writes(t.events)
     check("写失败仍记录下行意图", [(w["text"], w.get("final")) for w in tx],
           [("中间", False), ("最终", True)])
-    check("写失败不阻断注入", injector.calls, ["中间", "最终"])
+    check("写失败不阻断注入(定稿一次)", injector.calls, ["最终"])
     check("写失败不阻断统计", relay.session_stats[0]["final_text"], "最终")
 
     t.disconnect_cb()

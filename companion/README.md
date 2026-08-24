@@ -37,6 +37,8 @@ companion/.venv/bin/python companion/relay.py
 
 - 自动扫描 "AI Passport" 并连接（首次自动配对）；按住设备 ● 说话，
   屏幕实时预览转写，松手后定稿文本注入当前输入框（TextEdit 实测中文/英文）。
+  **行为契约**：中间结果只下行设备屏幕预览（`final:false`），输入框只落
+  定稿一次（`final:true`）——剪贴板粘贴是插入语义，中间多次注入会叠加文本。
 - `--device AA:BB:CC:DD:EE:FF` 跳过扫描直连指定设备。
 - `--no-inject` 只转写（设备屏幕预览照常下行），不注入输入框。
 - `--no-approval` 关闭审批演示；默认发 `agent.approval_request` → 设备按键决策 → 回传 `agent.action`。

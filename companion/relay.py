@@ -13,10 +13,11 @@ MTU-3), EVENT 行以 '\\n' 结尾, AUDIO 帧正好 3200B。本程序负责重组
 (reassemble_audio / reassemble_event 纯函数, 独立可测)。
 
 流程: 扫描 "AI Passport" → 连接 → 订阅 EVENT+AUDIO → voice.start 开 ASR 流
-→ 帧喂火山(中间结果实时下行设备屏幕预览 + 注入) → voice.end 收最终结果
-(下行定稿帧 + 注入) → 审批演示(发 approval_request → 设备按键 → 收
-agent.action)。voice 窗口掉帧统计(理论帧数 vs 实收帧数, 与设备 status 帧
-drop 双端对账)。转写下行走 CTRL 特征, 与注入解耦(--no-inject 仍下行)。
+→ 帧喂火山(中间结果实时下行设备屏幕预览) → voice.end 收最终结果
+(下行定稿帧 + 注入输入框一次) → 审批演示(发 approval_request → 设备按键
+→ 收 agent.action)。用户确认的行为: 输入框只落定稿, 中间预览在设备屏幕。
+voice 窗口掉帧统计(理论帧数 vs 实收帧数, 与设备 status 帧 drop 双端对账)。
+转写下行走 CTRL 特征, 与注入解耦(--no-inject 仍下行)。
 
 传输层可注入(FakeTransport)以便无硬件单测。
 
@@ -45,6 +46,10 @@ SCAN_TIMEOUT = 15
 # 下行 transcript 单条文本上限 = APP_TRANSCRIPT_MAX(128) - 1(固件 str_take 的
 # cap-1 NUL 保险):超长由 split_transcript 切分,逐条下行,设备逐条覆盖显示
 TRANSCRIPT_TEXT_MAX = 127
+# 重组缓冲上限:超限 = 协议违约/链路失步(如 MTU 变化导致的分片流错位),
+# 直接清空等下一 chunk 重新对齐, 防内存无限增长。
+REASSEMBLE_AUDIO_MAX = 64 * 1024   # 64KB ≈ 20 帧未重组
+REASSEMBLE_EVENT_MAX = 4 * 1024    # 4KB 未成行
 
 
 class RelayError(Exception):
@@ -53,24 +58,30 @@ class RelayError(Exception):
 
 # ---- 分片重组(纯函数, 独立可测) ----
 
-def reassemble_audio(buf, chunk):
+def reassemble_audio(buf, chunk, max_buf=REASSEMBLE_AUDIO_MAX):
     """AUDIO 分片重组: (累积缓冲, 一段 ATT 载荷) -> (新缓冲, 整帧列表)。
 
     设备按 MTU-3 chunk 逐片 notify, 一帧 3200B 可能跨多个 chunk, 一个
     chunk 也可能横跨两帧边界; 尾部不足一帧的字节留在缓冲等下一 chunk。
+    未重组缓冲超过 max_buf(默认 64KB)视为链路失步: 清空缓冲等下一 chunk
+    重新对齐, 防内存无限增长。
     """
     buf = buf + bytes(chunk)
     frames = []
     while len(buf) >= AUDIO_FRAME_BYTES:
         frames.append(buf[:AUDIO_FRAME_BYTES])
         buf = buf[AUDIO_FRAME_BYTES:]
+    if len(buf) > max_buf:
+        buf = bytearray()   # 失步: 丢弃, 下一 chunk 重新对齐
     return buf, frames
 
 
-def reassemble_event(buf, chunk):
+def reassemble_event(buf, chunk, max_buf=REASSEMBLE_EVENT_MAX):
     """EVENT 分片重组: (累积缓冲, 一段 ATT 载荷) -> (新缓冲, 整行列表)。
 
     事件行以 '\\n' 结尾, 可能跨 chunk; 未带结尾的尾部留在缓冲。
+    未成行缓冲超过 max_buf(默认 4KB, 远大于 EVENT_LINE_MAX 512)视为失步:
+    清空缓冲, 防内存无限增长。
     """
     buf = buf + bytes(chunk)
     lines = []
@@ -78,6 +89,8 @@ def reassemble_event(buf, chunk):
         line, _, rest = buf.partition(b"\n")
         lines.append(line)
         buf = rest
+    if len(buf) > max_buf:
+        buf = bytearray()   # 失步: 丢弃
     return buf, lines
 
 
@@ -365,7 +378,7 @@ class Relay:
 
 
 class _VoiceSession:
-    """一次 voice.start..voice.end 会话: ASR 流 + 实时注入 + 掉帧统计。"""
+    """一次 voice.start..voice.end 会话: ASR 流 + 下行预览 + 定稿注入 + 掉帧统计。"""
 
     def __init__(self, relay, asr):
         self.relay = relay
@@ -382,10 +395,12 @@ class _VoiceSession:
         self._results_task = asyncio.create_task(self._results_loop())
 
     async def _results_loop(self):
-        """消费 ASR 结果: 中间结果实时下行预览 + 注入, 最终结果收尾并置完成事件。
+        """消费 ASR 结果: 中间结果仅下行设备屏幕预览, 定稿收尾并注入一次。
 
-        每包 result.text 是全量累计文本: 下行让设备屏幕实时预览(partial →
-        final:false 预览态), 定稿(voice.end 最终文本) → final:true 落定。
+        每包 result.text 是全量累计文本: partial → 下行 final:false 预览态
+        (不注入——剪贴板粘贴是插入语义, 多次注入会叠加文本; 用户确认的
+        行为是输入框只落定稿), 定稿(voice.end 最终文本) → final:true 落定
+        + 注入输入框一次。
         下行与注入解耦: 任何下行失败只记日志, 不影响注入与收尾。
         """
         try:
@@ -398,8 +413,6 @@ class _VoiceSession:
                         await asyncio.to_thread(self.relay._inject, text)
                     self._final_received.set()
                     return
-                if text:
-                    await asyncio.to_thread(self.relay._inject, text)
         except Exception as e:
             print(f"[asr] 结果流异常: {e}", file=sys.stderr)
             self._final_received.set()
@@ -417,7 +430,7 @@ class _VoiceSession:
                                        timeout=self.relay.timeout)
             except asyncio.TimeoutError:
                 print(f"[voice] {self.relay.timeout:.0f}s 内未收到最终结果, "
-                      "以最后中间结果收尾", file=sys.stderr)
+                      "结束会话(无定稿注入)", file=sys.stderr)
         finally:
             await self.asr.close()
             if self._results_task is not None:
@@ -432,10 +445,14 @@ class _VoiceSession:
         self.relay.print_stats(stats)
 
     def _stats(self):
-        """AC3 掉帧统计: 会话时长推理论帧数 vs 实收帧数。"""
+        """AC3 掉帧统计: 会话时长推理论帧数 vs 实收帧数。
+
+        理论帧数按 floor 计(固件 100ms 定时发帧, 会话起止帧数为下取整
+        语义), missed 保底 0(防止 round 高估产生负掉帧)。
+        """
         dur = self.end_mono - self.start_mono
-        theory = max(0, round(dur / AUDIO_FRAME_SEC))
-        missed = theory - self.rx_frames
+        theory = max(0, int(dur / AUDIO_FRAME_SEC))
+        missed = max(0, theory - self.rx_frames)
         pct = (missed / theory * 100.0) if theory else 0.0
         return {"duration": dur, "theory_frames": theory,
                 "rx_frames": self.rx_frames, "missed": missed,
