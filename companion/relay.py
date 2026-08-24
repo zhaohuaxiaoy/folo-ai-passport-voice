@@ -161,13 +161,14 @@ class Relay:
 
     def __init__(self, transport=None, *, asr_factory=None, inject_fn=None,
                  timeout=60.0, do_inject=True, do_approval=True,
-                 dry_run=False):
+                 dry_run=False, connect_timeout_s=5.0):
         from asr_client import StreamingASR
         from inject import paste_text
         self._transport = transport or BleakTransport()
         self._asr_factory = asr_factory or (lambda: StreamingASR())
         self._inject_fn = inject_fn or paste_text
         self.timeout = timeout
+        self.connect_timeout_s = connect_timeout_s
         self.do_inject = do_inject
         self.do_approval = do_approval
         self.dry_run = dry_run
@@ -179,6 +180,7 @@ class Relay:
         self._dropped_audio = 0     # 音频队列满丢弃计数(累计,进程内)
         self._stop = asyncio.Event()
         self._session = None        # 当前 voice 会话(None=空闲)
+        self._closing = None        # 收尾中的会话(end 后台化后,断连时 abort 覆盖)
         self._approval_waiter = None
         self._approval_task = None  # 审批演示后台任务
         self._device_drop = None    # 最近 status 帧的设备掉帧数
@@ -216,6 +218,16 @@ class Relay:
                 except (asyncio.CancelledError, Exception):
                     pass
                 self._approval_task = None
+            # 断连/退出:收束会话——取消连接与结果任务、关 ASR WebSocket、
+            # 补统计占位。覆盖"进行中"与"end 收尾中"两种(_closing)。
+            # 否则 _run/_results 任务与 ASR 连接泄漏到进程退出
+            # (审查 P1: 合成测试已复现断开后 asr.closed=False、结果任务存活)。
+            if self._session is not None:
+                await self._session.abort()
+                self._session = None
+            if self._closing is not None:
+                await self._closing.abort()
+                self._closing = None
             await t.disconnect()
 
     def _on_disconnected(self, *_):
@@ -313,6 +325,7 @@ class Relay:
                   file=sys.stderr)
             s = self._session
             self._session = None
+            self._closing = s              # 收尾中的会话:断连时 abort 也要覆盖它
             asyncio.create_task(s.end())   # 旧会话后台收尾(不阻塞)
         print(f"[voice] start workflow={ev.get('workflow')}")
         self._session = _VoiceSession(self, self._asr_factory())
@@ -335,7 +348,7 @@ class Relay:
             return
         s = self._session
         self._session = None
-        # 收尾后台化:send_end/等最终结果/close/统计最长可挂 60s,放在前台
+        self._closing = s              # 收尾中的会话:断连时 abort 也要覆盖它
         # 会压住 status 对账帧与后续事件(与 _demo_approval 同源问题)。
         # 会话统计先占位(session_stats 立即出现),status 帧挂到它——
         # 收尾完成时只补 final_text 并打印(见 _VoiceSession.end)。
@@ -454,9 +467,13 @@ class _VoiceSession:
 
     async def _run(self):
         try:
-            await self.asr.connect()
+            # 连接加超时(审查 P1-4):_open_ws 悬挂时 wait_for 取消 connect,
+            # 走 _conn_error 路径——feed() 的 _connected.wait() 随之返回并抛错,
+            # 不再无限等待挂死音频排空。asr.close() 幂等,半途取消安全。
+            await asyncio.wait_for(self.asr.connect(),
+                                   timeout=self.relay.connect_timeout_s)
         except Exception as e:
-            # 连接失败:让 feed/end 看到错误(不悬挂,不崩溃 relay)
+            # 连接失败/超时:让 feed/end 看到错误(不悬挂,不崩溃 relay)
             self._conn_error = e
             self._connected.set()
             self._final_received.set()
@@ -495,6 +512,37 @@ class _VoiceSession:
             raise self._conn_error
         self.rx_frames += 1
         await self.asr.send_frame(frame)
+
+    async def abort(self):
+        """断连/退出快速收束: 取消连接与结果任务、关 ASR、补统计占位。
+        与 end() 的区别: 不等最终结果(断开时没有结果可等)。幂等;
+        与并发 end() 竞态时 end 的 await 会被 set 的事件立即放行。"""
+        if self._run_task is not None:
+            self._run_task.cancel()
+            try:
+                await self._run_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._run_task = None
+        if self._results_task is not None:
+            self._results_task.cancel()
+            try:
+                await self._results_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._results_task = None
+        try:
+            await self.asr.close()
+        except Exception as e:
+            print(f"[voice] ASR close 异常: {e}", file=sys.stderr)
+        # 放行并发等待者: feed() 不再悬挂, 并发的 end() 立即收束(不挂到超时)
+        self._final_received.set()
+        self._connected.set()
+        if self._stats_ref is not None and not self._stats_ref["done"]:
+            self._stats_ref["rx_frames"] = self.rx_frames
+            self._stats_ref["final_text"] = self.final_text or "(disconnected)"
+            self._stats_ref["done"] = True
+            self.relay.print_stats(self._stats_ref)
 
     async def end(self):
         """voice.end 收尾(后台调用,非阻塞 Relay): 结束 ASR 流, 等最终结果,

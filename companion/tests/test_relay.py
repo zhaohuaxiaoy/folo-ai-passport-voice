@@ -358,6 +358,85 @@ async def test_ctrl_write_no_response():
     await wait_until(task.done, what="断开退出")
 
 
+class HangingConnectASR(FakeASR):
+    """connect() 永久悬挂:模拟网络黑洞(审查 P1-4: 无超时曾卡死音频排空)。"""
+
+    async def connect(self):
+        await asyncio.Event().wait()
+
+
+async def test_disconnect_cleanup():
+    """M1: 会话进行中断连(BLE 断开)→ ASR 会话与任务全部收束,不泄漏。"""
+    t = FakeTransport()
+    holder = {}
+    relay = Relay(t, asr_factory=make_fake_asr_factory([("部分转写", False)], holder),
+                  inject_fn=FakeInjector(), timeout=5)
+    task = asyncio.create_task(relay.run())
+    await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
+
+    t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
+    t.notify_audio(bytes(3200))
+    await wait_until(lambda: holder["asr"].connected, what="ASR 已连接")
+    session = relay._session
+
+    t.disconnect_cb()                  # BLE 断开
+    await wait_until(task.done, what="断开退出")
+    check("asr 已关闭", holder["asr"].closed, True)
+    check("run_task 已收束", session._run_task is None or session._run_task.done(), True)
+    check("results_task 已收束", session._results_task is None
+          or session._results_task.done(), True)
+    check("会话已清空", relay._session, None)
+
+
+async def test_disconnect_during_final():
+    """M1: end 收尾(等最终结果)中断连 → abort 放行,统计占位补全。"""
+    t = FakeTransport()
+    holder = {}
+    relay = Relay(t, asr_factory=make_fake_asr_factory([("hi", False)], holder),
+                  inject_fn=FakeInjector(), timeout=5)
+    task = asyncio.create_task(relay.run())
+    await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
+
+    t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
+    t.notify_audio(bytes(3200))
+    t.notify_event(b'{"event":"voice.end"}\n')
+    # end 后台收尾:脚本无 final → 挂起等最终结果;统计占位已入列(done=False)
+    await wait_until(lambda: relay.session_stats
+                     and not relay.session_stats[-1]["done"], what="end 收尾挂起")
+
+    t.disconnect_cb()                  # 断开 → abort 放行并发 end()
+    await wait_until(task.done, what="断开退出")
+    check("end 收束后占位补全", relay.session_stats[-1]["done"], True)
+    check("asr 已关闭", holder["asr"].closed, True)
+
+
+async def test_connect_timeout():
+    """M1: ASR 连接悬挂 → 5s(测试注入 0.2s)超时走错误路径,不卡死排空。"""
+    t = FakeTransport()
+    holder = {}
+
+    def factory():
+        holder["asr"] = HangingConnectASR([])
+        return holder["asr"]
+
+    relay = Relay(t, asr_factory=factory, inject_fn=FakeInjector(),
+                  timeout=5, connect_timeout_s=0.2)
+    task = asyncio.create_task(relay.run())
+    await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
+
+    t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
+    t.notify_audio(bytes(3200))        # feed 挂起等 _connected
+    await asyncio.sleep(0.6)           # 0.2s 超时生效
+    check("连接超时错误已记录", relay._session._conn_error is not None, True)
+
+    t.disconnect_cb()
+    await wait_until(task.done, what="超时后断开仍干净退出")
+    check("超时后 asr 已关闭", holder["asr"].closed, True)
+
+
 async def test_no_approval_and_no_inject():
     t = FakeTransport()
     injector = FakeInjector()
@@ -633,6 +712,9 @@ async def main():
     await test_voice_flow()
     await test_approval_flow()
     await test_ctrl_write_no_response()
+    await test_disconnect_cleanup()
+    await test_disconnect_during_final()
+    await test_connect_timeout()
     await test_no_approval_and_no_inject()
     await test_transcript_downlink_long()
     await test_downlink_write_failure()
