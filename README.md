@@ -156,7 +156,7 @@ idf.py flash monitor
 
 The first build uses ESP-IDF Component Manager to fetch LVGL, `esp_lvgl_port`, `button`, `esp_codec_dev`, and other dependencies. Do not edit the generated `managed_components/` directory. If configuration state is stale, use `idf.py fullclean` and configure again, but never use it to clean user source changes.
 
-> The current `main` is the **AI Passport firmware MVP** (push-to-talk voice over WebSocket, BLE HID typing, physical-button approvals), extended with BLE provisioning (`companion/provision.py` pushes the Mac's Wi-Fi credentials over BLE) and mDNS auto-discovery (`_ai-passport._tcp`, so `ws_test_server.py --mdns` needs no `ws set`). Usage, console commands, host tests and the device acceptance checklist are in [README.zh_CN.md](README.zh_CN.md) under “AI Passport 固件 MVP”.
+> The current `main` is the **AI Passport firmware MVP with pure-BLE direct connection**: the device is a zero-config voice recorder (BLE peripheral, GATT service `0xA2B0` with CTRL/EVENT/AUDIO characteristics), and the Mac companion (`companion/relay.py`) is the BLE central — it streams the audio to Volcano ASR, pushes live transcript previews to the device screen (`final:false` frames), and pastes the final text into the focused input box (clipboard + Cmd+V). No Wi-Fi, WebSocket, mDNS, provisioning, or HID keyboard. Usage, console commands, host tests and the device acceptance checklist are in [README.zh_CN.md](README.zh_CN.md) under “AI Passport 固件 MVP”.
 
 The current baseline includes a pure-logic test that can run independently:
 
@@ -196,10 +196,9 @@ See the [AI Hardware Development Guide](docs/AI_HARDWARE_DEVELOPMENT_GUIDE.md) f
 ```text
 components/bsp/include/  Public BSP APIs and bsp_pins.h hardware facts
 components/bsp/src/      Display, button, audio, battery, and shared-I2C implementations
-main/                    App UI, state machine, Wi-Fi/WS/BLE provisioning, mDNS resolver
+main/                    App UI, state machine, BLE audio/event GATT channel, audio streaming
 tests/                   Lightweight logic tests that can run without hardware
-companion/               Mac-side tools: BLE provisioning CLI, mDNS publisher, ASR client
-tools/                   WS mock server and dev scripts
+companion/               Mac-side relay: BLE central, ASR streaming client, input injector
 docs/                    Agent hardware development guide and extension documentation
 sdkconfig.defaults       ESP32-C3, USB console, Flash, and LVGL defaults
 AGENTS.md                Coding, validation, and contribution rules for agents

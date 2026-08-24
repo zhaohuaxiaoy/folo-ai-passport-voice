@@ -54,7 +54,7 @@ FoloToy AI Passport 是一个面向 AI agent 的开放式可穿戴 AI 硬件，�
 
 所有引脚、地址、面板参数和按键电压窗口只在 [`components/bsp/include/bsp_pins.h`](components/bsp/include/bsp_pins.h) 定义。应用代码不得复制这些常量。完整引脚表、面板初始化、ADC 阈值、I2C 地址规则、音频时钟和内存说明见 [AI 硬件开发指南](docs/AI_HARDWARE_DEVELOPMENT_GUIDE.md)。
 
-应用也可以使用 ESP-IDF 提供的定时器、FreeRTOS 任务和内部 Flash/NVS。当前 `main`（AI Passport 固件 MVP）已初始化 Wi-Fi（STA）与 NimBLE（HID 键盘外设），并开启软件共存；无线配置、行为与验收见下文「AI Passport 固件 MVP」章节。`demo/claude-buddy-port` 只能作为 BLE 应用架构参考，不能替代对当前板卡天线、射频表现、功耗和共存行为的实测。所有 FoloToy AI Passport 均配备 8 MB Flash，默认固件配置也以 8 MB 为准。
+应用也可以使用 ESP-IDF 提供的定时器、FreeRTOS 任务和内部 Flash/NVS。当前 `main`（AI Passport 固件 MVP）已初始化 NimBLE（BLE 外设，GATT 服务 0xA2B0），**不含 Wi-Fi/WS/mDNS/HID**；无线配置、行为与验收见下文「AI Passport 固件 MVP」章节。`demo/claude-buddy-port` 只能作为 BLE 应用架构参考，不能替代对当前板卡天线、射频表现、功耗和共存行为的实测。所有 FoloToy AI Passport 均配备 8 MB Flash，默认固件配置也以 8 MB 为准。
 
 ### 不属于当前能力契约的事项
 
@@ -168,29 +168,40 @@ cc -std=c11 -Wall -Wextra -Werror -Imain \
 
 ## AI Passport 固件 MVP（当前 `main`）
 
-`main` 已从演示菜单迁移为 AI Passport 产品固件：按住 ● 说话 → 语音经 WebSocket 流式上传到 Mac 端 Companion → Mac 回传转写文本 → 设备以 **BLE HID 键盘**身份逐字打进 Mac 聚焦的输入框；高风险操作由 3 颗实体按键物理审批。Mac 端 Companion 提供 BLE 配网与 mDNS 自动发现，与火山引擎 STT（`companion/asr_client.py`，需自行配置密钥）。
+`main` 已从演示菜单迁移为 AI Passport 产品固件，并演进为**纯 BLE 直连**架构：
+设备 = 零配置录音终端（BLE 外设，广播名 "AI Passport"，GATT 服务 `0xA2B0`：
+CTRL/EVENT/AUDIO 三特征），Mac 中转程序（`companion/relay.py`，BLE 中央）完成
+转写与输入。**无 Wi-Fi、无 WebSocket、无 mDNS、无配网、无 HID 键盘**——开机蓝牙直连即用。
+
+用户确认的产品行为：按住 ● 说话时，转写**实时出现在设备屏幕**（预览态，下行
+`transcript` 帧 `final:false`，文本尾部带光标感 `_`）；松手后**定稿完整出现在 Mac
+当前输入框**（剪贴板 + Cmd+V，中文/英文统一路径），并落定显示在设备屏幕（`final:true`）。
 
 ### 使用流程
 
-1. 首次使用，Mac 侧一条命令完成配网（设备开机后显示 `NO WIFI — PROVISION FROM MAC` 横幅）：
+1. 首次使用，Mac 侧一次授权 + 一次配置（密钥不入 git）：
+   - 系统设置 → 隐私与安全性 → 辅助功能 → 勾选终端（注入剪贴板+Cmd+V 必需）；
+   - `cp companion/config.example.json companion/config.local.json` 填入火山 API Key。
+2. 运行中转程序（自动扫描 "AI Passport" 并连接，首次自动配对）：
    ```bash
-   companion/.venv/bin/python companion/provision.py   # 自动识别 Mac 当前 Wi-Fi,getpass 输密码
+   companion/.venv/bin/python companion/relay.py
    ```
-   凭据经 BLE 加密链路写入并持久化，成功回显设备 IP；密码绝不落盘。
-2. Mac 侧运行模拟 Companion 开发服务器并发布 mDNS（设备免配自动发现，无需 `ws set`）：
-   ```bash
-   companion/.venv/bin/python tools/ws_test_server.py --mdns --approval --loop-transcript 'Hello from AI Passport 123'
-   ```
-3. 设备 ▲/▼ 选择工作流（BUILD/DEBUG/REVIEW/TEST/CAPTURE），按住 ● 说话，松开发送；
-   Mac 回传转写后设备经 BLE HID 键入（ASCII 逐字 ~40ms/字；中文回退粘贴模式）。
-4. 审批闭环：Mac 发 `agent.approval_request` → 设备进入审批页，● 批准 / ▲ 拒绝 / ▼ 看 Diff 详情。
-5. 逃生通道（mDNS 被路由器隔离时）：串口控制台 `wifi set <ssid> <pass>`、`ws set ws://<Mac IP>:8765`；
-   `ws set auto` 切回 mDNS 自动模式；`mdns resolve` 手动重查；`st` 状态一览（堆/Wi-Fi/WS/BLE/电量）。
+   `--device AA:BB:CC:DD:EE:FF` 直连指定设备；`--no-inject` 只转写不注入
+   （设备屏幕预览照常）；`--no-approval` 关审批演示；`--dry-run` 只打印注入命令。
+3. 设备 ▲/▼ 选择工作流（BUILD/DEBUG/REVIEW/TEST/CAPTURE），按住 ● 说话：
+   屏幕实时预览转写，松手后定稿文本注入 Mac 当前输入框（TextEdit 实测中文/英文）。
+4. 审批闭环：relay 发 `agent.approval_request` → 设备进入审批页，● 批准 / ▲ 拒绝 / ▼ 看 Diff 详情
+   → 回传 `agent.action`。
+5. 状态一览：串口控制台 `st`（堆/BLE 连接/EVENT 订阅/协商 MTU/音频与事件掉帧/电量）。
 
 ### 语音流式与内存纪律
 
-- 音频按 3200B 块（100ms @16kHz/16bit/单声道）经 4KB **静态**环形缓冲双 worker 上行；
-  拥塞时源端丢帧并显示 NET BUSY，绝无整段录音缓冲。任何路径最大连续堆分配 ≤4KB。
+- 音频按 3200B 块（100ms @16kHz/16bit/单声道）经 4KB **静态**环形缓冲双 worker 上行，
+  BLE AUDIO 特征 NOTIFY（2M PHY + MTU 517 + NOTIFY_TX 完成流控）；
+  链路拥塞/未连接时源端丢帧并显示 "BLE BUSY - dropping frames"，绝无整段录音缓冲。
+  任何路径最大连续堆分配 ≤4KB。
+- 掉帧对账：voice 结束后设备补发 `status` 帧（携带 drop 计数），relay 按
+  理论帧数 vs 实收数双端对账（AC3）。
 - 提示音与录音严格分时：滴声（440Hz/80ms）同步播完才开采集，避免 codec 单用户冲突。
 
 ### 主机测试
@@ -198,19 +209,29 @@ cc -std=c11 -Wall -Wextra -Werror -Imain \
 ```bash
 cd tests && cmake -B build && cmake --build build && ctest --test-dir build
 ```
-覆盖：状态机全转移（PTT 单击/双击取消/超时/审批/断线回退/动作顺序）、HID 键码表（全部可打印 ASCII）、协议 parse/serialize roundtrip、配网协议（合法/超限/畸形/512B 上限/序列化截断）——5/5，含 ASan（cJSON 内置在 `tests/third_party/cJSON`，无需 ESP-IDF）。
+覆盖：状态机全转移（PTT 单击/双击取消/超时/审批/断线回退/动作顺序、transcript
+预览/定稿两态）、BLE 音频分片（MTU 247/517 整分/非整分/边界 + `_Static_assert`
+事件 union 232B 不增）、协议 parse/serialize roundtrip（含 `final` 字段）、
+UI 像素计算——4/4，含 ASan（cJSON 内置在 `tests/third_party/cJSON`，无需 ESP-IDF）。
 
 ### 本迭代验收状态
 
 ```text
 Build:        NOT RUN（本机无 ESP-IDF;按上节命令在 5.5.3 环境构建）
-Host tests:   PASS（app_state / hid_keymap / ui_pixel_math / app_protocol / prov_protocol，5/5，含 ASan）
-Companion:    PASS（ble_prov 17/17 + mac_ssid 10/10 单测；本机 SSID 识别、mDNS 发布 dns-sd 可发现）
+Host tests:   PASS（app_state / ble_audio / ui_pixel_math / app_protocol，4/4，含 ASan）
+Companion:    PASS（relay 64 项单测;inject --dry-run 本机可跑;ASR bigmodel_async 流式本机实测;
+                  真实注入已验证（辅助功能已授权））
 Device tests: NOT RUN（需真机:见下节验收清单）
-Unverified:   BLE HID 实机键入、BLE 配网全流程、双连接共存、mDNS 换 IP 自动重连、空闲堆预算
+Unverified:   BLE 直连全链路（吞吐/掉帧率/距离/预览显示/bond 持久化/审批闭环）、空闲堆预算
 ```
 
-**真机验收清单**（继承 + 本轮新增）：5 工作流轮播与音效；60s 无按键熄屏、任意键唤醒；断线 OFFLINE 横幅（≤2s 显示、恢复 ≤3s 重连）；PTT → `voice.start` → 3200B 二进制流 → `voice.end`；Mac 蓝牙连接 "AI Passport KB" 并在 TextEdit 逐字键入（含 `--loop-transcript`）；`--approval` 全链路；`st` 对比空闲堆（60s PTT 后下降 ≤~10KB）；**BLE 配网全流程**（factory 复位 → 横幅+广播 → provision.py 配对/写入/ok+IP）；错误密码 → `auth_fail` → 改对重配；未配对写 → insufficient encryption 兜底；**双连接共存**（HID 打字同时配网 app 连接，配完回单连接）；**mDNS 换 IP 自动重连**（Mac 换网 → 15s~5min 内设备自动跟随）；重启凭据持久化 + mDNS 冷启动发现。
+**真机验收清单**：开机即广播 "AI Passport"、relay 自动发现连接（AC1）；按住 ● →
+`voice.start` → 3200B 连续帧 → `voice.end` → 屏幕实时预览 + 输入框定稿注入
+（TextEdit 中文/英文，AC2）；relay 掉帧统计 <1%（AC3）；审批闭环（AC4）；
+BLE 断开横幅 "BLE DISCONNECTED - reconnecting..." 与自动重连（AC5）；设备重启
+bond 持久化自动重连（AC6）；日志无敏感信息（AC7）；`st` 空闲堆 ≥ 删 WiFi 基线（AC8）；
+~10m 距离稳定（AC9）；无 wifi/ws/mdns/prov 残留（AC10）。吞吐链路：2M PHY 协商、
+MTU 517、连接间隔 15-30ms 实测（design.md 吞吐工程，真机记录实际吞吐）。
 
 ## 验收与交付格式
 
@@ -239,10 +260,9 @@ Unverified: 仍需板卡、仪器或用户确认的事项
 ```text
 components/bsp/include/  BSP 公开 API 与 bsp_pins.h 硬件事实
 components/bsp/src/      显示、按键、音频、电池、共享 I2C 实现
-main/                    应用 UI、状态机、Wi-Fi/WS/BLE 配网、mDNS 解析
+main/                    应用 UI、状态机、BLE 音频/事件 GATT 通道、音频流
 tests/                   可脱离硬件运行的轻量逻辑测试源
-companion/               Mac 端工具:BLE 配网、mDNS 发布、ASR 中转、单测
-tools/                   WS 模拟服务器与开发脚本
+companion/               Mac 端中转:BLE 中央、ASR 流式、输入注入、单测
 docs/                    agent 硬件开发指南与扩展文档
 sdkconfig.defaults       ESP32-C3、USB console、Flash、LVGL 默认配置
 AGENTS.md                agent 在本仓库的编码、验证和提交规则
