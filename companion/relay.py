@@ -230,11 +230,21 @@ class Relay:
                 self._closing = None
             await t.disconnect()
 
+    def _safe_put(self, q, item):
+        """有界队列安全写: 满则不抛(断开流程不被 QueueFull 打断)。
+        sentinel 丢失可接受(_stop.set() 已驱动 drain 退出);数据帧满 = 丢帧(计数)。"""
+        try:
+            q.put_nowait(item)
+        except asyncio.QueueFull:
+            if q is self._audio_q:
+                self._dropped_audio += 1
+            print("[relay] 队列满,条目丢弃", file=sys.stderr)
+
     def _on_disconnected(self, *_):
         print("[relay] BLE 连接已断开", file=sys.stderr)
         self._stop.set()
-        self._audio_q.put_nowait(("stop", b""))
-        self._event_q.put_nowait(("stop", b""))
+        self._safe_put(self._audio_q, ("stop", b""))
+        self._safe_put(self._event_q, ("stop", b""))
 
     def _cb(self, kind):
         def handler(data):

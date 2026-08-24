@@ -14,10 +14,12 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from relay import (  # noqa: E402
-    AUDIO_FRAME_BYTES, CTRL_UUID, EVENT_UUID, AUDIO_UUID,
+    AUDIO_FRAME_BYTES, AUDIO_Q_MAX, EVENT_Q_MAX,
+    CTRL_UUID, EVENT_UUID, AUDIO_UUID,
     TRANSCRIPT_TEXT_MAX, Relay, RelayError,
     reassemble_audio, reassemble_event, split_transcript,
 )
+from asr_client import StreamingASR, RESULTS_Q_MAX  # noqa: E402
 
 FAILURES = []
 
@@ -437,6 +439,41 @@ async def test_connect_timeout():
     check("超时后 asr 已关闭", holder["asr"].closed, True)
 
 
+async def test_results_queue_bounded():
+    """M2: ASR 结果队列有界——满时丢中间结果(计数),定稿保底不丢。"""
+    s = StreamingASR.__new__(StreamingASR)   # 绕过 __init__(不读真实配置)
+    s._results_q = asyncio.Queue(maxsize=4)
+    s._dropped_results = 0
+    for i in range(10):                      # 灌 10 条中间结果(容量 4)
+        await s._put_result(("result", f"partial{i}", False))
+    check("队列有界(≤4)", s._results_q.qsize(), 4)
+    check("丢弃计数(6)", s._dropped_results, 6)
+    # 定稿:await 入队保底(消费者放行),不丢
+    async def drain_one():
+        await s._results_q.get()
+    t = asyncio.create_task(drain_one())
+    await s._put_result(("result", "final", True))
+    await t
+    check("定稿不丢", s._results_q.qsize(), 4)
+    check("定稿未计入丢弃", s._dropped_results, 6)
+
+
+async def test_disconnect_queue_full():
+    """M2: 队列满时断连写 sentinel 不抛 QueueFull,退出流程可靠。"""
+    t = FakeTransport()
+    relay = Relay(t, asr_factory=make_fake_asr_factory([], {}),
+                  inject_fn=FakeInjector(), timeout=5)
+    # 音频/事件队列都已满(模拟下行最慢的积压态)
+    for _ in range(AUDIO_Q_MAX):
+        relay._audio_q.put_nowait(("audio", b"x" * 3200))
+    for _ in range(EVENT_Q_MAX):
+        relay._event_q.put_nowait(("event", b'{"event":"x"}\n'))
+    relay._stop.set()
+    relay._on_disconnected()                 # 满队列写 stop sentinel:不得抛
+    check("音频队列未越界", relay._audio_q.qsize(), AUDIO_Q_MAX)
+    check("事件队列未越界", relay._event_q.qsize(), EVENT_Q_MAX)
+
+
 async def test_no_approval_and_no_inject():
     t = FakeTransport()
     injector = FakeInjector()
@@ -715,6 +752,8 @@ async def main():
     await test_disconnect_cleanup()
     await test_disconnect_during_final()
     await test_connect_timeout()
+    await test_results_queue_bounded()
+    await test_disconnect_queue_full()
     await test_no_approval_and_no_inject()
     await test_transcript_downlink_long()
     await test_downlink_write_failure()

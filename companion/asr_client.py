@@ -141,6 +141,8 @@ def load_pcm(path):
 
 # ---- 流式会话(relay 用) ----
 
+RESULTS_Q_MAX = 256  # 结果队列有界: 下行变慢时丢中间结果, 定稿/错误保底不丢
+
 class StreamingASR:
     """双向流式 ASR 会话: 边收音频边发, 边收结果边取。
 
@@ -163,7 +165,8 @@ class StreamingASR:
         self.chunk_bytes = chunk_bytes
         self._ws = None
         self._recv_task = None
-        self._results_q = asyncio.Queue()
+        self._results_q = asyncio.Queue(maxsize=RESULTS_Q_MAX)
+        self._dropped_results = 0  # 队列满丢弃的中间结果数(有界:满则丢,见 _put_result)
         self._pending = None   # 末帧保底: 延迟一帧, 由 send_end 带结束标志发出
         self._closed = False
 
@@ -193,22 +196,33 @@ class StreamingASR:
         await self._ws.send(req)
         self._recv_task = asyncio.create_task(self._recv_loop())
 
+    async def _put_result(self, item):
+        """结果入队(有界): 队列满时丢弃中间结果(partial, 预览滞后无碍),
+        定稿/错误帧保底不丢(await 入队——阻塞的只是本接收循环, 唯一消费者)。"""
+        is_final = item[0] == "result" and item[2]
+        try:
+            self._results_q.put_nowait(item)
+        except asyncio.QueueFull:
+            if is_final or item[0] == "error":
+                await self._results_q.put(item)
+            else:
+                self._dropped_results += 1
+
     async def _recv_loop(self):
         try:
             while True:
                 raw = await self._ws.recv()
                 kind, flags, data = parse_server(raw)
                 if kind == "error":
-                    self._results_q.put_nowait(("error", data))
+                    await self._put_result(("error", data))
                 elif kind == "result":
                     text = ((data.get("result") or {}).get("text")) or ""
-                    self._results_q.put_nowait(
-                        ("result", text, bool(flags & 0x2)))
+                    await self._put_result(("result", text, bool(flags & 0x2)))
         except asyncio.CancelledError:
             raise
         except Exception as e:
             if not self._closed:
-                self._results_q.put_nowait(
+                await self._put_result(
                     ("error", {"code": "conn", "message": str(e)}))
 
     # -- 音频上行 --
