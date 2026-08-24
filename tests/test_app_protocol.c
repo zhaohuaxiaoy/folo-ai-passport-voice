@@ -99,6 +99,52 @@ static void test_parse_rejects(void) {
     assert(!app_protocol_parse("", 0, &ev));                                 // 空
 }
 
+// 深层嵌套拒绝:解析在 NimBLE host task(4KB 栈)上下文,cJSON 递归无深度限制,
+// 预检拦截(见 app_protocol.c json_depth_ok)——否则 2KB 内 [[[[...]]]] 可爆栈。
+static void test_parse_deep_nesting_rejected(void) {
+    app_event_t ev;
+
+    // 对象 200 层嵌套:拒绝
+    char deep_obj[2100];
+    size_t n = 0;
+    for (int i = 0; i < 200; i++) deep_obj[n++] = '{';
+    deep_obj[n++] = '1';
+    for (int i = 0; i < 200; i++) deep_obj[n++] = '}';
+    deep_obj[n] = '\0';
+    assert(!app_protocol_parse(deep_obj, n, &ev));
+
+    // 数组 200 层嵌套:拒绝
+    char deep_arr[2100];
+    n = 0;
+    for (int i = 0; i < 200; i++) deep_arr[n++] = '[';
+    deep_arr[n++] = '1';
+    for (int i = 0; i < 200; i++) deep_arr[n++] = ']';
+    deep_arr[n] = '\0';
+    assert(!app_protocol_parse(deep_arr, n, &ev));
+
+    // 32 层内:正常解析不误伤(最深 2 层)
+    const char *ok = "{\"type\":\"agent.status\",\"state\":\"running\","
+                     "\"message\":\"{\\\"nested\\\":[1,2,{\\\"a\\\":3}]}\"}";
+    assert(app_protocol_parse(ok, strlen(ok), &ev));
+    assert(ev.type == APP_EV_AGENT_STATUS);
+    assert(strcmp(ev.u.agent_status.message, "{\"nested\":[1,2,{\"a\":3}]}") == 0);
+
+    // 字符串内的 { [ 不计数(误判会拒绝正常含大括号文本的载荷)
+    const char *str_braces = "{\"type\":\"transcript\",\"text\":\"a { b [ c } d ] e\"}";
+    assert(app_protocol_parse(str_braces, strlen(str_braces), &ev));
+    assert(ev.type == APP_EV_TRANSCRIPT);
+    assert(strcmp(ev.u.transcript.text, "a { b [ c } d ] e") == 0);
+
+    // 转义引号内的 { 也不计数:"{\"a\":\"\\\"{[[[\"} 形式
+    const char *esc_quotes = "{\"type\":\"transcript\",\"text\":\"\\\"{[[[\"}";
+    assert(app_protocol_parse(esc_quotes, strlen(esc_quotes), &ev));
+    assert(ev.type == APP_EV_TRANSCRIPT);
+    assert(strcmp(ev.u.transcript.text, "\"{[[[") == 0);
+
+    // 未闭合括号(畸形)不因预检崩溃,仍走 cJSON 拒绝路径
+    assert(!app_protocol_parse("{\"type\":\"transcript\",\"text\":\"x\"", 32, &ev));
+}
+
 static void test_parse_long_line_truncation(void) {
     // 超长 transcript 行:解析失败(超过 RX 上限),而不是截断破坏内存
     char big[2100];
@@ -165,6 +211,7 @@ int main(void) {
     test_parse_approval();
     test_parse_transcript();
     test_parse_rejects();
+    test_parse_deep_nesting_rejected();
     test_parse_long_line_truncation();
     test_serialize();
     test_serialize_small_cap();

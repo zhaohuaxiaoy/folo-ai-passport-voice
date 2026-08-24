@@ -14,6 +14,40 @@ static const char *const WF_WIRE_NAMES[APP_WF_COUNT] = {
     [APP_WF_CAPTURE] = "capture",
 };
 
+// JSON 嵌套深度上限:解析在 NimBLE host task(默认栈 4KB)上下文执行,cJSON 的
+// 递归解析没有深度限制——2KB 载荷内的深层嵌套(如 [[[[...]]]])可爆栈崩溃。
+// 预检只扫结构字符({ [ 计数配对),跳过字符串(含转义),O(len) 微秒级早退。
+#define APP_PROTO_JSON_DEPTH_MAX 32
+
+static bool json_depth_ok(const char *json, size_t len) {
+    int depth = 0;
+    bool in_str = false;
+    // 遇 '\0' 即停:与 cJSON_ParseWithLength 的宽容语义一致(len 只是上限,
+    // 调用方可能传入含尾 NUL 的短行);按 len 硬扫会越界读。
+    for (size_t i = 0; i < len && json[i] != '\0'; i++) {
+        char c = json[i];
+        if (in_str) {
+            if (c == '\\' && i + 1 < len) i++;   // 跳过转义字符(含 \" 本身)
+            else if (c == '"') in_str = false;
+            continue;
+        }
+        switch (c) {
+        case '"': in_str = true; break;
+        case '{':
+        case '[':
+            if (++depth > APP_PROTO_JSON_DEPTH_MAX) return false;
+            break;
+        case '}':
+        case ']':
+            if (depth > 0) depth--;
+            break;
+        default:
+            break;
+        }
+    }
+    return true;
+}
+
 static void str_take(char *dst, size_t cap, const char *src) {
     if (!dst || cap == 0) return;
     if (!src) { dst[0] = '\0'; return; }
@@ -100,6 +134,7 @@ static bool parse_transcript(const cJSON *o, app_event_t *ev) {
 
 bool app_protocol_parse(const char *json, size_t len, app_event_t *ev) {
     if (!json || len == 0 || len > APP_PROTO_RX_CAP) return false;
+    if (!json_depth_ok(json, len)) return false;   // 深层嵌套:拒绝,保护解析者栈
     cJSON *root = cJSON_ParseWithLength(json, len);
     if (!root) return false;
     bool ok = false;
