@@ -71,6 +71,12 @@ typedef enum {
     APP_EV_AUDIO_ERROR,     // 采集硬件错误
     APP_EV_TONE_DONE,       // START 提示音播放完成(异步开流的信号,见 design)
     APP_EV_TICK,            // 100ms 心跳,驱动超时/息屏
+    // ---- WiFi/WS 通道(Windows 移植:无蓝牙 PC 走 WiFi,见 design.md)----
+    APP_EV_WIFI_CONNECTED,  // STA 拿到 IP(→ mDNS 解析 + WS 启动)
+    APP_EV_WIFI_CONNECT_FAIL, // STA 断线/连不上(按 reason 去重)
+    APP_EV_WS_CONNECTED,    // WS 通道通(link_up 的 WiFi 侧充分条件)
+    APP_EV_WS_DISCONNECTED, // WS 通道断(断连/停止)
+    APP_EV_WS_TARGET_FOUND, // mDNS 发现 Companion 地址(与缓存不同才投)
 } app_event_type_t;
 
 // Agent 状态(与协议字符串互转在 app_protocol.c)
@@ -114,6 +120,7 @@ typedef enum {
 // 显示通道:须 ≥ APP_TRANSCRIPT_MAX,保证 relay 按 128B 切分的转写行完整落屏
 #define APP_AGENT_MSG_MAX     APP_TRANSCRIPT_MAX
 #define APP_TOAST_MAX         64
+#define APP_WS_URL_MAX        128
 
 // 事件(定长结构,入队拷贝,union 保小)
 typedef struct {
@@ -141,6 +148,8 @@ typedef struct {
             uint8_t inject_mode;                        // app_inject_mode_t(协议兼容保留)
             bool final;                                 // false=预览态(未定稿);true=定稿落定
         } transcript;                                   // TRANSCRIPT
+        struct { uint16_t reason; } wifi_fail;          // WIFI_CONNECT_FAIL
+        struct { char url[APP_WS_URL_MAX]; } ws_target; // WS_TARGET_FOUND
     } u;
 } app_event_t;
 
@@ -158,6 +167,8 @@ typedef enum {
     APP_ACT_STREAM_STOP,
     APP_ACT_STREAM_CANCEL,   // 取消/断链:停采集 + 清空 ring + 丢弃在途帧(与 STOP 区别:不排空发送)
     APP_ACT_PLAY_TONE,
+    APP_ACT_WS_RETARGET,     // ws_client_retarget(运行时 URL,不写 NVS;mDNS 发现结果)
+    APP_ACT_RESOLVE_SERVICE, // mdns_resolver_request(触发 mDNS 重查)
 } app_action_type_t;
 
 #define APP_ACT_MAX 4   // 单事件最多产出的动作数

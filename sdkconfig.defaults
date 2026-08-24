@@ -26,6 +26,20 @@ CONFIG_FREERTOS_HZ=1000
 # st 控制台命令的全任务栈高水位枚举需要(F3 内存观测)。
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 
+# --- WiFi/WS 通道(Windows 移植:无蓝牙 PC 走 WiFi;双栈共存单射频活)---
+# 软件共存:BLE 与 WiFi 控制器分时(单射频芯片必需)。
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
+# WS 客户端收发缓冲 ≥ 3200B 音频帧(100ms@16kHz/16bit/mono 裸 PCM)。
+# 若小于帧长,esp_websocket_client 会分块发送,破坏 100ms 帧序。
+CONFIG_ESP_WEBSOCKET_CLIENT_BUFFER_SIZE_TX=4096
+CONFIG_ESP_WEBSOCKET_CLIENT_BUFFER_SIZE_RX=4096
+# lwIP 套接字上限:WiFi 栈 + WS + mDNS + SNTP 预留。
+CONFIG_LWIP_MAX_SOCKETS=6
+# WPA3 关闭:兼容旧路由器,减少 RAM 占用。
+CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=n
+# AMPDU TX 关闭:C3 仅需小吞吐音频,省 RAM 与功耗。
+CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=n
+
 # --- Bluetooth LE / NimBLE(BLE 直连音频外设)---
 # 参考 origin/demo/claude-buddy-port 已验证的 NimBLE 配置。
 CONFIG_BT_ENABLED=y

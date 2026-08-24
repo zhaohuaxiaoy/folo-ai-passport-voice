@@ -479,5 +479,15 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
     case APP_EV_TICK:
         handle_tick(s, now_ms, out, out_n, max);
         break;
+
+    // WiFi/WS 通道事件(Windows 移植):语义接入在下一步(P2)完成 ——
+    // link_up 对等、断连走 handle_link_down、WIFI_FAIL toast 去重、mDNS 重查动作。
+    // 显式占位以满足 -Wswitch,不产生任何动作。
+    case APP_EV_WIFI_CONNECTED:
+    case APP_EV_WIFI_CONNECT_FAIL:
+    case APP_EV_WS_CONNECTED:
+    case APP_EV_WS_DISCONNECTED:
+    case APP_EV_WS_TARGET_FOUND:
+        break;
     }
 }

@@ -11,10 +11,18 @@ idf_component_register(
          "audio_streamer.c"
          "ble_audio.c"
          "console_cmds.c"
+         "wifi_app.c"
+         "ws_client.c"
+         "mdns_resolver.c"
     INCLUDE_DIRS "."
     REQUIRES bsp
              json
              nvs_flash
              esp_console
              bt
+             esp_wifi
+             esp_netif
+             esp_event
+             mdns
+             esp_websocket_client
 )
