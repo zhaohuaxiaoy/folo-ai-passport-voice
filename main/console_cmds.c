@@ -13,6 +13,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const char *TAG = "console";
@@ -22,16 +23,31 @@ static int cmd_st(int argc, char **argv)
 {
     (void)argc; (void)argv;
     printf("--- system ---\n");
-    printf("heap free: %d B (min %d B)\n",
-           (int)esp_get_free_heap_size(), (int)esp_get_minimum_free_heap_size());
-    printf("tasks: %d\n", (int)uxTaskGetNumberOfTasks());
-    // 栈高水位(真机验证项 #3:event_worker 栈 2048 是否够用,st 可查)
-    TaskHandle_t t = xTaskGetHandle("app_task");
-    printf("app_task hwm: %u B\n",
-           t ? (unsigned)uxTaskGetStackHighWaterMark(t) : 0);
-    t = xTaskGetHandle("event_worker");
-    printf("event_worker hwm: %u B\n",
-           t ? (unsigned)uxTaskGetStackHighWaterMark(t) : 0);
+    printf("heap free: %d B (min %d B), largest free block: %d B\n",
+           (int)esp_get_free_heap_size(), (int)esp_get_minimum_free_heap_size(),
+           (int)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    // 全任务栈高水位枚举(F3:覆盖所有任务,替代只查两个的固定列表;需
+    // CONFIG_FREERTOS_USE_TRACE_FACILITY=y 提供 uxTaskGetSystemState)。
+    // 控制台低频调试命令,一次性 ~百字节堆分配可接受(不驻留)。
+    UBaseType_t n = uxTaskGetNumberOfTasks();
+    TaskStatus_t *sts = heap_caps_malloc((size_t)n * sizeof(TaskStatus_t),
+                                         MALLOC_CAP_8BIT);
+    if (!sts) {
+        printf("tasks: %u (状态数组分配失败)\n", (unsigned)n);
+    } else {
+        n = uxTaskGetSystemState(sts, n, NULL);
+        printf("tasks: %u\n", (unsigned)n);
+        printf("%-18s %-10s %10s\n", "name", "state", "hwm(B)");
+        static const char *state_name[] = { "running", "ready", "blocked",
+                                            "suspended", "deleted", "invalid" };
+        for (UBaseType_t i = 0; i < n; i++) {
+            const char *s = sts[i].eCurrentState <= eDeleted
+                                ? state_name[sts[i].eCurrentState] : "invalid";
+            printf("%-18s %-10s %10u\n", sts[i].pcTaskName, s,
+                   (unsigned)sts[i].usStackHighWaterMark);
+        }
+        free(sts);
+    }
     printf("--- ble ---\n");
     printf("connected: %s event_subscribed: %s mtu: %u\n",
            ble_audio_connected() ? "yes" : "no",
