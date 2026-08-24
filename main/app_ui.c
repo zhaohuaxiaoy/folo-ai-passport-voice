@@ -4,6 +4,7 @@
 #include "bsp_display.h"
 #include "ui_pixel.h"
 #include "lvgl.h"
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -304,6 +305,27 @@ static void set_hidden(lv_obj_t *o, bool hidden)
     else lv_obj_remove_flag(o, LV_OBJ_FLAG_HIDDEN);
 }
 
+// U1 dirty-check:文本未变则跳过 set_text。set_text 会重排标签并标记整行
+// 无效重绘——LISTENING 10fps 渲染下反复写相同文本(计时秒数、电量、CPU/RAM、
+// agent 消息)是无谓开销。lv_label_get_text 返回当前文本,比较后决定是否写。
+static void label_set_if_changed(lv_obj_t *l, const char *text)
+{
+    if (!l || !text) return;
+    const char *cur = lv_label_get_text(l);
+    if (cur && strcmp(cur, text) == 0) return;
+    lv_label_set_text(l, text);
+}
+
+static void label_set_fmt_if_changed(lv_obj_t *l, const char *fmt, ...)
+{
+    char buf[64];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    label_set_if_changed(l, buf);
+}
+
 // 转写预览态:文本尾部附一个光标感字符 '_'(未定稿视觉);定稿后移除。
 // 改动最小方案:不动样式,只改文本。栈缓冲覆盖 满长文本 + 光标。
 static void set_agent_message(lv_obj_t *label_obj, const char *msg, bool preview)
@@ -311,9 +333,9 @@ static void set_agent_message(lv_obj_t *label_obj, const char *msg, bool preview
     char buf[APP_AGENT_MSG_MAX + 2];
     if (preview && msg && msg[0]) {
         snprintf(buf, sizeof(buf), "%s_", msg);
-        lv_label_set_text(label_obj, buf);
+        label_set_if_changed(label_obj, buf);
     } else {
-        lv_label_set_text(label_obj, msg ? msg : "");
+        label_set_if_changed(label_obj, msg ? msg : "");
     }
 }
 
@@ -358,20 +380,20 @@ void app_ui_render(const app_ui_snapshot_t *snap, uint16_t mic_peak)
     lv_obj_set_style_bg_color(s_ble_icon,
         lv_color_hex(snap->ble_connected ? 0x7CD6FF : UI_MUTED), 0);
     if (snap->battery_available) {
-        lv_label_set_text_fmt(s_batt_label, "%d%%", snap->battery_soc);
+        label_set_fmt_if_changed(s_batt_label, "%d%%", snap->battery_soc);
     } else {
-        lv_label_set_text(s_batt_label, "--");
+        label_set_if_changed(s_batt_label, "--");
     }
-    lv_label_set_text_fmt(s_metrics_label, "CPU %d  RAM %d",
-                          snap->mac_cpu, snap->mac_ram);
-    lv_label_set_text(s_app_label, snap->active_app[0] ? snap->active_app : "");
+    label_set_fmt_if_changed(s_metrics_label, "CPU %d  RAM %d",
+                             snap->mac_cpu, snap->mac_ram);
+    label_set_if_changed(s_app_label, snap->active_app[0] ? snap->active_app : "");
 
     // 横幅互斥:OFFLINE(BLE 断线)> BLE BUSY(同位置 BANNER_Y)
     set_hidden(s_offline_banner, snap->link_up);
     set_hidden(s_netbusy_banner, !snap->net_busy || !snap->link_up);
 
     if (snap->toast[0]) {
-        lv_label_set_text(s_toast, snap->toast);
+        label_set_if_changed(s_toast, snap->toast);
         set_hidden(lv_obj_get_parent(s_toast), false);
     } else {
         set_hidden(lv_obj_get_parent(s_toast), true);
@@ -381,8 +403,8 @@ void app_ui_render(const app_ui_snapshot_t *snap, uint16_t mic_peak)
     show_page(snap->state);
     switch (snap->state) {
     case APP_ST_HOME:
-        lv_label_set_text(s_pages[APP_ST_HOME].home_wf,
-                          APP_WORKFLOW_NAMES[snap->workflow]);
+        label_set_if_changed(s_pages[APP_ST_HOME].home_wf,
+                             APP_WORKFLOW_NAMES[snap->workflow]);
         break;
     case APP_ST_READY:
         for (int i = 0; i < APP_WF_COUNT; i++) {
@@ -398,8 +420,8 @@ void app_ui_render(const app_ui_snapshot_t *snap, uint16_t mic_peak)
         uint32_t c = w > 150 ? UI_RED : (w > 70 ? UI_ORANGE : UI_GRASS);
         lv_obj_set_style_bg_color(s_pages[APP_ST_LISTENING].rec_bar_fill,
                                   lv_color_hex(c), 0);
-        lv_label_set_text_fmt(s_pages[APP_ST_LISTENING].rec_elapsed, "%ds",
-                              snap->elapsed_ms / 1000);
+        label_set_fmt_if_changed(s_pages[APP_ST_LISTENING].rec_elapsed, "%ds",
+                                 snap->elapsed_ms / 1000);
         break;
     }
     case APP_ST_TRANSCRIBING:
@@ -407,8 +429,8 @@ void app_ui_render(const app_ui_snapshot_t *snap, uint16_t mic_peak)
                           snap->agent_message, !snap->transcript_final);
         break;
     case APP_ST_AGENT_RUNNING:
-        lv_label_set_text(s_pages[APP_ST_AGENT_RUNNING].run_state,
-                          snap->agent_state_name);
+        label_set_if_changed(s_pages[APP_ST_AGENT_RUNNING].run_state,
+                             snap->agent_state_name);
         set_agent_message(s_pages[APP_ST_AGENT_RUNNING].run_message,
                           snap->agent_message, !snap->transcript_final);
         break;
@@ -416,11 +438,11 @@ void app_ui_render(const app_ui_snapshot_t *snap, uint16_t mic_peak)
         uint8_t r = snap->approval_risk < APP_RISK_COUNT ? snap->approval_risk : APP_RISK_MEDIUM;
         lv_obj_set_style_bg_color(s_pages[APP_ST_APPROVAL].ap_risk_banner,
                                   lv_color_hex(RISK_COLORS[r]), 0);
-        lv_label_set_text(s_pages[APP_ST_APPROVAL].ap_risk_label, RISK_NAMES[r]);
-        lv_label_set_text(s_pages[APP_ST_APPROVAL].ap_title, snap->approval_title);
-        lv_label_set_text_fmt(s_pages[APP_ST_APPROVAL].ap_target, "target: %s",
-                              snap->approval_target);
-        lv_label_set_text(s_pages[APP_ST_APPROVAL].ap_diff, snap->approval_diff);
+        label_set_if_changed(s_pages[APP_ST_APPROVAL].ap_risk_label, RISK_NAMES[r]);
+        label_set_if_changed(s_pages[APP_ST_APPROVAL].ap_title, snap->approval_title);
+        label_set_fmt_if_changed(s_pages[APP_ST_APPROVAL].ap_target, "target: %s",
+                                 snap->approval_target);
+        label_set_if_changed(s_pages[APP_ST_APPROVAL].ap_diff, snap->approval_diff);
         break;
     }
     default:
