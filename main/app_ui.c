@@ -4,6 +4,7 @@
 #include "bsp_display.h"
 #include "ui_pixel.h"
 #include "lvgl.h"
+#include <stdio.h>
 #include <string.h>
 
 // ---- 布局常量 ----
@@ -44,7 +45,6 @@ static lv_obj_t *s_batt_label;
 static lv_obj_t *s_metrics_label;
 static lv_obj_t *s_app_label;
 static lv_obj_t *s_offline_banner;
-static lv_obj_t *s_nowifi_banner;
 static lv_obj_t *s_netbusy_banner;
 static lv_obj_t *s_toast;
 
@@ -132,19 +132,14 @@ static void build_chrome(void)
     s_app_label = label(s_chrome, "", &lv_font_montserrat_14, UI_MUTED,
                         168, 5, 68);
 
-    // 未配网常驻横幅(优先级最高:无凭据 → 引导 Mac 配网)
-    s_nowifi_banner = block(s_chrome, 0, BANNER_Y, W, BANNER_H, UI_ORANGE);
-    label(s_nowifi_banner, "NO WIFI - PROVISION FROM MAC", &lv_font_montserrat_14,
-          UI_INK, 0, 0, W);
-
-    // OFFLINE 横幅(断线时整宽显示)
+    // BLE 断线横幅(链路断时整宽显示;link_up = EVENT 特征已订阅)
     s_offline_banner = block(s_chrome, 0, BANNER_Y, W, BANNER_H, UI_RED);
-    label(s_offline_banner, "OFFLINE - reconnecting...", &lv_font_montserrat_14,
+    label(s_offline_banner, "BLE DISCONNECTED - reconnecting...", &lv_font_montserrat_14,
           0xFFFFFF, 0, 0, W);
 
-    // NET BUSY(音频丢帧中)
+    // BLE BUSY(音频丢帧中)
     s_netbusy_banner = block(s_chrome, 0, BANNER_Y, W, BANNER_H, UI_ORANGE);
-    label(s_netbusy_banner, "NET BUSY - dropping frames", &lv_font_montserrat_14,
+    label(s_netbusy_banner, "BLE BUSY - dropping frames", &lv_font_montserrat_14,
           UI_INK, 0, 0, W);
 
     // Toast(底部浮层,空文本即隐藏)
@@ -309,6 +304,19 @@ static void set_hidden(lv_obj_t *o, bool hidden)
     else lv_obj_remove_flag(o, LV_OBJ_FLAG_HIDDEN);
 }
 
+// 转写预览态:文本尾部附一个光标感字符 '_'(未定稿视觉);定稿后移除。
+// 改动最小方案:不动样式,只改文本。栈缓冲覆盖 满长文本 + 光标。
+static void set_agent_message(lv_obj_t *label_obj, const char *msg, bool preview)
+{
+    char buf[APP_AGENT_MSG_MAX + 2];
+    if (preview && msg && msg[0]) {
+        snprintf(buf, sizeof(buf), "%s_", msg);
+        lv_label_set_text(label_obj, buf);
+    } else {
+        lv_label_set_text(label_obj, msg ? msg : "");
+    }
+}
+
 // ---- 页切换 ----
 static void show_page(app_stage_t st)
 {
@@ -358,10 +366,9 @@ void app_ui_render(const app_ui_snapshot_t *snap, uint16_t mic_peak)
                           snap->mac_cpu, snap->mac_ram);
     lv_label_set_text(s_app_label, snap->active_app[0] ? snap->active_app : "");
 
-    // 横幅互斥:未配网 > OFFLINE > NET BUSY(同位置 BANNER_Y)
-    set_hidden(s_nowifi_banner, snap->wifi_configured);
-    set_hidden(s_offline_banner, snap->ws_connected || !snap->wifi_configured);
-    set_hidden(s_netbusy_banner, !snap->net_busy);
+    // 横幅互斥:OFFLINE(BLE 断线)> BLE BUSY(同位置 BANNER_Y)
+    set_hidden(s_offline_banner, snap->link_up);
+    set_hidden(s_netbusy_banner, !snap->net_busy || !snap->link_up);
 
     if (snap->toast[0]) {
         lv_label_set_text(s_toast, snap->toast);
@@ -396,14 +403,14 @@ void app_ui_render(const app_ui_snapshot_t *snap, uint16_t mic_peak)
         break;
     }
     case APP_ST_TRANSCRIBING:
-        lv_label_set_text(s_pages[APP_ST_TRANSCRIBING].tr_message,
-                          snap->agent_message);
+        set_agent_message(s_pages[APP_ST_TRANSCRIBING].tr_message,
+                          snap->agent_message, !snap->transcript_final);
         break;
     case APP_ST_AGENT_RUNNING:
         lv_label_set_text(s_pages[APP_ST_AGENT_RUNNING].run_state,
                           snap->agent_state_name);
-        lv_label_set_text(s_pages[APP_ST_AGENT_RUNNING].run_message,
-                          snap->agent_message);
+        set_agent_message(s_pages[APP_ST_AGENT_RUNNING].run_message,
+                          snap->agent_message, !snap->transcript_final);
         break;
     case APP_ST_APPROVAL: {
         uint8_t r = snap->approval_risk < APP_RISK_COUNT ? snap->approval_risk : APP_RISK_MEDIUM;

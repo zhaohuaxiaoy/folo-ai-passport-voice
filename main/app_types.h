@@ -4,7 +4,6 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-#include "prov_protocol.h"   // PROV_SSID_MAX/PROV_PASS_MAX/prov_wifi_set_t(纯 C 头)
 
 #ifdef __cplusplus
 extern "C" {
@@ -60,22 +59,16 @@ typedef enum {
     APP_EV_KEY_CLICK,
     APP_EV_KEY_DOUBLE,
     APP_EV_KEY_LONG,
-    APP_EV_WS_CONNECTED,
-    APP_EV_WS_DISCONNECTED,
     APP_EV_MAC_METRICS,
     APP_EV_AGENT_STATUS,
     APP_EV_APPROVAL_REQUEST,
     APP_EV_TRANSCRIPT,
     APP_EV_AUDIO_DROP_START,
     APP_EV_AUDIO_DROP_END,
-    APP_EV_BLE_CONNECTED,
-    APP_EV_BLE_DISCONNECTED,
-    APP_EV_BLE_DROP,        // BLE 注入因断连/未订阅被丢弃(UI toast 反馈)
-    APP_EV_PROV_CMD,        // BLE 配网凭据(写特征回调投递,零阻塞)
-    APP_EV_WIFI_CONNECTED,  // WiFi 连上(GOT_IP)
-    APP_EV_WIFI_CONNECT_FAIL, // WiFi 连接失败(u.wifi_fail.reason)
-    APP_EV_WS_TARGET_FOUND, // mDNS 发现 Mac(u.ws_target.url)
-    APP_EV_AUDIO_ERROR,     // 采集硬件错误(与 WS 断线语义不同)
+    APP_EV_BLE_CONNECTED,   // 链路通:EVENT 特征已被订阅(PTT 可用的充分条件)
+    APP_EV_BLE_DISCONNECTED,// 链路断(连接断开或 EVENT 订阅取消)
+    APP_EV_BLE_DROP,        // BLE 事件行因断连/未订阅被丢弃(UI toast 反馈)
+    APP_EV_AUDIO_ERROR,     // 采集硬件错误
     APP_EV_TICK,            // 100ms 心跳,驱动超时/息屏
 } app_event_type_t;
 
@@ -89,10 +82,10 @@ typedef enum {
     APP_AGENT_COUNT,
 } app_agent_state_t;
 
-// 注入方式
+// 注入方式(协议兼容保留:Mac 端注入,设备不再消费;UI 显示转写)
 typedef enum {
-    APP_INJECT_TYPE = 0,    // BLE HID 逐字键入(仅 ASCII)
-    APP_INJECT_PASTE,       // 粘贴:Mac 已设剪贴板,设备发 Cmd+V
+    APP_INJECT_TYPE = 0,    // 旧:HID 逐字键入(退役,仅字段保留)
+    APP_INJECT_PASTE,       // 旧:粘贴 Cmd+V(退役,仅字段保留)
 } app_inject_mode_t;
 
 // 审批风险等级
@@ -110,16 +103,16 @@ typedef enum {
     APP_ACTION_DETAILS,
 } app_approval_decision_t;
 
-// 文本长度上限(与 hid 注入块一致;超长转写由 Mac 端分多条 transcript 发)
+// 文本长度上限(Mac 端按条下发,设备仅显示)
 #define APP_TRANSCRIPT_MAX    128
 #define APP_TASK_ID_MAX       32
 #define APP_TITLE_MAX         64
 #define APP_TARGET_MAX        64
 #define APP_DIFF_MAX          64
 #define APP_METRIC_APP_MAX    24
-#define APP_AGENT_MSG_MAX     96
+// 显示通道:须 ≥ APP_TRANSCRIPT_MAX,保证 relay 按 128B 切分的转写行完整落屏
+#define APP_AGENT_MSG_MAX     APP_TRANSCRIPT_MAX
 #define APP_TOAST_MAX         64
-#define APP_WS_URL_MAX        128
 
 // 事件(定长结构,入队拷贝,union 保小)
 typedef struct {
@@ -144,14 +137,9 @@ typedef struct {
         } approval;                                     // APPROVAL_REQUEST
         struct {
             char text[APP_TRANSCRIPT_MAX];
-            uint8_t inject_mode;                        // app_inject_mode_t
+            uint8_t inject_mode;                        // app_inject_mode_t(协议兼容保留)
+            bool final;                                 // false=预览态(未定稿);true=定稿落定
         } transcript;                                   // TRANSCRIPT
-        struct {
-            char ssid[PROV_SSID_MAX + 1];
-            char pass[PROV_PASS_MAX + 1];
-        } prov;                                         // PROV_CMD
-        struct { uint16_t reason; } wifi_fail;          // WIFI_CONNECT_FAIL
-        struct { char url[APP_WS_URL_MAX]; } ws_target; // WS_TARGET_FOUND
     } u;
 } app_event_t;
 
@@ -168,10 +156,6 @@ typedef enum {
     APP_ACT_STREAM_START,
     APP_ACT_STREAM_STOP,
     APP_ACT_PLAY_TONE,
-    APP_ACT_INJECT_TEXT,
-    APP_ACT_PROV_WIFI,        // wifi_app_set_credentials(配网凭据)
-    APP_ACT_WS_RETARGET,      // ws_client_retarget(运行时 URL,不写 NVS)
-    APP_ACT_RESOLVE_SERVICE,  // mdns_resolver_request(触发 mDNS 重查)
 } app_action_type_t;
 
 #define APP_ACT_MAX 4   // 单事件最多产出的动作数
@@ -185,12 +169,6 @@ typedef struct {
             char task_id[APP_TASK_ID_MAX];
             uint8_t decision;                           // app_approval_decision_t
         } agent_action;                                 // SEND_AGENT_ACTION
-        struct {
-            char text[APP_TRANSCRIPT_MAX];
-            uint8_t inject_mode;
-        } inject;                                       // INJECT_TEXT
-        struct { char url[APP_WS_URL_MAX]; } ws_target; // WS_RETARGET
-        prov_wifi_set_t prov;                           // PROV_WIFI
     } u;
 } app_action_t;
 
@@ -198,19 +176,19 @@ typedef struct {
 typedef struct {
     app_stage_t    state;
     app_workflow_t workflow;
-    bool           ws_connected;    // false → OFFLINE 横幅 + 禁 PTT
+    bool           link_up;       // false → OFFLINE(BLE DISCONNECTED)横幅 + 禁 PTT;true = EVENT 已订阅
     bool           screen_on;
-    bool           net_busy;        // 音频丢帧中 → NET BUSY
-    bool           ble_connected;   // BLE 键盘是否已连接
-    bool           wifi_configured; // 无凭据 → "NO WIFI" 未配网横幅
+    bool           net_busy;      // 音频丢帧中 → BLE BUSY
+    bool           ble_connected; // BLE 连接是否建立(未订阅时图标灰色)
     bool           battery_available;
-    uint8_t        battery_soc;     // 0..100
-    uint8_t        mac_cpu;         // 0..100
-    uint8_t        mac_ram;         // 0..100
-    uint8_t        mac_batt;        // 0..100
+    uint8_t        battery_soc;   // 0..100
+    uint8_t        mac_cpu;       // 0..100
+    uint8_t        mac_ram;       // 0..100
+    uint8_t        mac_batt;      // 0..100
     bool           mac_charging;
     char           active_app[APP_METRIC_APP_MAX];
     char           agent_message[APP_AGENT_MSG_MAX];
+    bool           transcript_final; // false → 当前 agent_message 是转写预览(未定稿,UI 加光标感)
     char           agent_state_name[16];
     char           task_id[APP_TASK_ID_MAX];
     char           approval_title[APP_TITLE_MAX];
@@ -226,7 +204,6 @@ typedef struct {
 #define APP_IDLE_SCREENOFF_MS   60000u   // 无按键息屏
 #define APP_TRANSCRIBE_TIMEOUT  30000u   // 转写等待超时
 #define APP_AGENT_RUN_TIMEOUT   90000u   // Agent 执行超时
-#define APP_PROV_TIMEOUT_MS     30000u   // 配网结果等待上限(BLE 通知超时)
 #define APP_TICK_MS             100u     // 应用任务心跳
 
 #ifdef __cplusplus

@@ -24,6 +24,8 @@ size_t app_protocol_workflow_switch(char *buf, size_t cap, app_workflow_t wf);
 // decision: app_approval_decision_t (approve/reject/details)
 size_t app_protocol_agent_action(char *buf, size_t cap, const char *task_id,
                                  uint8_t decision);
+// voice.end 后补发的会话对账帧: {"event":"status","drop":n}(掉帧对账,见 design.md)
+size_t app_protocol_device_status(char *buf, size_t cap, uint32_t drop_count);
 
 #ifdef __cplusplus
 }

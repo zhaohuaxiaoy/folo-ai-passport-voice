@@ -1,7 +1,7 @@
 // main/audio_streamer.c —— 流式音频管线实现。
 #include "audio_streamer.h"
 #include "app_events.h"
-#include "ws_client.h"
+#include "ble_audio.h"
 #include "bsp_audio.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -11,7 +11,7 @@
 
 static const char *TAG = "audio";
 
-// 100ms @ 16kHz/16bit/mono = 3200B(与产品文档一致,也是 WS TX 缓冲的上限)
+// 100ms @ 16kHz/16bit/mono = 3200B(与 ble_audio AUDIO_FRAME_BYTES 对齐)
 #define CHUNK_BYTES  3200
 #define RING_BYTES   4096   // 静态环,约可容一块
 
@@ -24,9 +24,10 @@ static volatile bool s_active = false;
 static volatile bool s_worker_busy = false;  // audio_worker 是否仍在阻塞读中(供 stop 等待)
 static volatile uint16_t s_peak = 0;
 static bool s_drop_active = false;           // 共享丢帧标志:采集/发送两侧共用一个边沿
+static uint32_t s_drop_count = 0;            // 本会话丢帧计数(start 清零;voice.end 后取走上报)
 
 static void audio_worker(void *arg);
-static void ws_worker(void *arg);
+static void ble_worker(void *arg);
 
 esp_err_t audio_streamer_init(void) {
     s_ring = xRingbufferCreateStatic(RING_BYTES, RINGBUF_TYPE_BYTEBUF,
@@ -37,7 +38,7 @@ esp_err_t audio_streamer_init(void) {
 
     // 音频优先:采集(6) > 发送(5),麦克风数据永不因发送慢而丢失采集节奏
     xTaskCreate(audio_worker, "audio_worker", 4096, NULL, 6, NULL);
-    xTaskCreate(ws_worker, "ws_worker", 4096, NULL, 5, NULL);
+    xTaskCreate(ble_worker, "ble_worker", 4096, NULL, 5, NULL);
     ESP_LOGI(TAG, "流式管线就绪(静态环 %d B,块 %d B)", RING_BYTES, CHUNK_BYTES);
     return ESP_OK;
 }
@@ -47,6 +48,7 @@ void audio_streamer_start(void) {
     s_active = true;
     s_peak = 0;
     s_drop_active = false;
+    s_drop_count = 0;
     xSemaphoreGive(s_sem);
     ESP_LOGI(TAG, "采集开始");
 }
@@ -65,8 +67,14 @@ bool audio_streamer_active(void) { return s_active; }
 
 uint16_t audio_streamer_peak(void) { return s_peak; }
 
+uint32_t audio_streamer_take_drops(void) {
+    uint32_t d = s_drop_count;
+    s_drop_count = 0;
+    return d;
+}
+
 // 等环空(最多 ms 毫秒),用于 voice.end 前的帧序保证。
-// 只轮询不消费:环满即还有数据(含 ws_worker 已取走未归还的在飞块),取走不发送=丢队尾。
+// 只轮询不消费:环满即还有数据(含 ble_worker 已取走未归还的在飞块),取走不发送=丢队尾。
 void audio_streamer_drain(uint32_t ms) {
     const TickType_t until = xTaskGetTickCount() + pdMS_TO_TICKS(ms);
     while (xTaskGetTickCount() < until) {
@@ -102,7 +110,8 @@ static void audio_worker(void *arg) {
 
             if (xRingbufferSend(s_ring, s_chunk, CHUNK_BYTES,
                                 pdMS_TO_TICKS(50)) != pdTRUE) {
-                // 环满:源端丢弃(麦克风继续跑,I2S 驱动自动落样),报 NET BUSY
+                // 环满:源端丢弃(麦克风继续跑,I2S 驱动自动落样),报 BLE BUSY
+                s_drop_count++;
                 if (!s_drop_active) {
                     s_drop_active = true;
                     app_event_t ev = { .type = APP_EV_AUDIO_DROP_START };
@@ -114,17 +123,17 @@ static void audio_worker(void *arg) {
     }
 }
 
-static void ws_worker(void *arg) {
+static void ble_worker(void *arg) {
     (void)arg;
     for (;;) {
         size_t len = 0;
         void *item = xRingbufferReceiveUpTo(s_ring, &len, pdMS_TO_TICKS(100),
                                             CHUNK_BYTES);
         if (!item) continue;
-        esp_err_t e = ws_client_send_bin_blocking(item, len);
+        int rc = ble_audio_notify_audio(item, len);
         vRingbufferReturnItem(s_ring, item);
-        if (e == ESP_OK) {
-            // 发送恢复且环已有余量(不再积压)才解除 NET BUSY——
+        if (rc == 0) {
+            // 发送恢复且环已有余量(不再积压)才解除 BLE BUSY——
             // 只靠发送成功不够:若发送慢但一直成功,环满造成的丢帧永远不会被解除
             if (s_drop_active &&
                 xRingbufferGetCurFreeSize(s_ring) >= CHUNK_BYTES) {
@@ -133,12 +142,14 @@ static void ws_worker(void *arg) {
                 app_event_post(&ev);
             }
         } else {
+            // 无订阅/断连/流控超时:整帧丢弃并计数(voice.end 后 status 帧上报)
+            s_drop_count++;
             if (!s_drop_active) {
                 s_drop_active = true;
                 app_event_t ev = { .type = APP_EV_AUDIO_DROP_START };
                 app_event_post(&ev);
             }
-            ESP_LOGW(TAG, "音频帧发送失败,丢弃");
+            ESP_LOGW(TAG, "音频帧 BLE 发送失败,丢弃");
         }
     }
 }

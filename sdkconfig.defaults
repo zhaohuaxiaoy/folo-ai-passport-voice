@@ -24,31 +24,19 @@ CONFIG_LV_MEM_SIZE_KILOBYTES=24
 # --- 系统 ---
 CONFIG_FREERTOS_HZ=1000
 
-# --- Bluetooth LE / NimBLE(HID 键盘外设)---
+# --- Bluetooth LE / NimBLE(BLE 直连音频外设)---
 # 参考 origin/demo/claude-buddy-port 已验证的 NimBLE 配置。
 CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y
 CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
-CONFIG_BT_NIMBLE_MAX_CONNECTIONS=2
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
 CONFIG_BT_NIMBLE_HOST_BASED_PRIVACY=n
 CONFIG_BT_NIMBLE_UTIL_API=y
-# Just Works 配对(SC 无 MITM,无需输 PIN);macOS 对 HID 键盘一般直接放行,
-# 若拒绝则此配置让配对兜底(代码侧需 ble_store_config_init 持久化 bond)。
+# Just Works 配对(SC 无 MITM,无需输 PIN);macOS 主动发起,此配置让配对兜底
+# (代码侧需 ble_store_config_init 持久化 bond)。
 CONFIG_BT_NIMBLE_SM_LEGACY=n
 CONFIG_BT_NIMBLE_SM_SC=y
 CONFIG_BT_NIMBLE_NVS_PERSIST=y
-
-# --- Wi-Fi + BLE 共存(单核必须)---
-CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
-
-# --- WebSocket 缓冲 ---
-# TX 须 ≥ 单块音频 3200B + 帧头,否则 send_bin 会分块(破坏 100ms 帧序)。
-# RX 4096:超协议上限(2048B)的服务端行不至于直接断连,由应用层整行丢弃。
-CONFIG_ESP_WEBSOCKET_CLIENT_BUFFER_SIZE_TX=4096
-CONFIG_ESP_WEBSOCKET_CLIENT_BUFFER_SIZE_RX=4096
-
-# --- LWIP:WS 1 路 + DNS 1 路 + mDNS UDP 1 路 ---
-CONFIG_LWIP_MAX_SOCKETS=6
-# --- Wi-Fi:关 WPA3/AMPDU 省 RAM(路由器 WPA2 即可;真用 WPA3 时再开回来)---
-CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=n
-CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=n
+# 协商 ATT MTU 517(含 3B 头 → 载荷 514B):3200B 音频帧 = 7 片(6×514+116),
+# 分片远少于 MTU 247 的 14 片,显著降低 NOTIFY_TX 流控开销(吞吐工程,见 design.md)。
+CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=517

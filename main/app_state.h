@@ -11,23 +11,20 @@ extern "C" {
 typedef struct {
     app_stage_t    state;
     app_workflow_t workflow;
-    bool           ws_connected;
+    bool           link_up;       // EVENT 特征已订阅(链路通);false → 禁 PTT + OFFLINE 横幅
     bool           net_busy;
     bool           screen_on;
-    bool           ble_connected;
+    bool           ble_connected; // BLE 连接已建立(与 link_up 区别:连接但未订阅)
     uint64_t       last_key_ms;     // 最近按键时刻(息屏计时)
     uint64_t       state_since_ms;  // 进入当前状态的时刻(超时计时)
     uint64_t       toast_until_ms;
     bool           ptt_pending_end; // LISTENING:已松开、等单击窗口定夺(再按=取消,到期=发送)
-    bool           wifi_configured; // NVS 已有凭据(未配网横幅依据)
-    bool           provisioning;    // BLE 配网会话进行中
-    uint64_t       prov_deadline_ms;// 配网超时时刻(provisioning 时有效)
-    char           wifi_ssid[PROV_SSID_MAX + 1];
     char           toast[APP_TOAST_MAX];
     uint8_t        mac_cpu, mac_ram, mac_batt;
     bool           mac_charging;
     char           active_app[APP_METRIC_APP_MAX];
     char           agent_message[APP_AGENT_MSG_MAX];
+    bool           transcript_final;   // false → agent_message 是转写预览(未定稿);true = 定稿/非转写
     char           agent_state_name[16];
     char           task_id[APP_TASK_ID_MAX];
     char           approval_title[APP_TITLE_MAX];

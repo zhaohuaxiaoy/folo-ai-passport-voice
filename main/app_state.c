@@ -25,7 +25,9 @@ void app_state_init(app_state_t *s) {
     s->state = APP_ST_HOME;
     s->workflow = APP_WF_BUILD;
     s->screen_on = true;
-    s->ble_connected = true; // 启动瞬间无从判断,先按"已连接"渲染,断开后由 BLE 事件翻为 false
+    // 启动瞬间无从判断,先按"链路通"渲染;未订阅时由 BLE 事件翻为 false
+    s->ble_connected = true;
+    s->link_up = true;
 }
 
 static void emit(app_action_t *out, uint8_t *n, uint8_t max, app_action_t a) {
@@ -47,11 +49,10 @@ void app_state_snapshot(const app_state_t *s, uint64_t now_ms, app_ui_snapshot_t
     memset(snap, 0, sizeof(*snap));
     snap->state            = s->state;
     snap->workflow         = s->workflow;
-    snap->ws_connected     = s->ws_connected;
+    snap->link_up          = s->link_up;
     snap->screen_on        = s->screen_on;
     snap->net_busy         = s->net_busy;
     snap->ble_connected    = s->ble_connected;
-    snap->wifi_configured  = s->wifi_configured;
     snap->elapsed_ms       = (uint32_t)(now_ms - s->state_since_ms);
     snap->battery_available = true; // 由主循环在快照后补真实值,见 app_ui
     snap->mac_cpu          = s->mac_cpu;
@@ -60,6 +61,7 @@ void app_state_snapshot(const app_state_t *s, uint64_t now_ms, app_ui_snapshot_t
     snap->mac_charging     = s->mac_charging;
     str_cpy(snap->active_app, sizeof(snap->active_app), s->active_app);
     str_cpy(snap->agent_message, sizeof(snap->agent_message), s->agent_message);
+    snap->transcript_final = s->transcript_final;
     str_cpy(snap->agent_state_name, sizeof(snap->agent_state_name), s->agent_state_name);
     str_cpy(snap->task_id, sizeof(snap->task_id), s->task_id);
     str_cpy(snap->approval_title, sizeof(snap->approval_title), s->approval_title);
@@ -140,7 +142,7 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             app_action_t r = { .type = APP_ACT_UI_REFRESH };
             emit(out, n, max, r);
         } else if (ev->type == APP_EV_KEY_PRESS && b == APP_BTN_OK) {
-            if (!s->ws_connected) {
+            if (!s->link_up) {
                 set_toast(s, now_ms, "OFFLINE - PTT blocked");
                 app_action_t t = { .type = APP_ACT_PLAY_TONE };
                 t.u.tone = APP_TONE_ERROR;
@@ -211,6 +213,7 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             s->state = APP_ST_AGENT_RUNNING;
             s->state_since_ms = now_ms;
             str_cpy(s->agent_message, sizeof(s->agent_message), "Approved, agent continues...");
+            s->transcript_final = true;   // 非转写文本,无预览光标
             app_action_t r = { .type = APP_ACT_UI_REFRESH };
             emit(out, n, max, r);
         } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_UP) {
@@ -224,6 +227,7 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             s->state = APP_ST_AGENT_RUNNING;
             s->state_since_ms = now_ms;
             str_cpy(s->agent_message, sizeof(s->agent_message), "Rejected by user");
+            s->transcript_final = true;   // 非转写文本,无预览光标
             app_action_t r = { .type = APP_ACT_UI_REFRESH };
             emit(out, n, max, r);
         } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
@@ -249,29 +253,10 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
     }
 }
 
-// WiFi 断开 reason → 简短 toast(与 prd 错误码语义对齐)
-static const char *wifi_fail_text(uint16_t reason) {
-    switch (reason) {
-    case 201: return "WiFi: no AP";            // NO_AP
-    case 202: case 15: case 2: return "WiFi: auth fail";   // AUTH_FAIL
-    case 203: return "WiFi: assoc fail";       // ASSOC_FAIL
-    default:  return "WiFi: connect fail";
-    }
-}
-
 static void handle_tick(app_state_t *s, uint64_t now_ms, app_action_t *out, uint8_t *n, uint8_t max) {
     // toast 过期
     if (s->toast[0] && now_ms >= s->toast_until_ms) {
         s->toast[0] = '\0';
-        app_action_t r = { .type = APP_ACT_UI_REFRESH };
-        emit(out, n, max, r);
-    }
-
-    // 配网结果 30s 超时:清会话标志,结果通知由主循环编排
-    if (s->provisioning && now_ms >= s->prov_deadline_ms) {
-        s->provisioning = false;
-        s->prov_deadline_ms = 0;
-        set_toast(s, now_ms, "Provisioning timeout");
         app_action_t r = { .type = APP_ACT_UI_REFRESH };
         emit(out, n, max, r);
     }
@@ -305,30 +290,20 @@ static void handle_tick(app_state_t *s, uint64_t now_ms, app_action_t *out, uint
     }
 }
 
-static void handle_ws(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
-                      app_action_t *out, uint8_t *n, uint8_t max) {
-    if (ev->type == APP_EV_WS_CONNECTED) {
-        s->ws_connected = true;
-        app_action_t r = { .type = APP_ACT_UI_REFRESH };
-        emit(out, n, max, r);
-        return;
-    }
-    // 断开:横幅派生;任何状态下都兜底停流(防审批请求泄漏的录音管线);转写/执行中回 READY;
-    // 审批保持(等待 Mac 重发请求)
-    s->ws_connected = false;
+// 链路断开(BLE 断连或 EVENT 订阅取消):兜底停流 + 状态回退。
+// 审批保持:等待 Mac 重连后重发请求。
+static void handle_link_down(app_state_t *s, uint64_t now_ms, const char *toast,
+                             app_action_t *out, uint8_t *n, uint8_t max) {
     app_action_t st = { .type = APP_ACT_STREAM_STOP };
     emit(out, n, max, st);   // 幂等,未开流时执行器无副作用
-    app_action_t rs = { .type = APP_ACT_RESOLVE_SERVICE };   // 断开 → 触发 mDNS 重查
-    emit(out, n, max, rs);
+    set_toast(s, now_ms, toast);   // 任何状态都提示断开(审批保持等场景也可见)
     switch (s->state) {
     case APP_ST_LISTENING:
         s->ptt_pending_end = false;
-        set_toast(s, now_ms, "Link lost");
-        abort_to_ready(s, now_ms, NULL, out, n, max);
+        abort_to_ready(s, now_ms, NULL, out, n, max);   // toast 已设,不再覆盖
         break;
     case APP_ST_TRANSCRIBING:
     case APP_ST_AGENT_RUNNING:
-        set_toast(s, now_ms, "Link lost");
         abort_to_ready(s, now_ms, NULL, out, n, max);
         break;
     default: {
@@ -354,11 +329,6 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         handle_key(s, ev, now_ms, out, out_n, max);
         break;
 
-    case APP_EV_WS_CONNECTED:
-    case APP_EV_WS_DISCONNECTED:
-        handle_ws(s, ev, now_ms, out, out_n, max);
-        break;
-
     case APP_EV_MAC_METRICS:
         s->mac_cpu    = ev->u.metrics.cpu;
         s->mac_ram    = ev->u.metrics.ram;
@@ -374,6 +344,7 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         str_cpy(s->agent_state_name, sizeof(s->agent_state_name),
                 AGENT_STATE_NAMES[st < APP_AGENT_COUNT ? st : APP_AGENT_READY]);
         str_cpy(s->agent_message, sizeof(s->agent_message), ev->u.agent_status.message);
+        s->transcript_final = true;   // 消息已被 agent.status 替换,不再是转写预览
 
         if (s->state == APP_ST_TRANSCRIBING || s->state == APP_ST_AGENT_RUNNING) {
             if (st == APP_AGENT_RUNNING || st == APP_AGENT_THINKING) {
@@ -422,11 +393,13 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         break;
 
     case APP_EV_TRANSCRIPT:
-        if (s->state == APP_ST_AGENT_RUNNING) {
-            app_action_t a = { .type = APP_ACT_INJECT_TEXT };
-            str_cpy(a.u.inject.text, sizeof(a.u.inject.text), ev->u.transcript.text);
-            a.u.inject.inject_mode = ev->u.transcript.inject_mode;
-            emit(out, out_n, max, a);
+        // 注入已迁 Mac 端,设备只做转写文本显示(任意状态可显示)。
+        // final:false = 预览态(未定稿,UI 附光标感);final:true = 定稿落定。
+        str_cpy(s->agent_message, sizeof(s->agent_message), ev->u.transcript.text);
+        s->transcript_final = ev->u.transcript.final;
+        {
+            app_action_t r = { .type = APP_ACT_UI_REFRESH };
+            emit(out, out_n, max, r);
         }
         break;
 
@@ -447,70 +420,26 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         break;
 
     case APP_EV_BLE_CONNECTED:
+        // 语义:EVENT 特征已订阅(链路通,PTT 可用)
         s->ble_connected = true;
-        app_action_t b = { .type = APP_ACT_UI_REFRESH };
-        emit(out, out_n, max, b);
+        s->link_up = true;
+        {
+            app_action_t b = { .type = APP_ACT_UI_REFRESH };
+            emit(out, out_n, max, b);
+        }
         break;
 
     case APP_EV_BLE_DISCONNECTED:
         s->ble_connected = false;
-        app_action_t bd = { .type = APP_ACT_UI_REFRESH };
-        emit(out, out_n, max, bd);
+        s->link_up = false;
+        handle_link_down(s, now_ms, "Mac disconnected", out, out_n, max);
         break;
 
     case APP_EV_BLE_DROP:
-        set_toast(s, now_ms, "BLE typing dropped");
-        app_action_t br = { .type = APP_ACT_UI_REFRESH };
-        emit(out, out_n, max, br);
-        break;
-
-    case APP_EV_PROV_CMD:
-        // 凭据已收:置会话标志与 30s 截止,立刻执行连接(PROV_WIFI)
-        str_cpy(s->wifi_ssid, sizeof(s->wifi_ssid), ev->u.prov.ssid);
-        s->wifi_configured = true;
-        s->provisioning = true;
-        s->prov_deadline_ms = now_ms + APP_PROV_TIMEOUT_MS;
-        set_toast(s, now_ms, "Provisioning WiFi...");
+        set_toast(s, now_ms, "BLE event dropped");
         {
-            app_action_t a = { .type = APP_ACT_PROV_WIFI };
-            str_cpy(a.u.prov.ssid, sizeof(a.u.prov.ssid), ev->u.prov.ssid);
-            str_cpy(a.u.prov.pass, sizeof(a.u.prov.pass), ev->u.prov.pass);
-            emit(out, out_n, max, a);
-        }
-        {
-            app_action_t r = { .type = APP_ACT_UI_REFRESH };
-            emit(out, out_n, max, r);
-        }
-        break;
-
-    case APP_EV_WIFI_CONNECTED:
-        s->provisioning = false;
-        s->prov_deadline_ms = 0;
-        s->wifi_configured = true;
-        set_toast(s, now_ms, "WiFi connected");
-        {
-            app_action_t r = { .type = APP_ACT_UI_REFRESH };
-            emit(out, out_n, max, r);
-        }
-        break;
-
-    case APP_EV_WIFI_CONNECT_FAIL:
-        // 不置 wifi_configured=false:凭据仍在 NVS,后续自动重连
-        s->provisioning = false;
-        s->prov_deadline_ms = 0;
-        set_toast(s, now_ms, wifi_fail_text(ev->u.wifi_fail.reason));
-        {
-            app_action_t r = { .type = APP_ACT_UI_REFRESH };
-            emit(out, out_n, max, r);
-        }
-        break;
-
-    case APP_EV_WS_TARGET_FOUND:
-        // mDNS 发现新目标 → 运行时 retarget(不写 NVS;static 模式不会走到这里)
-        {
-            app_action_t a = { .type = APP_ACT_WS_RETARGET };
-            str_cpy(a.u.ws_target.url, sizeof(a.u.ws_target.url), ev->u.ws_target.url);
-            emit(out, out_n, max, a);
+            app_action_t br = { .type = APP_ACT_UI_REFRESH };
+            emit(out, out_n, max, br);
         }
         break;
 

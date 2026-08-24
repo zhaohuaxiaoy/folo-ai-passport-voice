@@ -1,20 +1,16 @@
 // main/main.c —— AI Passport 固件入口。
-// 引导顺序:NVS → BSP(显示/按键/电池) → 事件队列 → 提示音/UI → Wi-Fi/WS → 音频流 → BLE HID → 控制台。
-// 架构:按键/WS/BLE/音频回调只投递事件,app_task 唯一消费并驱动状态机 → 动作执行 → LVGL 渲染(锁内)。
+// 引导顺序:NVS → BSP(显示/按键/电池) → 事件队列 → 提示音/UI → BLE 音频服务 → 音频流 → 控制台。
+// 架构:按键/BLE 回调只投递事件,app_task 唯一消费并驱动状态机 → 动作执行 → LVGL 渲染(锁内)。
+// 音频/事件上行经 ble_audio 的 GATT notify(0xA2B0);下行(Mac 命令)经 CTRL 写回调投事件。
 #include "app_events.h"
 #include "app_state.h"
 #include "app_sound.h"
 #include "app_ui.h"
 #include "app_protocol.h"
 #include "audio_streamer.h"
-#include "ble_hid_keyboard.h"
-#include "ble_provisioning.h"
-#include "prov_protocol.h"
+#include "ble_audio.h"
 #include "console_cmds.h"
-#include "mdns_resolver.h"
 #include "nvs_settings.h"
-#include "wifi_app.h"
-#include "ws_client.h"
 #include "bsp_audio.h"
 #include "bsp_battery.h"
 #include "bsp_button.h"
@@ -33,6 +29,16 @@ static const char *TAG = "main";
 
 // ---- 动作执行:与协议/音频/BLE 的边界都在这里 ----
 static app_state_t s_state;   // app_task 独占,无需锁
+static uint32_t s_last_drop_count = 0;   // 最近一次 STREAM_STOP 的会话丢帧数(voice.end 后 status 帧)
+
+// 经 EVENT 特征上行一行(序列化已完成,含 '\n');无订阅时由 ble_audio 计数丢弃。
+static void send_event_line(char *buf, size_t len)
+{
+    if (len == 0) return;
+    if (ble_audio_notify_event(buf, len) != 0) {
+        ESP_LOGW(TAG, "EVENT 行发送失败,丢弃: %.*s", (int)(len > 64 ? 64 : len), buf);
+    }
+}
 
 static void run_actions(const app_action_t *acts, uint8_t n)
 {
@@ -49,26 +55,34 @@ static void run_actions(const app_action_t *acts, uint8_t n)
             break;                       // 渲染/背光由主循环末尾统一做(快照驱动)
         case APP_ACT_SEND_VOICE_START:
             len = app_protocol_voice_start(buf, sizeof(buf), s_state.workflow);
-            ws_client_send_text(buf, len);
+            send_event_line(buf, len);
             break;
         case APP_ACT_SEND_VOICE_END:
-            ws_client_send_voice_end();
+            // 帧序保证:等残留音频块先出环,再发 voice.end;随后补发 status 帧(会话丢帧对账)
+            audio_streamer_drain(500);
+            len = app_protocol_voice_end(buf, sizeof(buf));
+            send_event_line(buf, len);
+            len = app_protocol_device_status(buf, sizeof(buf), s_last_drop_count);
+            send_event_line(buf, len);
+            s_last_drop_count = 0;
             break;
         case APP_ACT_SEND_WORKFLOW_SWITCH:
             len = app_protocol_workflow_switch(buf, sizeof(buf),
                                                (app_workflow_t)a->u.workflow);
-            ws_client_send_text(buf, len);
+            send_event_line(buf, len);
             break;
         case APP_ACT_SEND_AGENT_ACTION:
             len = app_protocol_agent_action(buf, sizeof(buf),
                                             a->u.agent_action.task_id,
                                             a->u.agent_action.decision);
-            ws_client_send_text(buf, len);
+            send_event_line(buf, len);
             break;
         case APP_ACT_STREAM_START:
             audio_streamer_start();
             break;
         case APP_ACT_STREAM_STOP:
+            // 取走本会话丢帧数(取消/结束/断链兜底都走这里;取消时无 voice.end,计数不残留)
+            s_last_drop_count = audio_streamer_take_drops();
             audio_streamer_stop();
             break;
         case APP_ACT_PLAY_TONE:
@@ -79,35 +93,7 @@ static void run_actions(const app_action_t *acts, uint8_t n)
                 app_sound_play((app_tone_t)a->u.tone);
             }
             break;
-        case APP_ACT_INJECT_TEXT:
-            if (a->u.inject.inject_mode == APP_INJECT_PASTE) {
-                ble_hid_keyboard_paste();
-            } else {
-                ble_hid_keyboard_type(a->u.inject.text);
-            }
-            break;
-        case APP_ACT_PROV_WIFI:
-            // 配网凭据 → 存 NVS + set_config + 立即连接(wifi_app 内自包含)
-            wifi_app_set_credentials(a->u.prov.ssid, a->u.prov.pass);
-            break;
-        case APP_ACT_WS_RETARGET:
-            ws_client_retarget(a->u.ws_target.url);   // 运行时改目标,不写 NVS
-            break;
-        case APP_ACT_RESOLVE_SERVICE:
-            mdns_resolver_request();                  // WS 断开/手动 → 重查(auto 模式)
-            break;
         }
-    }
-}
-
-// WiFi 断开 reason → 配网错误码(与 app_state 的 toast 映射一致)
-static prov_error_t wifi_reason_to_prov(uint16_t reason)
-{
-    switch (reason) {
-    case 201: return PROV_ERR_NO_AP;
-    case 202: case 15: case 2: return PROV_ERR_AUTH_FAIL;
-    case 203: return PROV_ERR_ASSOC_FAIL;
-    default:  return PROV_ERR_OTHER;
     }
 }
 
@@ -133,8 +119,6 @@ static void app_task(void *arg)
 {
     (void)arg;
     app_state_init(&s_state);
-    // 启动注入:NVS 已有凭据则不显示"NO WIFI"横幅(配网后由事件流接管)
-    s_state.wifi_configured = wifi_app_provisioned();
     QueueHandle_t q = app_events_queue();
     uint64_t next_tick = esp_timer_get_time() / 1000;
     uint64_t now_ms = next_tick;
@@ -148,18 +132,8 @@ static void app_task(void *arg)
         while (xQueueReceive(q, &ev, 0) == pdTRUE) {
             got = true;
             now_ms = esp_timer_get_time() / 1000;
-            // 配网结果编排:reduce 会清 provisioning,先快照会话标志(每 op 只报一次)
-            const bool prov_active = s_state.provisioning;
             uint8_t n = 0;
             app_state_reduce(&s_state, &ev, now_ms, acts, &n);
-            if (prov_active) {
-                if (ev.type == APP_EV_WIFI_CONNECTED) {
-                    ble_provisioning_notify_ok(wifi_app_ip());
-                } else if (ev.type == APP_EV_WIFI_CONNECT_FAIL) {
-                    ble_provisioning_notify_error(
-                        wifi_reason_to_prov(ev.u.wifi_fail.reason), NULL);
-                }
-            }
             run_actions(acts, n);
         }
 
@@ -167,14 +141,8 @@ static void app_task(void *arg)
         now_ms = esp_timer_get_time() / 1000;
         if (now_ms >= next_tick) {
             app_event_t t = { .type = APP_EV_TICK };
-            // 超时判断在 reduce 前求值(reduce 会清 deadline)
-            const bool prov_timeout = s_state.provisioning &&
-                                      now_ms >= s_state.prov_deadline_ms;
             uint8_t n = 0;
             app_state_reduce(&s_state, &t, now_ms, acts, &n);
-            if (prov_timeout) {
-                ble_provisioning_notify_error(PROV_ERR_TIMEOUT, NULL);
-            }
             run_actions(acts, n);
             next_tick = now_ms + APP_TICK_MS;
         }
@@ -219,7 +187,7 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "AI Passport 固件启动");
 
-    // 1. NVS(凭据/设置持久化)
+    // 1. NVS(设置持久化)
     esp_err_t e = nvs_flash_init();
     if (e == ESP_ERR_NVS_NO_FREE_PAGES || e == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         nvs_flash_erase();
@@ -259,18 +227,13 @@ void app_main(void)
         bsp_lvgl_unlock();
     }
 
-    // 6. 网络:Wi-Fi(GOT_IP 后自动起 WS)→ WS 客户端
-    wifi_app_init();
-    if (mdns_resolver_init() != ESP_OK) ESP_LOGW(TAG, "mDNS 解析器初始化失败");
-    if (ws_client_init() != ESP_OK) ESP_LOGW(TAG, "WS 客户端初始化失败");
-
-    // 7. 音频流式管线(双 worker 空闲等待)
+    // 6. 音频流式管线(双 worker 空闲等待)
     if (audio_streamer_init() != ESP_OK) ESP_LOGW(TAG, "音频流管线初始化失败");
 
-    // 8. BLE HID 键盘(外设广播,host sync 后自动开广播)
-    if (ble_hid_keyboard_init() != ESP_OK) ESP_LOGW(TAG, "BLE HID 初始化失败");
+    // 7. BLE 音频服务(NimBLE 外设 + GATT 0xA2B0,host sync 后自动开广播)
+    if (ble_audio_init() != 0) ESP_LOGW(TAG, "BLE 音频服务初始化失败");
 
-    // 9. 控制台与 app 任务(栈 5120:快照 ~250B + 动作 ~544B + TX 512B + 同步音 512B + LVGL 调用深度)
+    // 8. 控制台与 app 任务(栈 5120:快照 ~250B + 动作 ~544B + TX 512B + 同步音 512B + LVGL 调用深度)
     console_init();
     xTaskCreate(app_task, "app_task", 5120, NULL, 4, NULL);
 

@@ -80,6 +80,15 @@ static void test_parse_transcript(void) {
     const char *j3 = "{\"type\":\"transcript\",\"text\":\"no mode\"}";       // 缺省 type
     assert(app_protocol_parse(j3, strlen(j3), &ev));
     assert(ev.u.transcript.inject_mode == APP_INJECT_TYPE);
+    assert(ev.u.transcript.final == false);                    // 缺省 final = 预览态
+
+    const char *j4 = "{\"type\":\"transcript\",\"text\":\"定稿\",\"final\":true}";
+    assert(app_protocol_parse(j4, strlen(j4), &ev));
+    assert(ev.u.transcript.final == true);                     // 定稿标记
+
+    const char *j5 = "{\"type\":\"transcript\",\"text\":\"预览\",\"final\":false}";
+    assert(app_protocol_parse(j5, strlen(j5), &ev));
+    assert(ev.u.transcript.final == false);                    // 显式 false 仍预览
 }
 
 static void test_parse_rejects(void) {

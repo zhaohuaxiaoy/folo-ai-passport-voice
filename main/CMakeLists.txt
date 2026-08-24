@@ -8,24 +8,13 @@ idf_component_register(
          "app_sound.c"
          "app_ui.c"
          "nvs_settings.c"
-         "wifi_app.c"
-         "ws_client.c"
          "audio_streamer.c"
-         "ble_hid_keyboard.c"
-         "ble_provisioning.c"
-         "prov_protocol.c"
-         "mdns_resolver.c"
-         "hid_keymap.c"
+         "ble_audio.c"
          "console_cmds.c"
     INCLUDE_DIRS "."
     REQUIRES bsp
              json
              nvs_flash
-             esp_websocket_client
-             esp_wifi
-             esp_netif
-             esp_event
              esp_console
              bt
-             mdns
 )

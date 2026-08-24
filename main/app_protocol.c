@@ -91,6 +91,9 @@ static bool parse_transcript(const cJSON *o, app_event_t *ev) {
     const cJSON *im = cJSON_GetObjectItemCaseSensitive(o, "inject_mode");
     ev->u.transcript.inject_mode = (cJSON_IsString(im) && strcmp(im->valuestring, "paste") == 0)
         ? APP_INJECT_PASTE : APP_INJECT_TYPE;
+    // final 缺省 false:旧 Mac 端/旧帧不带该字段一律按预览态处理
+    const cJSON *fin = cJSON_GetObjectItemCaseSensitive(o, "final");
+    ev->u.transcript.final = cJSON_IsBool(fin) && cJSON_IsTrue(fin);
     ev->type = APP_EV_TRANSCRIPT;
     return true;
 }
@@ -148,6 +151,15 @@ size_t app_protocol_voice_start(char *buf, size_t cap, app_workflow_t wf) {
 size_t app_protocol_voice_end(char *buf, size_t cap) {
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "event", "voice.end");
+    size_t n = serialize(o, buf, cap);
+    cJSON_Delete(o);
+    return n;
+}
+
+size_t app_protocol_device_status(char *buf, size_t cap, uint32_t drop_count) {
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "event", "status");
+    cJSON_AddNumberToObject(o, "drop", (double)drop_count);
     size_t n = serialize(o, buf, cap);
     cJSON_Delete(o);
     return n;

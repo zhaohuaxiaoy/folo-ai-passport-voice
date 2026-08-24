@@ -92,7 +92,7 @@ static void test_workflow_cycle(void) {
 // ---- PTT:离线被拒 + 错误音;在线开流 ----
 static void test_ptt_offline_online(void) {
     reset();
-    s.ws_connected = false;
+    s.link_up = false;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);    // → READY
     reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);    // 离线按 ●
     assert(s.state == APP_ST_READY);                       // 原地不动
@@ -101,7 +101,7 @@ static void test_ptt_offline_online(void) {
     assert(strstr(s.toast, "OFFLINE"));
 
     reset();
-    s.ws_connected = true;
+    s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
     reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);    // 在线按 ●
     assert(s.state == APP_ST_LISTENING);
@@ -116,7 +116,7 @@ static void test_ptt_offline_online(void) {
 // ---- LISTENING:松开进入"待定结束",单击到期发送,窗口内再按 = 取消 ----
 static void test_listening_single_tap(void) {
     reset();
-    s.ws_connected = true;
+    s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
     reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);    // 开录
     assert(s.state == APP_ST_LISTENING);
@@ -135,7 +135,7 @@ static void test_listening_single_tap(void) {
 // ---- LISTENING:双击取消(真实事件序列,第二次按下即取消) ----
 static void test_listening_double_cancel(void) {
     reset();
-    s.ws_connected = true;
+    s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
     reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);    // 按下 #1:开录
     reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 30);  // 松开 #1:待定
@@ -160,7 +160,7 @@ static void test_listening_end(void) {
 // ---- 超时:TRANSCRIBING 30s / AGENT_RUNNING 90s → READY ----
 static void test_timeouts(void) {
     reset();
-    s.ws_connected = true;
+    s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
     reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);
     reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 3000);
@@ -176,7 +176,7 @@ static void test_timeouts(void) {
 
 static void test_agent_running_timeout(void) {
     reset();
-    s.ws_connected = true;
+    s.link_up = true;
     s.state = APP_ST_AGENT_RUNNING;
     s.state_since_ms = now;
     reduce(APP_EV_TICK, now + 89 * 1000);
@@ -189,7 +189,7 @@ static void test_agent_running_timeout(void) {
 // ---- Agent 状态流转:TRANSCRIBING → AGENT_RUNNING → DONE ----
 static void test_agent_status_flow(void) {
     reset();
-    s.ws_connected = true;
+    s.link_up = true;
     s.state = APP_ST_TRANSCRIBING;
     s.state_since_ms = now;
 
@@ -211,7 +211,7 @@ static void test_agent_status_flow(void) {
 // ---- 审批闭环 ----
 static void test_approval(void) {
     reset();
-    s.ws_connected = true;
+    s.link_up = true;
     s.state = APP_ST_AGENT_RUNNING;
     s.state_since_ms = now;
 
@@ -287,43 +287,82 @@ static void test_screen_off_wake(void) {
     assert(s.state == APP_ST_READY);
 }
 
-// ---- transcript 注入:仅 AGENT_RUNNING 时产出 INJECT_TEXT ----
-static void test_transcript_inject(void) {
+// ---- transcript:注入已迁 Mac 端,设备只更新显示(任意状态);final 区分预览/定稿 ----
+static void test_transcript_display(void) {
     reset();
     s.state = APP_ST_TRANSCRIBING;
     app_event_t ev = { .type = APP_EV_TRANSCRIPT,
-                       .u.transcript = { .text = "fix the bug", .inject_mode = APP_INJECT_TYPE } };
+                       .u.transcript = { .text = "fix the bug", .inject_mode = APP_INJECT_TYPE,
+                                         .final = false } };
     app_state_reduce(&s, &ev, now, out, &on);
-    assert(!has_action(APP_ACT_INJECT_TEXT));              // TRANSCRIBING 不注入
+    assert(strcmp(s.agent_message, "fix the bug") == 0);
+    assert(s.transcript_final == false);                     // final:false = 预览态
+    assert(has_action(APP_ACT_UI_REFRESH));
+    // 注意:不再产出 INJECT_TEXT 动作(该动作已随 HID 注入退役)
 
+    app_ui_snapshot_t snap;
+    app_state_snapshot(&s, now, &snap);
+    assert(strcmp(snap.agent_message, "fix the bug") == 0);
+    assert(snap.transcript_final == false);                  // 快照区分预览态(UI 加光标)
+
+    // 定稿:final:true → 落定显示,快照标记定稿
+    ev.u.transcript.final = true;
+    app_state_reduce(&s, &ev, now, out, &on);
+    assert(strcmp(s.agent_message, "fix the bug") == 0);
+    assert(s.transcript_final == true);
+    app_state_snapshot(&s, now, &snap);
+    assert(strcmp(snap.agent_message, "fix the bug") == 0);
+    assert(snap.transcript_final == true);                   // 定稿态(UI 移除光标)
+
+    // AGENT_RUNNING 同样显示(预览态)
     s.state = APP_ST_AGENT_RUNNING;
+    s.state_since_ms = now;
+    ev.u.transcript.text[0] = 'x'; ev.u.transcript.text[1] = '\0';
+    ev.u.transcript.final = false;
     app_state_reduce(&s, &ev, now, out, &on);
-    app_action_t *a = find_action(APP_ACT_INJECT_TEXT);
-    assert(a && strcmp(a->u.inject.text, "fix the bug") == 0);
-    assert(a->u.inject.inject_mode == APP_INJECT_TYPE);
+    assert(strcmp(s.agent_message, "x") == 0);
+    assert(s.transcript_final == false);
 
-    ev.u.transcript.inject_mode = APP_INJECT_PASTE;
-    app_state_reduce(&s, &ev, now, out, &on);
-    a = find_action(APP_ACT_INJECT_TEXT);
-    assert(a && a->u.inject.inject_mode == APP_INJECT_PASTE);
+    // agent.status 替换消息后不再是转写预览(UI 无光标)
+    app_event_t st = { .type = APP_EV_AGENT_STATUS,
+                       .u.agent_status = { .state = APP_AGENT_RUNNING, .message = "deploying" } };
+    app_state_reduce(&s, &st, now, out, &on);
+    assert(strcmp(s.agent_message, "deploying") == 0);
+    assert(s.transcript_final == true);
+
+    // 审批决策写入的消息同样非预览
+    reset();
+    s.state = APP_ST_APPROVAL;
+    s.state_since_ms = now;
+    app_event_t ap = { .type = APP_EV_APPROVAL_REQUEST,
+                       .u.approval = { .task_id = "t1", .title = "Deploy",
+                                       .target = "app.js", .diff_summary = "+1",
+                                       .risk = APP_RISK_MEDIUM } };
+    app_state_reduce(&s, &ap, now, out, &on);
+    assert(s.transcript_final == false);                     // 默认未定稿(preview 无从谈起)
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 100);     // ● 批准
+    assert(strcmp(s.agent_message, "Approved, agent continues...") == 0);
+    assert(s.transcript_final == true);                      // 非转写文本,无预览光标
 }
 
-// ---- WS 断开:录音中停流回 READY ----
-static void test_ws_drop(void) {
+// ---- BLE 链路断开:录音中停流回 READY ----
+static void test_ble_link_down(void) {
     reset();
-    s.ws_connected = true;
+    s.link_up = true;
     s.state = APP_ST_LISTENING;
     s.state_since_ms = now;
-    app_event_t ev = { .type = APP_EV_WS_DISCONNECTED };
+    app_event_t ev = { .type = APP_EV_BLE_DISCONNECTED };
     app_state_reduce(&s, &ev, now, out, &on);
-    assert(s.ws_connected == false);
+    assert(s.link_up == false);
+    assert(s.ble_connected == false);
     assert(s.state == APP_ST_READY);
     assert(has_action(APP_ACT_STREAM_STOP));
     assert(!has_action(APP_ACT_SEND_VOICE_END));           // 会话中止,不发 end
+    assert(strstr(s.toast, "Mac disconnected"));
 
     // APPROVAL 下断开:保持状态等待重连后 Mac 重发请求
     reset();
-    s.ws_connected = true;
+    s.link_up = true;
     s.state = APP_ST_APPROVAL;
     app_state_reduce(&s, &ev, now, out, &on);
     assert(s.state == APP_ST_APPROVAL);
@@ -348,20 +387,18 @@ static void test_metrics(void) {
 // ---- 文本安全:恰好填满缓冲也保证 NUL 结尾(截断上限由协议层测试覆盖) ----
 static void test_bounded(void) {
     reset();
-    s.state = APP_ST_AGENT_RUNNING;
     app_event_t ev = { .type = APP_EV_TRANSCRIPT };
     memset(ev.u.transcript.text, 'x', sizeof(ev.u.transcript.text) - 1);
     ev.u.transcript.text[sizeof(ev.u.transcript.text) - 1] = '\0';
-    ev.u.transcript.inject_mode = APP_INJECT_TYPE;
     app_state_reduce(&s, &ev, now, out, &on);
-    app_action_t *a = find_action(APP_ACT_INJECT_TEXT);
-    assert(a && a->u.inject.text[sizeof(a->u.inject.text) - 1] == '\0');
+    assert(s.agent_message[sizeof(s.agent_message) - 1] == '\0');
+    assert(has_action(APP_ACT_UI_REFRESH));
 }
 
 // ---- 录音中收到审批请求:必须停流,管线不能泄漏 ----
 static void test_approval_during_listening(void) {
     reset();
-    s.ws_connected = true;
+    s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
     reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);    // 开录
     assert(s.state == APP_ST_LISTENING);
@@ -380,22 +417,23 @@ static void test_approval_during_listening(void) {
 }
 
 // ---- 转写/执行中断开:回 READY,兜底停流 ----
-static void test_ws_disconnect_transcribing(void) {
+static void test_ble_disconnect_transcribing(void) {
     reset();
-    s.ws_connected = true;
+    s.link_up = true;
     s.state = APP_ST_TRANSCRIBING;
     s.state_since_ms = now;
-    app_event_t ev = { .type = APP_EV_WS_DISCONNECTED };
+    app_event_t ev = { .type = APP_EV_BLE_DISCONNECTED };
     app_state_reduce(&s, &ev, now, out, &on);
     assert(s.state == APP_ST_READY);
     assert(has_action(APP_ACT_STREAM_STOP));               // 兜底停流(幂等)
-    assert(strstr(s.toast, "Link lost"));
+    assert(strstr(s.toast, "Mac disconnected"));
 
     // 重连后回 ONLINE
     reset();
-    app_event_t c = { .type = APP_EV_WS_CONNECTED };
+    app_event_t c = { .type = APP_EV_BLE_CONNECTED };
     app_state_reduce(&s, &c, now, out, &on);
-    assert(s.ws_connected == true);
+    assert(s.link_up == true);
+    assert(s.ble_connected == true);
 }
 
 // ---- TRANSCRIBING / AGENT_RUNNING 下按键全部忽略 ----
@@ -418,7 +456,7 @@ static void test_keys_ignored_in_running(void) {
 // ---- LISTENING 中 ▲/▼ 无效(不打断录音) ----
 static void test_listening_arrows_ignored(void) {
     reset();
-    s.ws_connected = true;
+    s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
     reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 30);
@@ -465,18 +503,6 @@ static void test_agent_error(void) {
     assert(strstr(s.toast, "error"));
 }
 
-// ---- transcript 在 HOME/READY 下忽略 ----
-static void test_transcript_ignored_idle(void) {
-    app_event_t ev = { .type = APP_EV_TRANSCRIPT,
-                       .u.transcript = { .text = "hello", .inject_mode = APP_INJECT_TYPE } };
-    reset();
-    app_state_reduce(&s, &ev, now, out, &on);
-    assert(!has_action(APP_ACT_INJECT_TEXT));              // HOME
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);    // → READY
-    app_state_reduce(&s, &ev, now + 20, out, &on);
-    assert(!has_action(APP_ACT_INJECT_TEXT));              // READY
-}
-
 // ---- NET BUSY 横幅:丢帧起、恢复止,边沿触发 ----
 static void test_audio_drop_netbusy(void) {
     reset();
@@ -490,92 +516,23 @@ static void test_audio_drop_netbusy(void) {
     assert(s.net_busy == false);
 }
 
-// ---- BLE 连接事件 ----
+// ---- BLE 链路事件:订阅=通,断开=断 + toast ----
 static void test_ble_events(void) {
     reset();
     app_event_t d = { .type = APP_EV_BLE_DISCONNECTED };
     app_state_reduce(&s, &d, now, out, &on);
     assert(s.ble_connected == false);
+    assert(s.link_up == false);
+    assert(strstr(s.toast, "Mac disconnected"));
     app_event_t c = { .type = APP_EV_BLE_CONNECTED };
     app_state_reduce(&s, &c, now, out, &on);
     assert(s.ble_connected == true);
+    assert(s.link_up == true);
 
-    // 注入丢弃:toast 提示
+    // 事件行丢弃:toast 提示
     app_event_t drop = { .type = APP_EV_BLE_DROP };
     app_state_reduce(&s, &drop, now, out, &on);
     assert(strstr(s.toast, "dropped"));
-}
-
-// ---- 配网:PROV_CMD → 会话标志 + PROV_WIFI 动作;成功/失败/超时 ----
-static void test_provisioning_flow(void) {
-    reset();
-    app_event_t cmd = { .type = APP_EV_PROV_CMD };
-    memcpy(cmd.u.prov.ssid, "MyNet", 6);   // 5+1
-    memcpy(cmd.u.prov.pass, "wpa2", 5);    // 4+1
-    app_state_reduce(&s, &cmd, now, out, &on);
-    assert(s.provisioning == true);
-    assert(s.wifi_configured == true);
-    assert(strcmp(s.wifi_ssid, "MyNet") == 0);
-    assert(strstr(s.toast, "Provisioning"));
-    app_action_t *a = find_action(APP_ACT_PROV_WIFI);
-    assert(a != NULL);
-    assert(strcmp(a->u.prov.ssid, "MyNet") == 0);
-    assert(strcmp(a->u.prov.pass, "wpa2") == 0);
-
-    // 成功:清会话 + toast,凭据保留
-    app_event_t ok = { .type = APP_EV_WIFI_CONNECTED };
-    app_state_reduce(&s, &ok, now + 1000, out, &on);
-    assert(s.provisioning == false);
-    assert(s.wifi_configured == true);
-    assert(s.prov_deadline_ms == 0);
-    assert(strstr(s.toast, "WiFi connected"));
-}
-
-static void test_provisioning_fail(void) {
-    reset();
-    app_event_t cmd = { .type = APP_EV_PROV_CMD };
-    memcpy(cmd.u.prov.ssid, "MyNet", 6);
-    memcpy(cmd.u.prov.pass, "wrong", 6);   // 5+1
-    app_state_reduce(&s, &cmd, now, out, &on);
-    assert(s.provisioning == true);
-
-    // 密码错:reason 202 → auth fail;凭据不清(自动重连)
-    app_event_t fail = { .type = APP_EV_WIFI_CONNECT_FAIL, .u.wifi_fail = { .reason = 202 } };
-    app_state_reduce(&s, &fail, now + 1000, out, &on);
-    assert(s.provisioning == false);
-    assert(s.wifi_configured == true);
-    assert(strstr(s.toast, "auth fail"));
-
-    // SSID 不存在:201 → no AP
-    reset();
-    cmd = (app_event_t){ .type = APP_EV_PROV_CMD };
-    memcpy(cmd.u.prov.ssid, "GhostNet", 9);  // 8+1
-    app_state_reduce(&s, &cmd, now, out, &on);
-    fail = (app_event_t){ .type = APP_EV_WIFI_CONNECT_FAIL, .u.wifi_fail = { .reason = 201 } };
-    app_state_reduce(&s, &fail, now + 1000, out, &on);
-    assert(strstr(s.toast, "no AP"));
-}
-
-static void test_provisioning_timeout(void) {
-    reset();
-    app_event_t cmd = { .type = APP_EV_PROV_CMD };
-    memcpy(cmd.u.prov.ssid, "SlowNet", 8);  // 7+1
-    app_state_reduce(&s, &cmd, now, out, &on);
-    assert(s.provisioning == true);
-
-    // 30s 内:会话保持
-    app_event_t tick = { .type = APP_EV_TICK };
-    app_state_reduce(&s, &tick, now + 29000, out, &on);
-    assert(s.provisioning == true);
-
-    // 超时:清会话 + toast
-    app_state_reduce(&s, &tick, now + 31000, out, &on);
-    assert(s.provisioning == false);
-    assert(strstr(s.toast, "timeout"));
-
-    // 再次 TICK:不重复报告
-    app_state_reduce(&s, &tick, now + 32000, out, &on);
-    assert(s.provisioning == false);
 }
 
 // ---- 快照:agent_state_name 保留真实 status,仅空时兜底 ----
@@ -598,6 +555,20 @@ static void test_snapshot_agent_name(void) {
     assert(strcmp(snap.agent_state_name, "running") == 0);
 }
 
+// ---- 快照:link_up 驱动 OFFLINE 横幅 ----
+static void test_snapshot_link_up(void) {
+    reset();
+    app_ui_snapshot_t snap;
+    app_state_snapshot(&s, now, &snap);
+    assert(snap.link_up == true);                           // init 默认通(断开后由事件翻)
+
+    app_event_t d = { .type = APP_EV_BLE_DISCONNECTED };
+    app_state_reduce(&s, &d, now, out, &on);
+    app_state_snapshot(&s, now, &snap);
+    assert(snap.link_up == false);
+    assert(snap.ble_connected == false);
+}
+
 int main(void) {
     test_home_nav();
     test_workflow_cycle();
@@ -611,21 +582,18 @@ int main(void) {
     test_done_back_home();
     test_screen_off_wake();
     test_screen_off_done();
-    test_transcript_inject();
-    test_transcript_ignored_idle();
-    test_ws_drop();
-    test_ws_disconnect_transcribing();
+    test_transcript_display();
+    test_ble_link_down();
+    test_ble_disconnect_transcribing();
     test_keys_ignored_in_running();
     test_listening_arrows_ignored();
     test_approval_no_timeout();
     test_agent_error();
     test_audio_drop_netbusy();
     test_ble_events();
-    test_provisioning_flow();
-    test_provisioning_fail();
-    test_provisioning_timeout();
     test_metrics();
     test_snapshot_agent_name();
+    test_snapshot_link_up();
     test_bounded();
     printf("test_app_state: all assertions passed\n");
     return 0;

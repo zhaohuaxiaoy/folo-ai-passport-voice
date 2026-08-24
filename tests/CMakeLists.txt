@@ -20,11 +20,6 @@ add_executable(test_app_state test_app_state.c ${MAIN_DIR}/app_state.c)
 target_include_directories(test_app_state PRIVATE ${MAIN_DIR})
 add_test(NAME app_state COMMAND test_app_state)
 
-# --- HID 键码表 ---
-add_executable(test_hid_keymap test_hid_keymap.c ${MAIN_DIR}/hid_keymap.c)
-target_include_directories(test_hid_keymap PRIVATE ${MAIN_DIR})
-add_test(NAME hid_keymap COMMAND test_hid_keymap)
-
 # --- UI 像素数学(仓库既有) ---
 add_executable(test_ui_pixel_math test_ui_pixel_math.c ${MAIN_DIR}/ui_pixel_math.c)
 target_include_directories(test_ui_pixel_math PRIVATE ${MAIN_DIR})
@@ -36,8 +31,8 @@ add_executable(test_app_protocol test_app_protocol.c ${MAIN_DIR}/app_protocol.c
 target_include_directories(test_app_protocol PRIVATE ${MAIN_DIR} ${CJSON_DIR})
 add_test(NAME app_protocol COMMAND test_app_protocol)
 
-# --- 配网协议(纯 C + cJSON,与 app_protocol 同构) ---
-add_executable(test_prov_protocol test_prov_protocol.c ${MAIN_DIR}/prov_protocol.c
-               ${CJSON_DIR}/cJSON.c)
-target_include_directories(test_prov_protocol PRIVATE ${MAIN_DIR} ${CJSON_DIR})
-add_test(NAME prov_protocol COMMAND test_prov_protocol)
+# --- BLE 音频/事件分片打包(纯 C;事件行与 CTRL 解析复用 app_protocol,SRCS 同 test_app_protocol) ---
+add_executable(test_ble_audio test_ble_audio.c ${MAIN_DIR}/ble_audio.c
+               ${MAIN_DIR}/app_protocol.c ${MAIN_DIR}/app_state.c ${CJSON_DIR}/cJSON.c)
+target_include_directories(test_ble_audio PRIVATE ${MAIN_DIR} ${CJSON_DIR})
+add_test(NAME ble_audio COMMAND test_ble_audio)
