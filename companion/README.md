@@ -1,7 +1,8 @@
 # AI Passport Mac Companion
 
-Mac 端配套工具: BLE 配网 + mDNS 发布 + 火山引擎流式 ASR 中转。设备
-Wi-Fi WS → 本程序 → 火山 ASR → 回传 transcript(BLE HID 注入)。
+Mac 端中转程序（BLE 中央 + 火山 ASR 流式 + 输入注入）。设备只做录音终端
+（BLE 外设，无 WiFi/HID），按住 ● 说话 → 本程序收音频流 → 火山转写 →
+设备屏幕实时预览（下行 TRANSCRIPT 帧）→ 定稿文本注入 Mac 当前聚焦输入框。
 
 ## 安装
 
@@ -10,46 +11,69 @@ python3 -m venv companion/.venv
 companion/.venv/bin/pip install -r companion/requirements.txt
 ```
 
-## 密钥(严禁提交)
+## 密钥（严禁提交）
 
-- `config.local.json`(已在 .gitignore)保存 `volcano_api_key` —— 火山控制台
-  新版 API Key(UUID)。**不要**把真实密钥写进 `config.example.json` 或任何
+- `config.local.json`（已在 .gitignore）保存 `volcano_api_key` —— 火山控制台
+  新版 API Key（UUID）。**不要**把真实密钥写进 `config.example.json` 或任何
   会被 git 跟踪的文件。
 - 也可用环境变量 `VOLCANO_API_KEY` 覆盖。
-- 模板见 `config.example.json`(`companion_port` 是 mDNS 发布的 WS 端口, 默认 8765)。
+- 模板见 `config.example.json`（`volcano_model=bigmodel_async` + `enable_nonstream`
+  二遍识别：流式实时上屏 + 每句 VAD 定稿纠错）。
 
-## BLE 配网(设备免串口)
+## 权限（首次使用必须）
 
-设备开机后(未配网时屏幕显示 NO WIFI 横幅), 在 Mac 上:
+输入注入走「剪贴板 + Cmd+V」，需要 macOS **辅助功能**授权：
 
-```bash
-companion/.venv/bin/python companion/provision.py
-```
+1. 系统设置 → 隐私与安全性 → 辅助功能 → 勾选运行终端（或 iTerm）。
+2. 未授权时 relay/inject 会明确报错（-1743/-25211），按提示操作即可。
 
-- 自动识别 Mac 当前 Wi-Fi SSID(`--ssid` 可覆盖), 密码用 `getpass` 交互输入
-  (`--pass` 可跳过交互, 但会进 shell 历史, 不推荐)。
-- 经 BLE 写入设备(WiFi 凭据只存进程内存, **绝不落盘/打日志**), 结果回显:
-  `配网成功! 设备已连上 Wi-Fi, IP = 192.168.x.x`。
-- 然后启动 WS 服务并发布 mDNS, 设备免配自动连接:
+## 使用
+
+设备开机（屏幕显示 BLE 状态）→ 运行：
 
 ```bash
-companion/.venv/bin/python tools/ws_test_server.py --mdns
+companion/.venv/bin/python companion/relay.py
 ```
 
-设备通过 `_ai-passport._tcp` 自动发现本机, 无需 `ws set`。若 mDNS 被路由器
-隔离, 逃生通道: 串口 `ws set ws://<Mac IP>:8765` / `ws set auto` 切回自动。
+- 自动扫描 "AI Passport" 并连接（首次自动配对）；按住设备 ● 说话，
+  屏幕实时预览转写，松手后定稿文本注入当前输入框（TextEdit 实测中文/英文）。
+- `--device AA:BB:CC:DD:EE:FF` 跳过扫描直连指定设备。
+- `--no-inject` 只转写（设备屏幕预览照常下行），不注入输入框。
+- `--no-approval` 关闭审批演示；默认发 `agent.approval_request` → 设备按键决策 → 回传 `agent.action`。
+- `--timeout <秒>` 无设备超时（默认 60）。
+- `--dry-run` 等价 `--no-inject`，且注入动作只打印将执行的命令（不真执行）。
 
-## 本地测试 ASR
-
-## 本地测试 ASR
+单独测试注入：
 
 ```bash
-pip install websockets
-python3 asr_client.py <pcm或wav文件>                       # 豆包ASR 1.0 小时版
-python3 asr_client.py <wav> --resource volc.seedasr.sauc.duration  # 豆包ASR 2.0
+companion/.venv/bin/python companion/inject.py "你好世界 123"      # 粘贴到当前输入框
+companion/.venv/bin/python companion/inject.py "你好" --dry-run     # 只打印命令
 ```
 
-- 音频要求 16kHz / 16bit / 单声道(与设备上行一致), wav 或裸 pcm 均可。
-- 分包默认 100ms(3200B), 与固件音频块一致。
-- 生成测试音频(macOS 自带 TTS):
+## 本地测试 ASR（无需真机）
+
+```bash
+companion/.venv/bin/python companion/asr_client.py /tmp/t.wav                 # 流式
+companion/.venv/bin/python companion/asr_client.py /tmp/t.wav --nonstream     # 二遍非流式
+```
+
+- 音频要求 16kHz / 16bit / 单声道（与设备上行一致），wav 或裸 pcm 均可，
+  分包默认 100ms（3200B）。
+- 生成测试音频（macOS 自带 TTS）：
   `say -v Tingting "你好世界" -o /tmp/t.aiff && afconvert -f WAVE -d LEI16@16000 -c 1 /tmp/t.aiff /tmp/t.wav`
+
+## 单元测试
+
+```bash
+companion/.venv/bin/python companion/tests/test_relay.py
+```
+
+FakeTransport + FakeASR + FakeInjector 注入：分片重组跨界 / voice 状态机 /
+注入序列 / 掉帧对账 / 审批闭环 / 转写下行（final 标记与 128B 切分）/ 超时。
+
+## 协议契约
+
+- 上行 EVENT 行 ≤512B（含 '\n'）：`hello / voice.start / voice.end / agent.action / status`（`status` 带 drop 计数）。
+- 上行 AUDIO：3200B 裸 PCM 帧（100ms @16kHz/16bit/mono）。
+- 下行 CTRL 行 ≤2048B（JSON 行）：`transcript`（`final:false` 预览 / `final:true` 定稿，
+  超 128 字符分多条）、`agent.approval_request`、`agent.status`、`mac.metrics`。

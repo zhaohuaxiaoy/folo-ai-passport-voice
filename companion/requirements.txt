@@ -1,5 +1,4 @@
 # AI Passport Companion 依赖(与开发机 .venv 实测版本锁定)
 # 安装: python3 -m venv companion/.venv && companion/.venv/bin/pip install -r companion/requirements.txt
 bleak==3.0.2          # macOS 11+ 单后端 BLE 客户端
-websockets==17.0.1    # WS 中转/测试服务端
-zeroconf==0.150.0     # mDNS 发布 _ai-passport._tcp
+websockets==17.0.1    # 火山 ASR 双向流式(WebSocket)

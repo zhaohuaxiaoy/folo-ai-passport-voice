@@ -3,6 +3,8 @@
 
 协议出处: https://docs.volcengine.com/docs/6561/1354869(流式语音识别-大模型版)
 - 端点: wss://openspeech.bytedance.com/api/v3/sauc/bigmodel
+  (优化版二遍识别: .../api/v3/sauc/bigmodel_async + request.enable_nonstream=true,
+  definite 定稿; 两种端点共用本客户端的帧格式与鉴权)
 - 鉴权(新版控制台,单 API Key): 握手头 X-Api-Key / X-Api-Resource-Id /
   X-Api-Request-Id(UUID) / X-Api-Sequence(固定 -1)
 - 二进制帧: 4B header + 4B 大端 payload size + payload
@@ -12,12 +14,16 @@
   byte3: 保留 0x00
 - 首帧 full client request(type=0001, JSON+Gzip); 音频帧 audio only
   request(type=0010, 无序列化+Gzip), 最后一包 flags=0b0010
-- 服务端响应 type=1001(JSON+Gzip, 结果在 result.text), 末包结果 flags 带 0b0011;
-  错误帧 type=1111: 4B 错误码 + 4B 错误信息长度 + UTF8 信息
+- 服务端响应 type=1001(JSON+Gzip, 结果在 result.text, 每包音频回一包结果,
+  末包结果 flags 带 0b0011), result.text 为全量累计文本
+- 错误帧 type=1111: 4B 错误码 + 4B 错误信息长度 + UTF8 信息
 
-用法:
-  python3 asr_client.py <pcm|wav 文件> [--resource volc.bigasr.sauc.duration] [--chunk-ms 100]
-密钥来源: 同目录 config.local.json(git 忽略)的 volcano_api_key, 或环境变量 VOLCANO_API_KEY。
+两种用法:
+  文件模式: python3 asr_client.py <pcm|wav 文件> [--ws-url ...] [--model ...]
+  流式模式(relay 用): StreamingASR.connect() / send_frame() / send_end() /
+  results() 产出 (text, is_final)
+密钥来源: 同目录 config.local.json(git 忽略)的 volcano_api_key, 或环境变量
+VOLCANO_API_KEY。勿打印/勿提交密钥。
 """
 import argparse
 import asyncio
@@ -29,6 +35,13 @@ import sys
 import uuid
 
 CHUNK_BYTES_100MS = 3200  # 100ms @ 16kHz/16bit/单声道(与固件音频块一致)
+
+# 端点/模型默认值(与 config.example.json 对齐; config.local.json 可覆盖):
+# 2026-08-24 本机 wav 实测 bigmodel_async + enable_nonstream 可用(见任务
+# 报告), 故默认用优化版二遍识别; 若服务不可用回退改这里为 bigmodel。
+DEFAULT_WS_URL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
+DEFAULT_MODEL = "bigmodel_async"
+DEFAULT_NONSTREAM = True
 
 
 # ---- 二进制帧 ----
@@ -71,11 +84,20 @@ def parse_server(raw):
     return ("unknown", flags, {"mtype": mtype})
 
 
-def build_full_request():
+def build_full_request(cfg=None):
+    """full client request。cfg 可选(volcano_model / volcano_enable_nonstream)。"""
+    cfg = cfg or {}
+    req = {
+        "model_name": cfg.get("volcano_model", "bigmodel"),
+        "enable_punc": True,
+        "enable_itn": True,
+    }
+    if cfg.get("volcano_enable_nonstream"):
+        req["enable_nonstream"] = True
     return {
         "user": {"uid": "ai-passport"},
         "audio": {"format": "pcm", "rate": 16000, "bits": 16, "channel": 1},
-        "request": {"model_name": "bigmodel", "enable_punc": True, "enable_itn": True},
+        "request": req,
     }
 
 
@@ -89,9 +111,10 @@ def load_config():
         with open(p, "r", encoding="utf-8") as f:
             cfg = json.load(f)
     cfg.setdefault("volcano_api_key", os.environ.get("VOLCANO_API_KEY", ""))
-    cfg.setdefault("volcano_ws_url",
-                   "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel")
+    cfg.setdefault("volcano_ws_url", DEFAULT_WS_URL)
     cfg.setdefault("volcano_resource_id", "volc.bigasr.sauc.duration")
+    cfg.setdefault("volcano_model", DEFAULT_MODEL)
+    cfg.setdefault("volcano_enable_nonstream", DEFAULT_NONSTREAM)
     return cfg
 
 
@@ -116,86 +139,197 @@ def load_pcm(path):
     return raw, "raw pcm"
 
 
-# ---- 识别主流程 ----
+# ---- 流式会话(relay 用) ----
 
-async def transcribe(pcm, cfg, chunk_bytes=CHUNK_BYTES_100MS, on_partial=None):
-    """流式上传 pcm(每包 发一收一), 返回最终识别文本。"""
-    import websockets
-    if not cfg["volcano_api_key"]:
-        sys.exit("缺少火山 API Key: 配置 companion/config.local.json 的 "
-                 "volcano_api_key, 或设置环境变量 VOLCANO_API_KEY")
-    headers = {
-        "X-Api-Key": cfg["volcano_api_key"],
-        "X-Api-Resource-Id": cfg["volcano_resource_id"],
-        "X-Api-Request-Id": str(uuid.uuid4()),
-        "X-Api-Sequence": "-1",
-    }
-    try:
-        connect = websockets.connect(cfg["volcano_ws_url"],
-                                     extra_headers=headers, max_size=None)
-    except TypeError:  # websockets <= 12 用 additional_headers
-        connect = websockets.connect(cfg["volcano_ws_url"],
-                                     additional_headers=headers, max_size=None)
+class StreamingASR:
+    """双向流式 ASR 会话: 边收音频边发, 边收结果边取。
 
-    # 首帧: full client request; 之后每个音频包 3200B(100ms), 最后一包带结束标志
-    frames = [frame(0x1, gzip.compress(json.dumps(
-        build_full_request()).encode("utf-8")))]
-    n = len(pcm)
-    for i in range(0, n, chunk_bytes):
-        is_last = (i + chunk_bytes >= n)
-        frames.append(frame(0x2, gzip.compress(pcm[i:i + chunk_bytes]),
-                            flags=0x2 if is_last else 0x0, serialization=0x0))
+    协议细节: 音频帧每包 3200B(100ms); send_frame 内部保持一帧延迟,
+    保证真正的最后一块音频在 send_end() 时带结束标志(0b0010)发出。
+    服务端每包音频回一包结果, result.text 为全量累计文本, 末包结果 flags
+    带 0b0011(是末包)。每个实例只服务一次 voice 会话。
 
-    final_text = ""
-    async with connect as ws:
-        for fr in frames:
-            await ws.send(fr)
-            raw = await asyncio.wait_for(ws.recv(), timeout=20)
-            kind, flags, data = parse_server(raw)
-            if kind == "error":
-                raise RuntimeError(f"ASR 错误码 {data['code']}: {data['message']}")
-            if kind == "result":
-                text = ((data.get("result") or {}).get("text")) or ""
-                if text:
-                    final_text = text
-                    if on_partial:
-                        on_partial(text)
-                if flags & 0x2:  # 末包结果
-                    return final_text
-        # 兜底: 服务端未回末包标志时, 再等一小段时间收尾
+    用法:
+      asr = StreamingASR(cfg)
+      await asr.connect()
+      consume = asyncio.create_task(asr.consume(loop))   # 见 relay.py
+      await asr.send_frame(pcm) ...                      # 每帧 100ms
+      await asr.send_end()
+      await asr.close()
+    """
+
+    def __init__(self, cfg=None, chunk_bytes=CHUNK_BYTES_100MS):
+        self.cfg = cfg or load_config()
+        self.chunk_bytes = chunk_bytes
+        self._ws = None
+        self._recv_task = None
+        self._results_q = asyncio.Queue()
+        self._pending = None   # 末帧保底: 延迟一帧, 由 send_end 带结束标志发出
+        self._closed = False
+
+    # -- 连接 --
+
+    def _open_ws(self):
+        import websockets
+        headers = {
+            "X-Api-Key": self.cfg["volcano_api_key"],
+            "X-Api-Resource-Id": self.cfg["volcano_resource_id"],
+            "X-Api-Request-Id": str(uuid.uuid4()),
+            "X-Api-Sequence": "-1",
+        }
+        # websockets 15+ 参数名是 additional_headers(旧版 extra_headers 会把
+        # 未知 kwarg 透传到 create_connection 才报错, 本仓库锁 17.0.1)。
+        return websockets.connect(self.cfg["volcano_ws_url"],
+                                  additional_headers=headers, max_size=None)
+
+    async def connect(self):
+        if not self.cfg.get("volcano_api_key"):
+            raise RuntimeError(
+                "缺少火山 API Key: 配置 companion/config.local.json 的 "
+                "volcano_api_key, 或设置环境变量 VOLCANO_API_KEY")
+        self._ws = await self._open_ws()
+        req = frame(0x1, gzip.compress(
+            json.dumps(build_full_request(self.cfg)).encode("utf-8")))
+        await self._ws.send(req)
+        self._recv_task = asyncio.create_task(self._recv_loop())
+
+    async def _recv_loop(self):
         try:
             while True:
-                raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                raw = await self._ws.recv()
                 kind, flags, data = parse_server(raw)
-                if kind == "result":
+                if kind == "error":
+                    self._results_q.put_nowait(("error", data))
+                elif kind == "result":
                     text = ((data.get("result") or {}).get("text")) or ""
-                    if text:
-                        final_text = text
-                    if flags & 0x2:
-                        return final_text
-        except asyncio.TimeoutError:
-            return final_text
+                    self._results_q.put_nowait(
+                        ("result", text, bool(flags & 0x2)))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            if not self._closed:
+                self._results_q.put_nowait(
+                    ("error", {"code": "conn", "message": str(e)}))
+
+    # -- 音频上行 --
+
+    async def send_frame(self, pcm_bytes):
+        """发送一个音频帧(不带结束标志)。内部保持末帧延迟。"""
+        if self._pending is not None:
+            await self._ws.send(frame(0x2, gzip.compress(self._pending),
+                                      serialization=0x0))
+        self._pending = bytes(pcm_bytes)
+
+    async def send_end(self):
+        """把最后一块音频带结束标志(0b0010)发出, 结束本次音频流。"""
+        if self._pending is not None:
+            await self._ws.send(frame(0x2, gzip.compress(self._pending),
+                                      flags=0x2, serialization=0x0))
+            self._pending = None
+        else:
+            # 零音频会话: 发一个空末帧收尾
+            await self._ws.send(frame(0x2, gzip.compress(b""),
+                                      flags=0x2, serialization=0x0))
+
+    # -- 结果下行 --
+
+    async def results(self):
+        """产出 (text, is_final)。text 为全量累计文本; is_final=True 后流结束。
+
+        服务端错误帧/连接中断抛 RuntimeError。调用方应在 is_final 后停止
+        迭代(之后不会再出结果)。
+        """
+        while True:
+            item = await self._results_q.get()
+            if item[0] == "error":
+                raise RuntimeError(
+                    f"ASR 错误({item[1].get('code', '?')}): "
+                    f"{item[1].get('message', '?')}")
+            yield item[1], item[2]
+
+    async def close(self):
+        self._closed = True
+        if self._recv_task is not None:
+            self._recv_task.cancel()
+            try:
+                await self._recv_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if self._ws is not None:
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+
+
+# ---- 文件模式(回归保留) ----
+
+async def transcribe(pcm, cfg, chunk_bytes=CHUNK_BYTES_100MS, on_partial=None):
+    """文件模式: 流式上传 pcm(每包一帧), 返回最终识别文本。
+
+    基于 StreamingASR 实现(同一帧格式/鉴权/结果路径), 供本机验证与测试。
+    """
+    asr = StreamingASR(cfg, chunk_bytes=chunk_bytes)
+    await asr.connect()
+    n = len(pcm)
+    for i in range(0, n, chunk_bytes):
+        await asr.send_frame(pcm[i:i + chunk_bytes])
+    await asr.send_end()
+
+    final_text = ""
+    results = asr.results()
+    try:
+        while True:
+            try:
+                text, is_final = await asyncio.wait_for(
+                    results.__anext__(), timeout=20)
+            except StopAsyncIteration:
+                break
+            if text:
+                final_text = text
+                if on_partial:
+                    on_partial(text)
+            if is_final:
+                break
+    except asyncio.TimeoutError:
+        pass  # 服务端未回末包标志: 以最后收到的文本收尾
+    await asr.close()
+    return final_text
 
 
 # ---- CLI ----
 
 def main():
-    ap = argparse.ArgumentParser(description="火山豆包流式 ASR 本地测试")
+    ap = argparse.ArgumentParser(description="火山豆包流式 ASR 本地测试(文件模式)")
     ap.add_argument("audio", help="PCM 或 WAV 文件(16kHz/16bit/单声道)")
     ap.add_argument("--resource", default=None,
                     help="覆盖资源 ID(默认 config 里的; ASR 2.0 用 "
                          "volc.seedasr.sauc.duration)")
     ap.add_argument("--chunk-ms", type=int, default=100,
                     help="分包大小(ms), 默认 100")
+    ap.add_argument("--ws-url", default=None,
+                    help="覆盖 WebSocket 端点(默认 config 里的)")
+    ap.add_argument("--model", default=None,
+                    help="覆盖模型名(bigmodel / bigmodel_async)")
+    ap.add_argument("--nonstream", action="store_true",
+                    help="开启 enable_nonstream(二遍识别, 配 bigmodel_async)")
     args = ap.parse_args()
 
     cfg = load_config()
     if args.resource:
         cfg["volcano_resource_id"] = args.resource
+    if args.ws_url:
+        cfg["volcano_ws_url"] = args.ws_url
+    if args.model:
+        cfg["volcano_model"] = args.model
+    if args.nonstream:
+        cfg["volcano_enable_nonstream"] = True
+
     pcm, desc = load_pcm(args.audio)
     dur = len(pcm) / 3200 * 0.1
     print(f"音频: {desc} {len(pcm)} B (约 {dur:.1f}s @16kHz)")
-    print(f"资源: {cfg['volcano_resource_id']}")
+    print(f"端点: {cfg['volcano_ws_url']}  model={cfg.get('volcano_model')}  "
+          f"nonstream={bool(cfg.get('volcano_enable_nonstream'))}")
 
     text = asyncio.run(transcribe(
         pcm, cfg,
