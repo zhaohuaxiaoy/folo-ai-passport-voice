@@ -27,6 +27,11 @@ voice 窗口掉帧统计(理论帧数 vs 实收帧数, 与设备 status 帧 drop
   companion/.venv/bin/python companion/relay.py --no-inject           # 只转写
   companion/.venv/bin/python companion/relay.py --no-approval         # 关审批演示
   companion/.venv/bin/python companion/relay.py --dry-run             # 只转写+打印注入
+
+通道与注入后端由 companion/config.local.json 的 channel 决定:
+  "ble"(缺省)  → BLE 直连(设备广播 "AI Passport");注入 = 平台默认后端
+  "wifi"       → 本机起 WS server(端口 ws_port), 设备 STA 主动连
+                  (无蓝牙 Windows 电脑);注入 = Windows 剪贴板后端
 """
 import argparse
 import asyncio
@@ -631,12 +636,44 @@ class _VoiceSession:
 
 # ---- CLI ----
 
+def _build_transport(cfg):
+    """按 config.local.json 的 channel 选传输层(Windows 移植 P4+):
+
+    - "ble"(缺省): bleak BLE 直连, macOS/Windows 蓝牙均可;
+    - "wifi": 本机起 WS server, 设备 STA 主动连(无蓝牙 Windows 电脑);
+      WsTransport 由 ws_transport.py 提供(P5 落地, 本阶段未实现)。
+    """
+    channel = cfg.get("channel", "ble")
+    if channel == "ble":
+        return BleakTransport()
+    if channel == "wifi":
+        from ws_transport import WsTransport   # 懒加载:模块缺失即报错(尚未实现)
+        return WsTransport(port=int(cfg.get("ws_port", 8765)),
+                           connect_timeout=float(cfg.get("ws_connect_timeout", 120)))
+    raise RelayError(
+        f"config.local.json 的 channel 值无效: {channel!r}(应为 \"ble\" 或 \"wifi\")")
+
+
+def _default_inject_fn():
+    """按平台选注入后端(契约一致: paste_text(text, dry_run=False)):
+
+    Windows → inject_win(剪贴板 CF_UNICODETEXT + SendInput Ctrl+V);
+    其余(macOS) → inject(pbcopy + osascript Cmd+V)。
+    """
+    if sys.platform == "win32":
+        from inject_win import paste_text
+    else:
+        from inject import paste_text
+    return paste_text
+
+
 def main():
     ap = argparse.ArgumentParser(
-        description="AI Passport BLE 中转: 设备音频 → 火山 ASR → 注入输入框",
+        description="AI Passport 中转: 设备音频 → 火山 ASR → 注入输入框"
+                    "(通道/注入后端由 config.local.json 决定)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     ap.add_argument("--device", default=None,
-                    help="BLE 地址(默认扫描 'AI Passport')")
+                    help="BLE 地址(默认扫描 'AI Passport';wifi 通道忽略)")
     ap.add_argument("--no-inject", action="store_true",
                     help="只转写不注入(调试)")
     ap.add_argument("--no-approval", action="store_true",
@@ -647,8 +684,11 @@ def main():
                     help="等价 --no-inject, 且注入动作只打印将执行的命令")
     args = ap.parse_args()
 
+    from asr_client import load_config
+    cfg = load_config()
     relay = Relay(
-        transport=BleakTransport(),
+        transport=_build_transport(cfg),
+        inject_fn=_default_inject_fn(),
         timeout=args.timeout,
         do_inject=not (args.no_inject or args.dry_run),
         do_approval=not args.no_approval,
@@ -660,7 +700,8 @@ def main():
         print("\n[relay] Ctrl+C, 已退出")
     except RelayError as e:
         print(f"[relay] 错误: {e}", file=sys.stderr)
-        print("[relay] 请确认设备开机且在 BLE 广播范围, 然后重新运行本程序",
+        print("[relay] 请确认设备已开机并处于连接范围"
+              "(ble: BLE 广播; wifi: 与电脑同一局域网), 然后重新运行本程序",
               file=sys.stderr)
         sys.exit(1)
 

@@ -3,5 +3,9 @@
   "volcano_ws_url": "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async",
   "volcano_resource_id": "volc.bigasr.sauc.duration",
   "volcano_model": "bigmodel_async",
-  "volcano_enable_nonstream": true
+  "volcano_enable_nonstream": true,
+  "channel": "ble",
+  "ws_port": 8765,
+  "ws_connect_timeout": 120,
+  "inject_focus_delay": 2.0
 }
