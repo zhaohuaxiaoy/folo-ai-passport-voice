@@ -242,7 +242,11 @@ static const struct ble_gatt_svc_def gatt_defs[] = {
             {
                 .uuid = &(ble_uuid16_t){ BLE_UUID16_INIT(CTRL_CHR_UUID) }.u,
                 .access_cb = gatt_access,
-                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC,
+                // WRITE_NO_RSP: Mac 端下行(response=False)免等 ATT 确认 RTT(~5-20ms),
+                // 转写预览/审批更快落屏。NimBLE 对 WRITE_REQ 与 WRITE_CMD 都调用同一
+                // access_cb(op 同为 BLE_GATT_ACCESS_OP_WRITE_CHR) → 回调零改动。
+                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP
+                       | BLE_GATT_CHR_F_WRITE_ENC,
                 .val_handle = &s_ctrl_val_handle,
             },
             {

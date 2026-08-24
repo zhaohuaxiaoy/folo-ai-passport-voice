@@ -63,8 +63,10 @@ class FakeTransport:
         self.events.append(("connect", address))
         self.disconnect_cb = on_disconnect
 
-    async def write_gatt_char(self, uuid, data):
-        self.events.append(("write", uuid, bytes(data)))
+    async def write_gatt_char(self, uuid, data, response=False):
+        # 与 BleakTransport 同契约:下行一律无响应写(免 ATT 确认 RTT)。
+        # response 记录进事件元组(第 4 元素),测试断言锁住该契约。
+        self.events.append(("write", uuid, bytes(data), response))
 
     async def start_notify(self, uuid, handler):
         self.events.append(("subscribe", uuid))
@@ -84,8 +86,8 @@ class FakeTransport:
 class FailingWriteTransport(FakeTransport):
     """CTRL 写总失败(模拟未连接/写失败): 下行不得 crash, 记日志继续。"""
 
-    async def write_gatt_char(self, uuid, data):
-        self.events.append(("write", uuid, bytes(data)))
+    async def write_gatt_char(self, uuid, data, response=False):
+        self.events.append(("write", uuid, bytes(data), response))
         raise OSError("模拟 CTRL 写失败")
 
 
@@ -328,6 +330,29 @@ async def test_approval_flow():
     await wait_until(lambda: len(relay.decisions) >= 1, what="agent.action")
     check("决策记录", relay.decisions[0].get("action"), "approve")
     check("决策 taskId", relay.decisions[0].get("taskId"), "task-001")
+
+    t.disconnect_cb()
+    await wait_until(task.done, what="断开退出")
+
+
+async def test_ctrl_write_no_response():
+    """S2: 全部下行 CTRL 写必须是无响应写(response=False),免等 ATT 确认 RTT。"""
+    t = FakeTransport()
+    relay = Relay(t, asr_factory=make_fake_asr_factory([("hi", True)], {}),
+                  inject_fn=FakeInjector(), timeout=5)
+    task = asyncio.create_task(relay.run())
+    await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
+
+    t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
+    t.notify_audio(bytes(3200))
+    t.notify_event(b'{"event":"voice.end"}\n')
+    await wait_session_done(relay)
+
+    ctrl_writes = [e for e in t.events if e[0] == "write" and e[1] == CTRL_UUID]
+    check("有 CTRL 写", len(ctrl_writes) > 0, True)
+    bad = [e for e in ctrl_writes if e[3] is not False]
+    check("CTRL 写全部 response=False", bad, [])
 
     t.disconnect_cb()
     await wait_until(task.done, what="断开退出")
@@ -607,6 +632,7 @@ async def main():
     print("== relay 流程 ==")
     await test_voice_flow()
     await test_approval_flow()
+    await test_ctrl_write_no_response()
     await test_no_approval_and_no_inject()
     await test_transcript_downlink_long()
     await test_downlink_write_failure()

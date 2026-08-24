@@ -140,7 +140,9 @@ class BleakTransport:
         # 无需也不支持中央侧指定; 长载荷 write_gatt_char 自动按 MTU 分包。
 
     async def write_gatt_char(self, uuid, data):
-        await self._client.write_gatt_char(uuid, data, response=True)
+        # response=False: 无响应写,免等 ATT 确认 RTT(~5-20ms),转写预览/审批更快落屏。
+        # 固件 CTRL 特征已加 WRITE_NO_RSP(回调零改动);下行失败本就不重试,语义不变。
+        await self._client.write_gatt_char(uuid, data, response=False)
 
     async def start_notify(self, uuid, handler):
         # bleak 3.x 回调签名 (characteristic, data)
