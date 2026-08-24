@@ -1,0 +1,6 @@
+{
+  "volcano_api_key": "PASTE_YOUR_VOLCANO_API_KEY_HERE",
+  "volcano_ws_url": "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel",
+  "volcano_resource_id": "volc.bigasr.sauc.duration",
+  "companion_port": 8765
+}

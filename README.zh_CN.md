@@ -168,24 +168,24 @@ cc -std=c11 -Wall -Wextra -Werror -Imain \
 
 ## AI Passport 固件 MVP（当前 `main`）
 
-`main` 已从演示菜单迁移为 AI Passport 产品固件：按住 ● 说话 → 语音经 WebSocket 流式上传到 Mac 端 Companion → Mac 回传转写文本 → 设备以 **BLE HID 键盘**身份逐字打进 Mac 聚焦的输入框；高风险操作由 3 颗实体按键物理审批。Mac 端 Companion 与火山引擎 STT 为下一迭代，协议已前瞻兼容（`main/app_protocol.h`）。
+`main` 已从演示菜单迁移为 AI Passport 产品固件：按住 ● 说话 → 语音经 WebSocket 流式上传到 Mac 端 Companion → Mac 回传转写文本 → 设备以 **BLE HID 键盘**身份逐字打进 Mac 聚焦的输入框；高风险操作由 3 颗实体按键物理审批。Mac 端 Companion 提供 BLE 配网与 mDNS 自动发现，与火山引擎 STT（`companion/asr_client.py`，需自行配置密钥）。
 
 ### 使用流程
 
-1. 编译烧录后，USB-Serial-JTAG 控制台配置网络：
+1. 首次使用，Mac 侧一条命令完成配网（设备开机后显示 `NO WIFI — PROVISION FROM MAC` 横幅）：
    ```bash
-   wifi set <ssid> <pass>     # 持久化到 NVS,自动连接
-   ws set ws://<Mac IP>:8765  # 默认 ws://192.168.1.100:8765
-   st                        # 状态一览:堆/Wi-Fi/WS/BLE/电量
+   companion/.venv/bin/python companion/provision.py   # 自动识别 Mac 当前 Wi-Fi,getpass 输密码
    ```
-2. Mac 侧运行模拟 Companion 开发服务器：
+   凭据经 BLE 加密链路写入并持久化，成功回显设备 IP；密码绝不落盘。
+2. Mac 侧运行模拟 Companion 开发服务器并发布 mDNS（设备免配自动发现，无需 `ws set`）：
    ```bash
-   pip install websockets
-   python3 tools/ws_test_server.py --approval --loop-transcript 'Hello from AI Passport 123'
+   companion/.venv/bin/python tools/ws_test_server.py --mdns --approval --loop-transcript 'Hello from AI Passport 123'
    ```
 3. 设备 ▲/▼ 选择工作流（BUILD/DEBUG/REVIEW/TEST/CAPTURE），按住 ● 说话，松开发送；
    Mac 回传转写后设备经 BLE HID 键入（ASCII 逐字 ~40ms/字；中文回退粘贴模式）。
 4. 审批闭环：Mac 发 `agent.approval_request` → 设备进入审批页，● 批准 / ▲ 拒绝 / ▼ 看 Diff 详情。
+5. 逃生通道（mDNS 被路由器隔离时）：串口控制台 `wifi set <ssid> <pass>`、`ws set ws://<Mac IP>:8765`；
+   `ws set auto` 切回 mDNS 自动模式；`mdns resolve` 手动重查；`st` 状态一览（堆/Wi-Fi/WS/BLE/电量）。
 
 ### 语音流式与内存纪律
 
@@ -198,18 +198,19 @@ cc -std=c11 -Wall -Wextra -Werror -Imain \
 ```bash
 cd tests && cmake -B build && cmake --build build && ctest --test-dir build
 ```
-覆盖：状态机全转移（PTT 单击/双击取消/超时/审批/断线回退/动作顺序）、HID 键码表（全部可打印 ASCII）、协议 parse/serialize roundtrip（cJSON 内置在 `tests/third_party/cJSON`，无需 ESP-IDF）。
+覆盖：状态机全转移（PTT 单击/双击取消/超时/审批/断线回退/动作顺序）、HID 键码表（全部可打印 ASCII）、协议 parse/serialize roundtrip、配网协议（合法/超限/畸形/512B 上限/序列化截断）——5/5，含 ASan（cJSON 内置在 `tests/third_party/cJSON`，无需 ESP-IDF）。
 
 ### 本迭代验收状态
 
 ```text
 Build:        NOT RUN（本机无 ESP-IDF;按上节命令在 5.5.3 环境构建）
-Host tests:   PASS（app_state / hid_keymap / ui_pixel_math / app_protocol，4/4，含 ASan）
-Device tests: NOT RUN（需真机:见上节流程与下文验收清单）
-Unverified:   BLE HID 实机键入、60s PTT 稳定性、空闲堆预算
+Host tests:   PASS（app_state / hid_keymap / ui_pixel_math / app_protocol / prov_protocol，5/5，含 ASan）
+Companion:    PASS（ble_prov 17/17 + mac_ssid 10/10 单测；本机 SSID 识别、mDNS 发布 dns-sd 可发现）
+Device tests: NOT RUN（需真机:见下节验收清单）
+Unverified:   BLE HID 实机键入、BLE 配网全流程、双连接共存、mDNS 换 IP 自动重连、空闲堆预算
 ```
 
-**真机验收清单**：5 工作流轮播与音效；60s 无按键熄屏、任意键唤醒；`wifi set` 持久化与断线 OFFLINE 横幅（≤2s 显示、恢复 ≤3s 重连）；PTT → 测试服务器收到 `voice.start` → 3200B 二进制流 → `voice.end`；Mac 蓝牙连接 "AI Passport KB" 并在 TextEdit 逐字键入（含 `--loop-transcript`）；`--approval` 全链路（审批页 → ●/▲/▼ → `agent.action` 回传）；`st` 对比空闲堆（60s PTT 后下降 ≤~10KB）。
+**真机验收清单**（继承 + 本轮新增）：5 工作流轮播与音效；60s 无按键熄屏、任意键唤醒；断线 OFFLINE 横幅（≤2s 显示、恢复 ≤3s 重连）；PTT → `voice.start` → 3200B 二进制流 → `voice.end`；Mac 蓝牙连接 "AI Passport KB" 并在 TextEdit 逐字键入（含 `--loop-transcript`）；`--approval` 全链路；`st` 对比空闲堆（60s PTT 后下降 ≤~10KB）；**BLE 配网全流程**（factory 复位 → 横幅+广播 → provision.py 配对/写入/ok+IP）；错误密码 → `auth_fail` → 改对重配；未配对写 → insufficient encryption 兜底；**双连接共存**（HID 打字同时配网 app 连接，配完回单连接）；**mDNS 换 IP 自动重连**（Mac 换网 → 15s~5min 内设备自动跟随）；重启凭据持久化 + mDNS 冷启动发现。
 
 ## 验收与交付格式
 
@@ -238,8 +239,10 @@ Unverified: 仍需板卡、仪器或用户确认的事项
 ```text
 components/bsp/include/  BSP 公开 API 与 bsp_pins.h 硬件事实
 components/bsp/src/      显示、按键、音频、电池、共享 I2C 实现
-main/                    最小菜单、LVGL UI 与独立硬件演示页
+main/                    应用 UI、状态机、Wi-Fi/WS/BLE 配网、mDNS 解析
 tests/                   可脱离硬件运行的轻量逻辑测试源
+companion/               Mac 端工具:BLE 配网、mDNS 发布、ASR 中转、单测
+tools/                   WS 模拟服务器与开发脚本
 docs/                    agent 硬件开发指南与扩展文档
 sdkconfig.defaults       ESP32-C3、USB console、Flash、LVGL 默认配置
 AGENTS.md                agent 在本仓库的编码、验证和提交规则

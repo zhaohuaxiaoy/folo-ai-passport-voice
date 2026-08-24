@@ -10,12 +10,15 @@ transcript / approval_request / agent.status / mac.metrics。
   python3 tools/ws_test_server.py --loop-transcript 'Hello from AI Passport 123'
   python3 tools/ws_test_server.py --approval               # 全链路:转写→审批请求
   python3 tools/ws_test_server.py --paste '中文内容'        # 注入方式=paste
+  python3 tools/ws_test_server.py --mdns                   # 同时发布 _ai-passport._tcp(设备自动发现)
 
-依赖: pip install websockets
+依赖: pip install websockets  (--mdns 需 pip install zeroconf)
 """
 import argparse
 import asyncio
 import json
+import socket
+import subprocess
 import sys
 
 try:
@@ -127,6 +130,50 @@ async def handle(ws, mode: dict):
         print("== 设备断开 ==")
 
 
+def local_ipv4() -> str:
+    """取本机局域网 IPv4:优先 Wi-Fi 接口(en0/en1),回退 UDP 默认路由探测。"""
+    for iface in ("en0", "en1"):
+        try:
+            out = subprocess.run(["ipconfig", "getifaddr", iface],
+                                 capture_output=True, text=True, timeout=3)
+            ip = out.stdout.strip()
+            if ip and not ip.startswith("127."):
+                return ip
+        except (OSError, subprocess.SubprocessError):
+            continue
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    finally:
+        s.close()
+
+
+def publish_mdns(port: int):
+    """发布 _ai-passport._tcp,让设备 mDNS 自动发现本 WS 服务。
+
+    必须在事件循环外调用:zeroconf 同步 API 内部提交任务到自己的 loop 并等待,
+    若在 running loop 线程内调用会自阻塞(EventLoopBlocked)。
+    """
+    try:
+        from zeroconf import ServiceInfo, Zeroconf
+    except ImportError:
+        sys.exit("缺少 zeroconf 库: pip install zeroconf")
+    ip = local_ipv4()
+    info = ServiceInfo(
+        "_ai-passport._tcp.local.",
+        "AI Passport Companion._ai-passport._tcp.local.",
+        addresses=[socket.inet_aton(ip)],
+        port=port,
+        properties={"proto": "1"},
+        server="ai-passport-companion.local.",
+    )
+    zc = Zeroconf()
+    zc.register_service(info)
+    print(f"mDNS 已发布 _ai-passport._tcp -> ws://{ip}:{port}")
+    return zc, info
+
+
 def main():
     ap = argparse.ArgumentParser(description="AI Passport 模拟 Companion")
     ap.add_argument("--port", type=int, default=8765)
@@ -135,6 +182,8 @@ def main():
                     help="每轮 voice.end 都回发该文本(打字演示)")
     ap.add_argument("--paste", default="", help="回发转写(inject_mode=paste)")
     ap.add_argument("--approval", action="store_true", help="转写后发审批请求")
+    ap.add_argument("--mdns", action="store_true",
+                    help="发布 _ai-passport._tcp(设备自动发现,需 zeroconf)")
     args = ap.parse_args()
 
     mode = {
@@ -152,15 +201,33 @@ def main():
         print(f"voice.end 后回发 transcript(paste): {mode['paste']}")
     if mode["approval"]:
         print("voice.end 后还会发 agent.approval_request")
-    print("设备侧先配 Wi-Fi:`wifi set <ssid> <pass>`,再 `ws set ws://<本机IP>:%d`" % args.port)
+    print("设备侧配网后建议开 auto:`ws set auto`,即可被 mDNS 自动发现" if args.mdns
+          else "设备侧先配 Wi-Fi:`wifi set <ssid> <pass>`,再 `ws set ws://<本机IP>:%d`" % args.port)
 
     async def serve(websocket, path=None):
         await handle(websocket, mode)
 
+    # mDNS 注册放事件循环外(zeroconf 同步 API 不能在 running loop 线程内调用)
+    zc = info = None
+    if args.mdns:
+        zc, info = publish_mdns(args.port)
+
+    # websockets 17 的 serve() 是同步工厂,必须在事件循环内调用(否则 no running loop)
+    async def run_server():
+        try:
+            async with websockets.serve(serve, "0.0.0.0", args.port):
+                await asyncio.Future()   # 常驻,直到 Ctrl+C
+        finally:
+            pass   # 注销在循环外做(见下)
+
     try:
-        asyncio.run(websockets.serve(serve, "0.0.0.0", args.port))
+        asyncio.run(run_server())
     except KeyboardInterrupt:
         print("\nbye")
+    finally:
+        if zc:   # 循环已关闭,可安全注销
+            zc.unregister_service(info)
+            zc.close()
 
 
 if __name__ == "__main__":

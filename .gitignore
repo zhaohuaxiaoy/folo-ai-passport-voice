@@ -4,3 +4,9 @@ sdkconfig.old
 managed_components/
 dependencies.lock
 .vscode/
+
+# 本地密钥(严禁提交)
+companion/config.local.json
+companion/.env
+companion/.venv/
+__pycache__/
