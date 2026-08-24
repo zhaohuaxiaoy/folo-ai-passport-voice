@@ -25,6 +25,13 @@ static int cmd_st(int argc, char **argv)
     printf("heap free: %d B (min %d B)\n",
            (int)esp_get_free_heap_size(), (int)esp_get_minimum_free_heap_size());
     printf("tasks: %d\n", (int)uxTaskGetNumberOfTasks());
+    // 栈高水位(真机验证项 #3:event_worker 栈 2048 是否够用,st 可查)
+    TaskHandle_t t = xTaskGetHandle("app_task");
+    printf("app_task hwm: %u B\n",
+           t ? (unsigned)uxTaskGetStackHighWaterMark(t) : 0);
+    t = xTaskGetHandle("event_worker");
+    printf("event_worker hwm: %u B\n",
+           t ? (unsigned)uxTaskGetStackHighWaterMark(t) : 0);
     printf("--- ble ---\n");
     printf("connected: %s event_subscribed: %s mtu: %u\n",
            ble_audio_connected() ? "yes" : "no",

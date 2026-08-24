@@ -40,3 +40,8 @@ CONFIG_BT_NIMBLE_NVS_PERSIST=y
 # 协商 ATT MTU 517(含 3B 头 → 载荷 514B):3200B 音频帧 = 7 片(6×514+116),
 # 分片远少于 MTU 247 的 14 片,显著降低 NOTIFY_TX 流控开销(吞吐工程,见 design.md)。
 CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=517
+# MSYS mbuf 池:默认 MSYS_2 为 292B×4 块,514B 载荷需 2 块链接才放得下,
+# 并发分片下池易耗尽(ble_hs_mbuf_from_flat 失败 → 整帧丢弃,见第 5 轮 #1)。
+# 640B = 514B 载荷 + mbuf/pkthdr 头(~44B) + 余量,单片一块、链接归零。
+# 4×640B ≈ 2.5KB 静态 RAM,代价可接受;实际池行为真机验证(NOT RUN)。
+CONFIG_BT_NIMBLE_MSYS_2_BUF_SIZE=640
