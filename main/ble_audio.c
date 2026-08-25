@@ -138,6 +138,17 @@ static volatile uint16_t s_audio_conn = 0xFFFF;    // 订阅了 AUDIO CCCD 的�
 static volatile bool s_event_subscribed = false;   // EVENT CCCD 已订阅(链路通,link_up 依据)
 static volatile uint32_t s_drop_audio = 0;         // 音频 notify 失败丢弃累计
 static volatile uint32_t s_drop_event = 0;         // 事件行 notify 失败丢弃累计
+// 掉帧计数跨任务(音频 worker / event worker / app task)++:单核下读-改-写可被
+// tick 抢占打断(ISR 返回后切换任务)→ 丢递增。临界区(关中断)微秒级,不阻塞
+// 实时路径;对齐 audio_streamer s_drop_mux 模式(审查 P2-5)。
+static portMUX_TYPE s_drop_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static void drop_count_inc(volatile uint32_t *c)
+{
+    portENTER_CRITICAL(&s_drop_mux);
+    (*c)++;
+    portEXIT_CRITICAL(&s_drop_mux);
+}
 
 // NOTIFY_TX 流控:host 回调每片给一次信号量,发送任务等(超时=链路异常)。
 // 发送者有两个:audio worker(音频帧)与 app task(事件行)。完成信号是共享的,
@@ -442,7 +453,7 @@ int ble_audio_init(void) {
 int ble_audio_notify_audio(const uint8_t *frame, size_t len) {
     if (!frame || len == 0) return -1;
     if (s_conn == 0xFFFF || s_audio_conn == 0xFFFF) {
-        s_drop_audio++;
+        drop_count_inc(&s_drop_audio);
         return -1;   // 订阅者缺失:上层走丢帧
     }
     uint16_t mtu = ble_att_mtu(s_conn);
@@ -455,7 +466,7 @@ int ble_audio_notify_audio(const uint8_t *frame, size_t len) {
     size_t clen;
     while ((e = ble_audio_pack_next(&p, &chunk, &clen)) == BLE_AUDIO_OK) {
         if (!notify_one(s_audio_conn, s_audio_val_handle, chunk, clen)) {
-            s_drop_audio++;
+            drop_count_inc(&s_drop_audio);
             return -1;   // 中段失败:整帧作废(上层丢帧计数)
         }
     }
@@ -466,7 +477,7 @@ int ble_audio_notify_audio(const uint8_t *frame, size_t len) {
 // 订阅状态在入队后可能变化,发送前复查;失败丢帧计数(语义同旧同步路径)。
 static int send_event_line_now(const char *line, size_t len) {
     if (s_conn == 0xFFFF || !s_event_subscribed) {
-        s_drop_event++;
+        drop_count_inc(&s_drop_event);
         return -1;   // 订阅者缺失:上层走丢帧
     }
     uint16_t mtu = ble_att_mtu(s_conn);
@@ -475,7 +486,7 @@ static int send_event_line_now(const char *line, size_t len) {
     if (len <= (size_t)mtu - PAYLOAD_OVERHEAD) {
         // 单包直发
         if (!notify_one(s_conn, s_event_val_handle, line, len)) {
-            s_drop_event++;
+            drop_count_inc(&s_drop_event);
             return -1;
         }
         return 0;
@@ -488,7 +499,7 @@ static int send_event_line_now(const char *line, size_t len) {
     size_t clen;
     while ((e = ble_audio_pack_next(&p, &chunk, &clen)) == BLE_AUDIO_OK) {
         if (!notify_one(s_conn, s_event_val_handle, chunk, clen)) {
-            s_drop_event++;
+            drop_count_inc(&s_drop_event);
             return -1;
         }
     }
@@ -510,7 +521,7 @@ static void event_worker_task(void *param) {
 int ble_audio_notify_event(const char *line, size_t len) {
     if (!line || len == 0 || len > EVENT_LINE_MAX) return -1;
     if (s_event_q == NULL || s_conn == 0xFFFF || !s_event_subscribed) {
-        s_drop_event++;
+        drop_count_inc(&s_drop_event);
         return -1;   // 队列未建/订阅者缺失:计数丢弃
     }
     char item[EVENT_LINE_MAX];
@@ -520,7 +531,7 @@ int ble_audio_notify_event(const char *line, size_t len) {
     // 非阻塞入队:队列满 = 事件通道拥塞(worker 单片 ~150ms 上限),丢帧计数;
     // status 帧带丢帧计数,链路对账可见,不掩盖。
     if (xQueueSend(s_event_q, item, 0) != pdTRUE) {
-        s_drop_event++;
+        drop_count_inc(&s_drop_event);
         return -1;
     }
     return 0;
@@ -534,7 +545,17 @@ uint16_t ble_audio_mtu(void) {
     return ble_att_mtu(s_conn);
 }
 
-uint32_t ble_audio_audio_drops(void) { return s_drop_audio; }
-uint32_t ble_audio_event_drops(void) { return s_drop_event; }
+uint32_t ble_audio_audio_drops(void) {
+    portENTER_CRITICAL(&s_drop_mux);
+    uint32_t d = s_drop_audio;
+    portEXIT_CRITICAL(&s_drop_mux);
+    return d;
+}
+uint32_t ble_audio_event_drops(void) {
+    portENTER_CRITICAL(&s_drop_mux);
+    uint32_t d = s_drop_event;
+    portEXIT_CRITICAL(&s_drop_mux);
+    return d;
+}
 
 #endif   // ESP_PLATFORM
