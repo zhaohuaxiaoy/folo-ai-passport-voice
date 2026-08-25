@@ -3,6 +3,7 @@
 // 可控钩子(供 test_audio_streamer.c 断言):
 //   - g_notify_rc / g_notify_block_ms: link_send_audio(音频帧发送桩)的返回码与阻塞时长
 //   - g_fake_audio_fail: bsp_audio_read 报错(测 AUDIO_ERROR 事件)
+//   - g_fake_ring_fail / g_fake_sem_fail: init 失败注入(测 API 空转保护)
 //   - g_events[]: app_event_post 投递记录
 #include <pthread.h>
 #include <stdio.h>
@@ -19,6 +20,10 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+/* init 失败注入钩子(定义于下方"外围替身与可控钩子"节,stub 引用前置声明) */
+extern int g_fake_ring_fail;
+extern int g_fake_sem_fail;
+
 // ==================== 信号量(pthread cond,ticks 按毫秒) ====================
 typedef struct {
     pthread_mutex_t m;
@@ -27,6 +32,7 @@ typedef struct {
 } FakeSem;
 
 SemaphoreHandle_t xSemaphoreCreateBinary(void) {
+    if (g_fake_sem_fail) return NULL;   // 失败注入钩子(测 init 部分失败保护)
     FakeSem *s = calloc(1, sizeof(*s));
     pthread_mutex_init(&s->m, NULL);
     pthread_cond_init(&s->c, NULL);
@@ -95,6 +101,7 @@ RingbufHandle_t xRingbufferCreateStatic(size_t xBufferSize, RingbufferType_t xBu
                                         StaticRingbuffer_t *pxStaticRingbuffer) {
     (void)xBufferType;
     (void)pxStaticRingbuffer;
+    if (g_fake_ring_fail) return NULL;   // 失败注入钩子(测 init 部分失败保护)
     FakeRing *r = calloc(1, sizeof(*r));
     r->storage = pucRingbufferStorage;
     r->size    = xBufferSize;
@@ -208,6 +215,11 @@ const char *esp_err_to_name(esp_err_t code) { return code == 0 ? "ESP_OK" : "ESP
 // --- bsp_audio_read:按递增序号填充数据(fake 每次调用即一块) ---
 int g_fake_audio_fail = 0;   // 非 0 → 返回 ESP_FAIL(测 AUDIO_ERROR 事件)
 static unsigned g_audio_seq = 0;
+
+// --- init 失败注入:xRingbufferCreateStatic / xSemaphoreCreateBinary 返回 NULL
+// (测 init 部分失败后公开 API 空转保护:start/cancel/drain 不访问 NULL) ---
+int g_fake_ring_fail = 0;    // 非 0 → 环创建失败
+int g_fake_sem_fail = 0;     // 非 0 → 信号量创建失败
 
 esp_err_t bsp_audio_read(void *pcm, size_t bytes) {
     if (g_fake_audio_fail) return ESP_FAIL;

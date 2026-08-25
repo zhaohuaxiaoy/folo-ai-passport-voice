@@ -20,6 +20,8 @@ extern int g_notify_count;       // 到达发送层的帧数(cancel 丢弃的不
 extern int g_notify_rc;          // 发送桩返回码(非 0 → 丢帧计数路径)
 extern int g_notify_block_ms;    // 发送桩阻塞毫秒(模拟在途)
 extern int g_fake_audio_fail;    // 非 0 → bsp_audio_read 报错
+extern int g_fake_ring_fail;     // 非 0 → xRingbufferCreateStatic 失败(init 失败注入)
+extern int g_fake_sem_fail;      // 非 0 → xSemaphoreCreateBinary 失败(init 失败注入)
 extern app_event_t g_events[];
 extern int g_event_count;
 extern void fake_reset(void);
@@ -162,6 +164,31 @@ static void test_drop_accounting(void) {
 }
 
 // 6) 采集硬件错误:停流 + AUDIO_ERROR 事件;随后取消幂等
+// 6) init 失败后公开 API 空转保护(审查 P2):环创建失败 / 信号量创建失败 →
+//    init 返回失败,主流程继续;此后 start/cancel/drain 必须空转不崩溃
+//    (不访问 NULL ring/sem),且不投递任何事件。重复 init 泄漏旧句柄——
+//    宿主进程级回收,测试内可接受。
+static void test_init_failure_api_noop(void) {
+    fake_reset();
+    g_fake_ring_fail = 1;                     // 第一个失败点:环创建
+    assert(audio_streamer_init() != ESP_OK);  // 主流程"继续运行"场景
+    g_fake_ring_fail = 0;
+    audio_streamer_start();                   // 空转:不 xSemaphoreGive(NULL)
+    audio_streamer_cancel();                  // 空转:不 xRingbufferGetCurFreeSize(NULL)
+    audio_streamer_drain(50);                 // 空转:同上
+    assert(!audio_streamer_active());
+    assert(g_event_count == 0);
+
+    fake_reset();
+    g_fake_sem_fail = 1;                      // 环已建,信号量失败
+    assert(audio_streamer_init() != ESP_OK);
+    g_fake_sem_fail = 0;
+    audio_streamer_start();
+    audio_streamer_cancel();
+    assert(!audio_streamer_active());
+    assert(g_event_count == 0);
+}
+
 static void test_audio_error_event(void) {
     fake_reset();
     ensure_init();
@@ -182,6 +209,9 @@ int main(void) {
     test_start_rejected_until_drained();
     test_drop_accounting();
     test_audio_error_event();
+    // init 失败用例放最后:重复 init 会泄漏旧 worker 线程(宿主进程级回收),
+    // 泄漏的 ble_worker 会并发消费新 ring —— 不得影响依赖单消费者的用例。
+    test_init_failure_api_noop();
     printf("test_audio_streamer: all assertions passed\n");
     return 0;
 }

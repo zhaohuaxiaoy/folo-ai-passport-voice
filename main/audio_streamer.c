@@ -57,6 +57,10 @@ static TickType_t s_fail_log_at = 0;
 
 static TaskHandle_t s_audio_task = NULL;
 static TaskHandle_t s_ble_task = NULL;
+// init 全部成功才置位:任一创建失败时公开 API 空转(见各入口检查),绝不访问
+// NULL ring/sem —— 主流程(模式切换等)不因音频管线初始化失败而崩溃,音频
+// 优雅降级(voice.start 照常,无数据流,审查 P2)。
+static volatile bool s_ready = false;
 
 // 音频帧发送函数(通道无关,见 audio_streamer.h)。注册点:main.c boot/模式切换。
 // 默认 NULL:发送一律按失败处理(丢帧计数),管线仍健康(第 6/7 轮语义保持)。
@@ -112,15 +116,23 @@ static void audio_worker(void *arg);
 static void ble_worker(void *arg);
 
 esp_err_t audio_streamer_init(void) {
-    s_ring = xRingbufferCreateStatic(RING_BYTES, RINGBUF_TYPE_BYTEBUF,
-                                     s_ring_storage, &s_ring_struct);
-    if (!s_ring) return ESP_FAIL;
-    s_sem = xSemaphoreCreateBinary();
-    if (!s_sem) return ESP_FAIL;
-    s_worker_exit_sem = xSemaphoreCreateBinary();
-    if (!s_worker_exit_sem) return ESP_FAIL;
-    s_ring_empty_sem = xSemaphoreCreateBinary();
-    if (!s_ring_empty_sem) return ESP_FAIL;
+    s_ready = false;   // 先重置:失败路径保持 false,公开 API 空转(审查 P2)
+    // 全或无:资源全部创建成功才落全局句柄 —— 失败路径绝不覆盖旧句柄
+    // (重复 init 时并发读者/遗留线程仍见有效句柄,不因部分失败暴露 NULL;
+    // 真实固件首次 init 失败时全局句柄保持初始 NULL,由 s_ready 空转保护)。
+    RingbufHandle_t ring = xRingbufferCreateStatic(RING_BYTES, RINGBUF_TYPE_BYTEBUF,
+                                                   s_ring_storage, &s_ring_struct);
+    if (!ring) return ESP_FAIL;
+    SemaphoreHandle_t sem = xSemaphoreCreateBinary();
+    if (!sem) return ESP_FAIL;
+    SemaphoreHandle_t exit_sem = xSemaphoreCreateBinary();
+    if (!exit_sem) return ESP_FAIL;
+    SemaphoreHandle_t empty_sem = xSemaphoreCreateBinary();
+    if (!empty_sem) return ESP_FAIL;
+    s_ring = ring;
+    s_sem = sem;
+    s_worker_exit_sem = exit_sem;
+    s_ring_empty_sem = empty_sem;
 
     // 音频优先:采集(6) > 发送(5),麦克风数据永不因发送慢而丢失采集节奏。
     // 栈:audio 3072 单元(≈12KB;深路径为 bsp_audio_read→esp_codec_dev_read,
@@ -140,11 +152,13 @@ esp_err_t audio_streamer_init(void) {
         s_audio_task = NULL;
         return ESP_FAIL;
     }
+    s_ready = true;   // 全部资源就绪:此后公开 API 才可访问 ring/sem/worker
     ESP_LOGI(TAG, "流式管线就绪(静态环 %d B,块 %d B)", RING_BYTES, CHUNK_BYTES);
     return ESP_OK;
 }
 
 void audio_streamer_start(void) {
+    if (!s_ready) return;   // init 失败:启动被拒(空转,不访问 NULL ring/sem)
     // 上一个取消若排空超时,丢帧模式残留:先等 worker 丢完环内残留(环空)再恢复。
     // s_cancel 的清除点:①cancel 排空成功时②此处兜底(超时残留场景)。
     // 残留不排空绝不发送(防流入下一次会话)。
@@ -185,6 +199,7 @@ void audio_streamer_stop(void) {
 }
 
 void audio_streamer_cancel(void) {
+    if (!s_ready) return;   // init 失败:幂等空转(不访问 NULL ring,审查 P2)
     // 幂等:不检查 s_active——采集可能已停(STOP 后断链),环里残留同样要清。
     // 语义:①停采集(环不再有新写入;audio_worker 退出前可能已送出最后一块)
     // ②进丢帧模式(ble_worker 取到块只归还不发送)
@@ -224,6 +239,7 @@ uint32_t audio_streamer_take_drops(void) {
 // 等环空(最多 ms 毫秒),用于 voice.end 前的帧序保证。
 // 只轮询不消费:环满即还有数据(含 ble_worker 已取走未归还的在飞块),取走不发送=丢队尾。
 void audio_streamer_drain(uint32_t ms) {
+    if (!s_ready) return;   // init 失败:空转(不访问 NULL ring)
     // 等环空(信号量事件驱动 + 环状态判定,见 wait_ring_empty)。超时仅记日志
     // ——voice.end 帧序由调用方保证(drain 后发 end),残帧在飞时 end 仍会发,
     // status 对账帧兜底。
