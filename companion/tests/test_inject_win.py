@@ -57,7 +57,7 @@ def test_key_action_dry_run():
     with redirect_stdout(buf):
         inject_win.key_action("clear", dry_run=True)
     out = buf.getvalue()
-    check("key clear 打印全选", "Ctrl+A" in out, True)
+    check("key clear 打印全选", "VK_HOME" in out and "VK_END" in out, True)
     check("key clear 打印删除", "VK_DELETE" in out, True)
 
     try:

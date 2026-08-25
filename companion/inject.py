@@ -69,7 +69,7 @@ def paste_text(text, dry_run=False):
 def key_action(action, dry_run=False):
     """把按键动作注入当前聚焦输入框(不依赖剪贴板)。
 
-    action: "enter"(回车提交)或 "clear"(Cmd+A 全选 + 删除清空)。
+    action: "enter"(回车提交)或 "clear"(Home+Shift+End 全选 + 删除清空)。
     与 paste_text 同一 osascript/System Events 通道, 同一授权要求。
     失败抛 InjectError。
     """
@@ -87,12 +87,14 @@ def key_action(action, dry_run=False):
             ["osascript", "-e",
              'tell application "System Events" to keystroke return'],
         ]
-    else:   # clear: Cmd+A 全选, 再删除(退格)
+    else:   # clear: Home + Shift+End 全选行, 再删除(通用序列, 终端 CLI 中可靠)
         cmds = [
             ["osascript", "-e",
-             'tell application "System Events" to keystroke "a" using command down'],
+             'tell application "System Events" to key code 115'],       # 115 = Home
             ["osascript", "-e",
-             'tell application "System Events" to key code 51'],   # 51 = delete
+             'tell application "System Events" to key code 119 using {shift down}'],  # Shift+End
+            ["osascript", "-e",
+             'tell application "System Events" to key code 51'],        # 51 = delete
         ]
     if dry_run:
         print(f"# 按键动作 {action!r}:")

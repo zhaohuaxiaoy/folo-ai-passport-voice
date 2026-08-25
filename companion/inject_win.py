@@ -68,7 +68,7 @@ def _send_keys(win32api, win32con, combos):
 def key_action(action, dry_run=False, focus_delay=2.0):
     """把按键动作注入当前聚焦窗口(不依赖剪贴板)。
 
-    action: "enter"(回车提交)或 "clear"(Ctrl+A 全选 + Delete 清空)。
+    action: "enter"(回车提交)或 "clear"(Home+Shift+End 全选 + Delete 清空)。
     focus_delay 语义与 paste_text 相同(等用户切到目标窗口)。
     失败抛 InjectError。
     """
@@ -79,7 +79,7 @@ def key_action(action, dry_run=False, focus_delay=2.0):
         if action == "enter":
             print("# [SendInput] VK_RETURN")
         else:
-            print("# [SendInput] Ctrl+A 全选 + VK_DELETE 清空")
+            print("# [SendInput] VK_HOME + Shift+VK_END 全选 + VK_DELETE 清空")
         return
     if sys.platform != "win32":
         raise InjectError(
@@ -104,7 +104,8 @@ def key_action(action, dry_run=False, focus_delay=2.0):
                        [(None, win32con.VK_RETURN)])
         else:
             _send_keys(win32api, win32con,
-                       [(win32con.VK_CONTROL, ord("A")),
+                       [(None, win32con.VK_HOME),
+                        (win32con.VK_SHIFT, win32con.VK_END),
                         (None, win32con.VK_DELETE)])
     except Exception as e:
         raise _win32_err(f"按键注入失败: {e}") from e
