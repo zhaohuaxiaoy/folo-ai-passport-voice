@@ -138,13 +138,24 @@ static void test_false_anchor(void)
 
 static void test_oversize_len(void)
 {
-    /* payload_len 超上限:立即 ERR_OVERSIZE 重扫,且不缓冲巨型长度 */
+    /* payload_len 超上限(>3200):立即 ERR_OVERSIZE 重扫,且不缓冲巨型长度 */
     usb_frame_ctx_t ctx = { 0 };
-    uint8_t head[] = { 0xA5, 0x5A, USB_FRAME_EVENT, 0x00, 0x11 };  /* len = 0x1100 > 4096 */
+    uint8_t head[] = { 0xA5, 0x5A, USB_FRAME_EVENT, 0x00, 0x11 };  /* len = 0x1100 > 3200 */
     usb_frame_feed_rc_t rc = USB_FRAME_NONE;
     for (size_t i = 0; i < sizeof(head); i++)
         rc = usb_frame_feed(&ctx, head[i], NULL, s_payload, NULL);
     assert(rc == USB_FRAME_ERR_OVERSIZE);
+
+    /* 边界:3201 → OVERSIZE(阈值收窄 4096→3200 后的锁定);3200 → DONE(边界合法) */
+    uint8_t head1[] = { 0xA5, 0x5A, USB_FRAME_AUDIO, 0x81, 0x0C };  /* len = 3201 */
+    ctx = (usb_frame_ctx_t){ 0 };
+    rc = USB_FRAME_NONE;
+    for (size_t i = 0; i < sizeof(head1); i++)
+        rc = usb_frame_feed(&ctx, head1[i], NULL, s_payload, NULL);
+    assert(rc == USB_FRAME_ERR_OVERSIZE);
+    static uint8_t s_big[USB_FRAME_PAYLOAD_MAX];
+    memset(s_big, 0x5A, sizeof(s_big));
+    assert_roundtrip(USB_FRAME_AUDIO, s_big, sizeof(s_big));  /* 3200 边界合法回环 */
 
     /* 重扫后正常帧仍可解析 */
     uint8_t payload[] = { 0x01 };

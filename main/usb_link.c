@@ -44,8 +44,8 @@ static volatile bool s_session_up;         /* 收到 ping → true;跨任务读�
 static bool s_connected;                   /* is_connected 上次采样 */
 static SemaphoreHandle_t s_tx_mux;         /* 发送互斥:串行化三发送方对 s_tx_buf 的组帧+写 */
 static usb_frame_ctx_t s_fr_ctx;           /* 帧解码状态机 */
-static uint8_t s_fr_payload[USB_FRAME_PAYLOAD_MAX];
-static uint8_t s_tx_buf[USB_FRAME_HEADER + USB_FRAME_PAYLOAD_MAX];
+static uint8_t s_fr_payload[USB_FRAME_RX_PAYLOAD_MAX];  /* 下行缓冲:CTRL ≤2048 */
+static uint8_t s_tx_buf[USB_FRAME_HEADER + USB_FRAME_TX_PAYLOAD_MAX];  /* 上行:AUDIO 3200 */
 static char s_sys_cmd[USB_SYS_LINE_MAX + 1];
 static char s_sys_resp[USB_RESP_MAX];
 

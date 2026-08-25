@@ -16,7 +16,13 @@
 #define USB_FRAME_MAGIC0      0xA5
 #define USB_FRAME_MAGIC1      0x5A
 #define USB_FRAME_HEADER      6    /* magic2 + type1 + len2 + checksum1 */
-#define USB_FRAME_PAYLOAD_MAX 4096 /* 音频帧 3200B 是最大合法载荷,4096 兜底 */
+/* 上限分方向(性能:静态缓冲按实际最大合法载荷分配,不浪费 ~2.9KB):
+ * 下行(PC→设备)CTRL ≤2048、SYS ≤128 → 2048;上行(设备→PC)AUDIO 3200、
+ * EVENT ≤512、SYS_RESP ≤2048 → 3200。任一方向校验统一按 3200(feed 不区分
+ * 方向;下行 CTRL 2048 < 3200 不受影响,AUDIO 3200 恰为边界,用 > 判界放行)。 */
+#define USB_FRAME_RX_PAYLOAD_MAX 2048 /* 下行缓冲分配(CTRL 上限) */
+#define USB_FRAME_TX_PAYLOAD_MAX 3200 /* 上行缓冲分配(AUDIO 帧) */
+#define USB_FRAME_PAYLOAD_MAX    3200 /* 任一方向最大合法载荷:超限立即重扫 */
 
 /* 帧类型(设备↔PC 契约,见 design.md 帧协议节) */
 #define USB_FRAME_EVENT     0x01 /* 设备→PC: EVENT JSON 行(含 '\n') */
