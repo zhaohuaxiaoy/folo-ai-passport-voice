@@ -25,7 +25,11 @@ ENTRY = os.path.join(HERE, "fre_app.py")
 DIST = os.path.join(HERE, "dist")
 
 # pyinstaller 需要收集的懒加载/框架模块
-COLLECT_SUBMODULES = ("bleak", "websockets", "zeroconf")
+COLLECT_SUBMODULES = ("bleak", "websockets", "zeroconf", "pystray",
+                      "ttkbootstrap")
+# ttkbootstrap 无 hooks-contrib hook: 主题/资产数据(元素图、app 图标)
+# 必须 collect-data, 否则运行时查资源失败
+COLLECT_DATA = ("ttkbootstrap",)
 COLLECT_ALL_DARWIN = ("pyobjc-framework-Quartz",
                       "pyobjc-framework-ApplicationServices")
 
@@ -44,6 +48,8 @@ def build(app_name):
            "--specpath", os.path.join(HERE, "build")]
     for m in COLLECT_SUBMODULES:
         cmd += ["--collect-submodules", m]
+    for m in COLLECT_DATA:
+        cmd += ["--collect-data", m]
     if sys.platform == "darwin":
         for m in COLLECT_ALL_DARWIN:
             cmd += ["--collect-all", m]
