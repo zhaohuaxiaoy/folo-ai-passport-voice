@@ -218,11 +218,14 @@ UI 像素计算——4/4，含 ASan（cJSON 内置在 `tests/third_party/cJSON`�
 
 ```text
 Build:        NOT RUN（本机无 ESP-IDF;按上节命令在 5.5.3 环境构建）
-Host tests:   PASS（app_state / ble_audio / ui_pixel_math / app_protocol，4/4，含 ASan）
-Companion:    PASS（relay 64 项单测;inject --dry-run 本机可跑;ASR bigmodel_async 流式本机实测;
-                  真实注入已验证（辅助功能已授权））
+Host tests:   PASS（app_state / ble_audio / ui_pixel_math / app_protocol /
+              audio_streamer / usb_link，6/6，含 ASan）
+Companion:    PASS（relay / ws_transport / serial_frame / serial_transport /
+                  serial_relay 单测;inject --dry-run 本机可跑;
+                  ASR bigmodel_async 流式本机实测;真实注入已验证（辅助功能已授权））
 Device tests: NOT RUN（需真机:见下节验收清单）
-Unverified:   BLE 直连全链路（吞吐/掉帧率/距离/预览显示/bond 持久化/审批闭环）、空闲堆预算
+Unverified:   BLE 直连全链路（吞吐/掉帧率/距离/预览显示/bond 持久化/审批闭环）、
+              USB 真机收发（帧协议 host 测试已锁,驱动/握手/拔线待真机）、空闲堆预算
 ```
 
 **真机验收清单**：开机即广播 "AI Passport"、relay 自动发现连接（AC1）；按住 ● →
@@ -260,7 +263,7 @@ Unverified: 仍需板卡、仪器或用户确认的事项
 ```text
 components/bsp/include/  BSP 公开 API 与 bsp_pins.h 硬件事实
 components/bsp/src/      显示、按键、音频、电池、共享 I2C 实现
-main/                    应用 UI、状态机、BLE 音频/事件 GATT 通道、音频流
+main/                    应用 UI、状态机、多通道传输（BLE GATT / WiFi WS / USB 串口）、音频流
 tests/                   可脱离硬件运行的轻量逻辑测试源
 companion/               Mac 端中转:BLE 中央、ASR 流式、输入注入、单测
 docs/                    agent 硬件开发指南与扩展文档

@@ -4,13 +4,18 @@
 ● 说话 → 本程序收音频流 → 火山转写 → 设备屏幕实时预览（下行 TRANSCRIPT
 帧）→ 定稿文本注入当前聚焦输入框。
 
-双通道（Windows 移植）：
+三通道（Windows 移植）：
 - `"ble"`（缺省）：BLE 直连，macOS / 有蓝牙的 Windows 通用；
 - `"wifi"`：无蓝牙的 Windows 电脑走 WiFi 通道（PC 起 WS server + mDNS，
-  设备 STA 主动连），WiFi 模式下设备蓝牙彻底关闭省电。
+  设备 STA 主动连），WiFi 模式下设备蓝牙彻底关闭省电；
+- `"usb"`：USB 有线直连（设备 `mode usb` 后经 USB 线连电脑，蓝牙 + WiFi
+  全关省电）。USB 模式无设备控制台——relay 提供 stdin 交互 `!<命令>`
+  （`!mode wifi` / `!wifi set` / `!ws set auto` / `!log` / `!st` 等）经
+  SYS 命令面下行，替代控制台配网/查状态。
 
-通道与注入参数见 `config.local.json` 的 `channel` 等字段。**Windows 安装、
-配网、防火墙、注入焦点提示见 [WINDOWS.md](WINDOWS.md)。**
+通道与注入参数见 `config.local.json` 的 `channel` 等字段（`usb_port`
+非空 = USB 直连端口，留空自动扫描）。**Windows 安装、配网、防火墙、
+注入焦点提示见 [WINDOWS.md](WINDOWS.md)。**
 
 ## 安装
 
@@ -77,6 +82,9 @@ companion/.venv/bin/python companion/asr_client.py /tmp/t.wav --nonstream     # 
 ```bash
 companion/.venv/bin/python companion/tests/test_relay.py
 companion/.venv/bin/python companion/tests/test_ws_transport.py
+companion/.venv/bin/python companion/tests/test_serial_frame.py
+companion/.venv/bin/python companion/tests/test_serial_transport.py
+companion/.venv/bin/python companion/tests/test_serial_relay.py
 companion/.venv/bin/python companion/tests/test_inject_win.py
 ```
 
@@ -86,6 +94,13 @@ companion/.venv/bin/python companion/tests/test_inject_win.py
 - `test_ws_transport.py`：真实 WS 回环（模拟设备侧）—— 5 方法契约 / 帧类型
   契约（下行文本帧 + `'\n'`）/ 订阅前缓冲 / 断连回调 / 超时 / 单设备 /
   relay 集成全流程。
+- `test_serial_frame.py`：USB 帧协议编解码（与固件 `usb_link_framing.c`
+  逐字节同构，共享测试意图）—— 回环 / 垃圾前缀 / 假锚点 / 超长 / 坏校验 /
+  噪声混流恢复。
+- `test_serial_transport.py`：`os.openpty` 假设备侧 —— 握手 ping/pong /
+  超时 / 订阅前缓冲 / EVENT+AUDIO 分发 / CTRL 到达 / SYS 往返 / 拔线断连。
+- `test_serial_relay.py`：pty 假设备 + relay 集成全流程（hello → voice.start
+  → 音频帧 → voice.end → 注入 + 下行预览/定稿 → `!mode` syscmd 往返 → 断连收束）。
 - `test_inject_win.py`（Mac 可跑，不触碰 win32）：dry_run 跨平台 / 平台与
   pywin32 缺失指引 / 前台护栏判定。真实粘贴为 Windows 真机项（见 WINDOWS.md）。
 
@@ -95,3 +110,6 @@ companion/.venv/bin/python companion/tests/test_inject_win.py
 - 上行 AUDIO：3200B 裸 PCM 帧（100ms @16kHz/16bit/mono）。
 - 下行 CTRL 行 ≤2048B（JSON 行）：`transcript`（`final:false` 预览 / `final:true` 定稿，
   超 128 字符分多条）、`agent.approval_request`、`agent.status`、`mac.metrics`。
+- USB 通道额外有二进制帧层（`serial_frame.py` ↔ 固件 `usb_link_framing.c`
+  逐字节同构）：EVENT/AUDIO 上行、CTRL/SYS 下行、SYS_RESP 上行（命令输出；
+  SYS 命令面 = 设备 console 同一批命令，USB 模式替代控制台）。

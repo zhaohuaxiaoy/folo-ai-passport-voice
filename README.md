@@ -196,9 +196,9 @@ See the [AI Hardware Development Guide](docs/AI_HARDWARE_DEVELOPMENT_GUIDE.md) f
 ```text
 components/bsp/include/  Public BSP APIs and bsp_pins.h hardware facts
 components/bsp/src/      Display, button, audio, battery, and shared-I2C implementations
-main/                    App UI, state machine, BLE audio/event GATT channel, audio streaming
+main/                    App UI, state machine, multi-channel transport (BLE GATT / WiFi WS / USB serial), audio streaming
 tests/                   Lightweight logic tests that can run without hardware
-companion/               Mac-side relay: BLE central, ASR streaming client, input injector
+companion/               Relay: ASR streaming client, input injector (BLE / WiFi WS / USB serial transports)
 docs/                    Agent hardware development guide and extension documentation
 sdkconfig.defaults       ESP32-C3, USB console, Flash, and LVGL defaults
 AGENTS.md                Coding, validation, and contribution rules for agents
