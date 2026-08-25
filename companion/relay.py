@@ -221,8 +221,21 @@ class Relay:
             await t.start_notify(EVENT_UUID, self._cb("event"))
             await t.start_notify(AUDIO_UUID, self._cb("audio"))
         except RelayError:
+            # connect 失败:各 transport 内部已自清理(串口关闭/WS server 关闭)。
+            # 显式 disconnect 兜底,幂等且对未连接状态无副作用。
+            try:
+                await t.disconnect()
+            except Exception:
+                pass
             raise
         except Exception as e:
+            # connect 成功但订阅失败:统一清理 finally(下方)不执行,这里显式
+            # 断开传输层——否则 BLE client / USB 串口读线程 / WS server 保持
+            # 打开(端口占用、线程存活、连接泄漏,审查 P1)。
+            try:
+                await t.disconnect()
+            except Exception:
+                pass
             raise RelayError(f"连接/订阅失败: {e}") from e
         print("[relay] 等待语音(PTT 按住说话; Ctrl+C 退出)")
         try:

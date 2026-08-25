@@ -85,6 +85,14 @@ class FakeTransport:
         self.handlers[AUDIO_UUID](bytearray(chunk))
 
 
+class FailingSubscribeTransport(FakeTransport):
+    """start_notify 抛异常(模拟订阅失败): connect 已成功, 传输层必须清理。"""
+
+    async def start_notify(self, uuid, handler):
+        self.events.append(("subscribe", uuid))
+        raise OSError("模拟订阅失败")
+
+
 class FailingWriteTransport(FakeTransport):
     """CTRL 写总失败(模拟未连接/写失败): 下行不得 crash, 记日志继续。"""
 
@@ -446,6 +454,22 @@ async def test_disconnect_overlapping_closing():
     check("收尾槽已清空", relay._closing, [])
 
 
+async def test_subscribe_failure_cleanup():
+    """审查 P1: connect 成功后订阅失败 → 传输层显式断开(不泄漏)。
+
+    统一清理 finally 不覆盖连接/订阅阶段;修复前 BLE client/串口读线程/
+    WS server 保持打开(端口占用、线程存活)。"""
+    t = FailingSubscribeTransport()
+    relay = Relay(t, asr_factory=make_fake_asr_factory([], {}),
+                  inject_fn=FakeInjector(), timeout=5)
+    try:
+        await relay.run()
+        check("订阅失败应抛 RelayError", False, True)
+    except RelayError as e:
+        check("订阅失败转 RelayError", "订阅失败" in str(e), True)
+    check("传输层已断开", ("disconnect",) in t.events, True)
+
+
 async def test_connect_timeout():
     """M1: ASR 连接悬挂 → 5s(测试注入 0.2s)超时走错误路径,不卡死排空。"""
     t = FakeTransport()
@@ -784,6 +808,7 @@ async def main():
     await test_disconnect_cleanup()
     await test_disconnect_during_final()
     await test_disconnect_overlapping_closing()
+    await test_subscribe_failure_cleanup()
     await test_connect_timeout()
     await test_results_queue_bounded()
     await test_disconnect_queue_full()

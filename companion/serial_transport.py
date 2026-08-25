@@ -79,7 +79,10 @@ class SerialTransport:
         self._ser = None
         self._reader = None
         self._stop = False
-        self._write_lock = threading.Lock()   # 下行写串行锁(CTRL/SYS 并发 to_thread 防帧交错)
+        # 下行写串行锁(CTRL/SYS 并发 to_thread 防帧交错)。必须 asyncio.Lock:
+        # threading.Lock 的同步 acquire 若遇锁被持有时会阻塞事件循环线程,
+        # 使持锁方 to_thread 的完成回调无法调度 → 确定性死锁(审查 P1 回归)。
+        self._write_lock = asyncio.Lock()
         self._loop = None
         self._on_disconnect = None
         self._evt_handler = None
@@ -211,8 +214,9 @@ class SerialTransport:
     async def _write_frame(self, ftype, payload):
         frame = encode_frame(ftype, payload)
         # CTRL 与 SYS 两个并发任务可同时进 to_thread 写同一串口 → 帧字节交错。
-        # 锁在事件循环线程持有,池线程阻塞在锁上 → 两个 to_thread 串行执行,不饿死。
-        with self._write_lock:
+        # async with 持锁:等锁协程挂起不阻塞事件循环,持锁方 await 恢复后释放,
+        # 两个 to_thread 严格串行(审查 P1:threading.Lock 版本会确定性死锁)。
+        async with self._write_lock:
             await asyncio.to_thread(self._ser.write, frame)
 
     def _read_loop(self):

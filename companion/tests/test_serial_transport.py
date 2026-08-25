@@ -276,11 +276,37 @@ def test_fixed_port_scan():
     asyncio.run(scenario())
 
 
+def test_concurrent_write_serialized():
+    # 审查 P1:并发 CTRL/SYS 写严格串行且不挂起。
+    # 时序:首个写协程拿到 asyncio.Lock 并进入 to_thread;第二个协程 await 锁挂起
+    # (不阻塞事件循环),第一个完成后释放,第二个继续。两帧完整到达、无字节交错。
+    # threading.Lock 版本会确定性死锁:第二个协程同步 acquire 阻塞事件循环,
+    # 持锁方 to_thread 完成回调无法调度 → gather 永不完成 → wait_for 超时炸出。
+    master, slave, port = make_pair()
+
+    async def scenario():
+        t = await connect_handshake(master, port)
+        ctrl = b'{"type":"transcript","text":"hi","final":false}'
+        sysc = b"mode wifi"
+        await asyncio.wait_for(asyncio.gather(
+            t._write_frame(FRAME_CTRL, ctrl),
+            t._write_frame(FRAME_SYS, sysc)), 2.0)
+        frames = read_all_frames(master)
+        assert sorted(frames) == sorted([(FRAME_CTRL, ctrl), (FRAME_SYS, sysc)]), \
+            f"两帧应完整到达且不交错, 实际 {frames}"
+        await t.disconnect()
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        close_pair(master, slave)
+
+
 def main():
     tests = [test_handshake, test_connect_timeout, test_pending_buffer,
              test_dispatch_event_audio, test_ctrl_arrival,
              test_syscmd_roundtrip, test_master_close_triggers_disconnect,
-             test_fixed_port_scan]
+             test_fixed_port_scan, test_concurrent_write_serialized]
     for t in tests:
         t()
         print(f"  {t.__name__} ok")
