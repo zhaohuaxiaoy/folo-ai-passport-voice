@@ -32,6 +32,10 @@ voice 窗口掉帧统计(理论帧数 vs 实收帧数, 与设备 status 帧 drop
   "ble"(缺省)  → BLE 直连(设备广播 "AI Passport");注入 = 平台默认后端
   "wifi"       → 本机起 WS server(端口 ws_port), 设备 STA 主动连
                   (无蓝牙 Windows 电脑);注入 = Windows 剪贴板后端
+  "usb"        → USB 有线直连(设备 mode usb 后经 USB 线连电脑;端口 =
+                 自动扫描或 config usb_port 指定);注入 = 平台默认后端。
+                  USB 模式无控制台, 经 relay stdin `!<命令>` 下行 SYS
+                  命令面配网/查状态(mode/wifi set/ws set/log/st 等)。
 """
 import argparse
 import asyncio
@@ -166,14 +170,18 @@ class Relay:
 
     def __init__(self, transport=None, *, asr_factory=None, inject_fn=None,
                  timeout=60.0, do_inject=True, do_approval=True,
-                 dry_run=False, connect_timeout_s=5.0):
+                 dry_run=False, connect_timeout_s=5.0, stdin_input=None):
         from asr_client import StreamingASR
         from inject import paste_text
         self._transport = transport or BleakTransport()
+        # USB 通道扩展探测:transport 带 send_syscmd(SerialTransport) →
+        # 启用 stdin `!命令` 交互(USB 模式无控制台)与通道专属提示
+        self._syscmd = getattr(self._transport, "send_syscmd", None)
         self._asr_factory = asr_factory or (lambda: StreamingASR())
         self._inject_fn = inject_fn or paste_text
         self.timeout = timeout
         self.connect_timeout_s = connect_timeout_s
+        self._stdin_input = stdin_input or input   # USB 通道 stdin(测试注入 EOF)
         self.do_inject = do_inject
         self.do_approval = do_approval
         self.dry_run = dry_run
@@ -199,6 +207,10 @@ class Relay:
         if not device_addr:
             addr = await t.scan_for_device(DEVICE_NAME, SCAN_TIMEOUT)
             if not addr:
+                if self._syscmd is not None:
+                    raise RelayError(
+                        "未发现 USB 设备: 确认 USB 已连接且设备已 mode usb"
+                        "(切换需重启); 多设备时 config usb_port 指定端口")
                 raise RelayError(
                     f"未发现设备 {DEVICE_NAME}(设备开机并处于 BLE 广播状态?)")
             device_addr = addr
@@ -214,7 +226,11 @@ class Relay:
             raise RelayError(f"连接/订阅失败: {e}") from e
         print("[relay] 等待语音(PTT 按住说话; Ctrl+C 退出)")
         try:
-            await self._drain()
+            # USB 通道: stdin `!命令` 交互与数据排空并行(控制台替代)
+            if self._syscmd is not None:
+                await asyncio.gather(self._drain(), self._stdin_loop())
+            else:
+                await self._drain()
         finally:
             if self._approval_task is not None:
                 self._approval_task.cancel()
@@ -246,10 +262,54 @@ class Relay:
             print("[relay] 队列满,条目丢弃", file=sys.stderr)
 
     def _on_disconnected(self, *_):
-        print("[relay] BLE 连接已断开", file=sys.stderr)
+        print("[relay] 连接已断开", file=sys.stderr)
         self._stop.set()
         self._safe_put(self._audio_q, ("stop", b""))
         self._safe_put(self._event_q, ("stop", b""))
+
+    # -- USB 通道 stdin 交互(USB 模式无控制台, 经 SYS 命令面替代) --
+
+    _STDIN_HELP = (
+        "USB 模式无控制台, 经此下行 SYS 命令面(命令集与设备 console 一致):\n"
+        "  !mode ble|wifi|usb    切换通道(ble/wifi 生效; usb 为当前)\n"
+        "  !wifi set <ssid> <pass>   配置 WiFi(密码明文经本地 USB, 不落盘)\n"
+        "  !ws set auto          自动发现本机 WS server\n"
+        "  !log                  取回设备日志环(esp_log 已重定向 RAM 环)\n"
+        "  !st                   会话状态\n"
+        "  !reboot / !factory    重启 / 恢复出厂\n"
+        "  !help                 本帮助")
+
+    async def _stdin_loop(self):
+        """读 stdin 逐行转 SYS 命令(经 transport.send_syscmd); EOF 收束。"""
+        print("[usb] USB 模式控制台: !<命令> 发送到设备(!help 查看)",
+              file=sys.stderr)
+        while not self._stop.is_set():
+            try:
+                raw = await asyncio.to_thread(self._stdin_input, "!> ")
+            except (EOFError, OSError):
+                break
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                await self._handle_stdin_line(line)
+            except Exception as e:
+                print(f"[usb] !命令失败: {e}", file=sys.stderr)
+
+    async def _handle_stdin_line(self, line):
+        """单行 stdin 处理(纯逻辑, 独立可测; stdin 循环逐行调用)。"""
+        if line == "!help":
+            print(self._STDIN_HELP, file=sys.stderr)
+            return
+        if not line.startswith("!"):
+            print("[usb] 输入以 ! 开头(!help 查看)", file=sys.stderr)
+            return
+        cmd = line[1:].strip()
+        if not cmd:
+            print("[usb] 空命令(!help 查看)", file=sys.stderr)
+            return
+        resp = await asyncio.wait_for(self._syscmd(cmd), timeout=10.0)
+        print(f"[usb] {resp}", file=sys.stderr)
 
     def _cb(self, kind):
         def handler(data):
@@ -642,7 +702,9 @@ def _build_transport(cfg):
     - "ble"(缺省): bleak BLE 直连, macOS/Windows 蓝牙均可;
     - "wifi": 本机起 WS server(mdns_pub 发布 _ai-passport._tcp), 设备
       STA 主动连(无蓝牙 Windows 电脑); 端口/超时取 config ws_port 与
-      ws_connect_timeout。
+      ws_connect_timeout;
+    - "usb": USB 有线直连(设备 mode usb), SerialTransport 扫描
+      VID 0x303A/PID 0x1001; config usb_port 非空 = 直连端口(不扫描)。
     """
     channel = cfg.get("channel", "ble")
     if channel == "ble":
@@ -651,8 +713,12 @@ def _build_transport(cfg):
         from ws_transport import WsTransport   # 函数内懒加载, 避免顶层循环依赖
         return WsTransport(port=int(cfg.get("ws_port", 8765)),
                            connect_timeout=float(cfg.get("ws_connect_timeout", 120)))
+    if channel == "usb":
+        from serial_transport import SerialTransport
+        return SerialTransport(port=cfg.get("usb_port") or None)
     raise RelayError(
-        f"config.local.json 的 channel 值无效: {channel!r}(应为 \"ble\" 或 \"wifi\")")
+        f"config.local.json 的 channel 值无效: {channel!r}"
+        f"(应为 \"ble\"、\"wifi\" 或 \"usb\")")
 
 
 def _default_inject_fn(cfg):
@@ -673,10 +739,11 @@ def _default_inject_fn(cfg):
 def main():
     ap = argparse.ArgumentParser(
         description="AI Passport 中转: 设备音频 → 火山 ASR → 注入输入框"
-                    "(通道/注入后端由 config.local.json 决定)",
+                    "(通道/注入后端由 config.local.json 决定: ble/wifi/usb)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     ap.add_argument("--device", default=None,
-                    help="BLE 地址(默认扫描 'AI Passport';wifi 通道忽略)")
+                    help="BLE 地址或 USB 串口路径(默认扫描 'AI Passport'"
+                         "/ USB VID 0x303A;wifi 通道忽略)")
     ap.add_argument("--no-inject", action="store_true",
                     help="只转写不注入(调试)")
     ap.add_argument("--no-approval", action="store_true",
@@ -709,9 +776,11 @@ def main():
         print("\n[relay] Ctrl+C, 已退出")
     except RelayError as e:
         print(f"[relay] 错误: {e}", file=sys.stderr)
-        print("[relay] 请确认设备已开机并处于连接范围"
-              "(ble: BLE 广播; wifi: 与电脑同一局域网), 然后重新运行本程序",
-              file=sys.stderr)
+        scope = ("ble: BLE 广播; wifi: 与电脑同一局域网"
+                 if getattr(relay, "_syscmd", None) is None
+                 else "usb: USB 已连接且设备已 mode usb")
+        print(f"[relay] 请确认设备已开机并处于连接范围({scope}), "
+              "然后重新运行本程序", file=sys.stderr)
         sys.exit(1)
     finally:
         if zc is not None:

@@ -45,6 +45,32 @@ def read_frame(fd, timeout=1.0):
     return None
 
 
+def read_all_frames(fd, timeout=1.0):
+    """读直到空闲(select 无新数据)或超时, 返回全部帧列表。
+
+    dec 跨 chunk 保留半帧状态; 一次 os.read 可能含多帧(两帧紧连下行),
+    必须全部取出——read_frame(单帧版)会丢 frames[-1] 之前的帧。
+    """
+    dec = FrameDecoder()
+    frames = []
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        r, _, _ = select.select([fd], [], [], 0.1)
+        if not r:
+            if frames:
+                break            # 空闲: 已取完当前批
+            continue
+        try:
+            chunk = os.read(fd, 4096)
+        except BlockingIOError:
+            continue
+        if not chunk:
+            break
+        rc, fs = dec.feed(chunk)
+        frames.extend(fs)
+    return frames
+
+
 def make_pair():
     """返回 (master_fd, slave_fd, slave_port);主端非阻塞。"""
     master, slave = os.openpty()

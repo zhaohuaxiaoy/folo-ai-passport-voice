@@ -7,5 +7,6 @@
   "channel": "ble",
   "ws_port": 8765,
   "ws_connect_timeout": 120,
+  "usb_port": "",
   "inject_focus_delay": 2.0
 }
