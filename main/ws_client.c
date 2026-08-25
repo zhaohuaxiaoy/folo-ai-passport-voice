@@ -60,6 +60,10 @@ static void on_ws_event(void *handler_arg, esp_event_base_t base, int32_t id, vo
 
     switch (id) {
     case WEBSOCKET_EVENT_CONNECTED: {
+        // 上一会话 RX 残留(半行/超长丢弃态)作废:断连期间无 feed,静态状态
+        // 原样保留,不重置则旧半行接新数据被误解析成垃圾行(审查 P2-4)。
+        s_rx_len = 0;
+        s_discard_line = false;
         s_connected = true;
         ESP_LOGI(TAG, "WS 已连接");
         app_event_t ev = { .type = APP_EV_WS_CONNECTED };
