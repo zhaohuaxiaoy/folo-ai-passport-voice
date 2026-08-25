@@ -12,7 +12,12 @@ static const char *TAG = "audio";
 
 // 100ms @ 16kHz/16bit/mono = 3200B(与 ble_audio AUDIO_FRAME_BYTES 对齐)
 #define CHUNK_BYTES  3200
-#define RING_BYTES   4096   // 静态环,约可容一块
+// 静态环恰容一块(3200)+16B 余量:ESP-IDF v5.5 BYTEBUF 零头开销(v5.4+ 重写
+// 实现,xMaxItemSize=xSize、无对齐要求);余量避开"满/空歧义"路径,且兼容旧
+// 实现 8B 头+8B wrap 算术 —— 3216 对两代实现都安全。放一块后 free=16 < 3200,
+// 第二块 send 失败 → 丢帧,与 4096(余 896,同样 < 3200)行为逐字节一致:环
+// 始终恰容一块。省 880B 静态 RAM(性能轮)。
+#define RING_BYTES   3216
 // 信号量等待上限(F1 事件化替代轮询):在途 notify ≤50ms,环内残留 ≤2 块——
 // 200ms 余量充足。超时语义:stop 超时直接返回(提示音可能尾叠,非关键路径),
 // cancel 超时保留丢帧模式,start() 会先等环空再清标志——残留绝不流入新会话。
