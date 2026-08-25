@@ -9,5 +9,14 @@ pywin32>=306; platform_system == "Windows"     # Windows 注入(unicode SendInpu
 # macOS unicode 注入(CGEvent 逐字符键盘事件, 不碰剪贴板); 缺失时 auto 模式
 # 回退剪贴板路径(见 inject.py paste_text mode 说明)
 pyobjc-framework-Quartz>=10.0; platform_system == "Darwin"
+# macOS 辅助功能权限检测(AXIsProcessTrusted, fre_state 懒加载); 缺失时权限
+# 状态恒为 unknown, 向导无法判断是否已授权
+pyobjc-framework-ApplicationServices>=10.0; platform_system == "Darwin"
 # pyserial: USB 有线通道数据收发(全平台) + Windows 串口配网(纯 Python 无副作用)
 pyserial>=3.5
+# 托盘(pystray): macOS 走 pyobjc 后端, Windows 走 ctypes 后端(无需 pywin32)
+pystray>=0.19
+# ttkbootstrap: 向导/诊断页主题质感(纯 Python, tkinter 皮肤)
+ttkbootstrap>=1.10
+# Pillow: pystray 托盘图标运行时绘制(PIL.Image)
+Pillow>=10.0
