@@ -273,7 +273,9 @@ async def test_voice_flow():
     await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
 
     ops = [e[0] for e in t.events]
-    check("relay 操作序列", ops,
+    # 订阅后可能有校时下行(write)在尾部:核心序列只比前 4 项,
+    # 校时下行内容由 test_time_sync_downlink 单独断言
+    check("relay 操作序列", ops[:4],
           ["scan", "connect", "subscribe", "subscribe"])
     check("订阅顺序 EVENT→AUDIO", [e[1] for e in t.events[2:4]],
           [EVENT_UUID, AUDIO_UUID])
@@ -324,6 +326,61 @@ async def test_voice_flow():
     await wait_until(task.done, what="断开退出")
     check("断开后 disconnect 调用",
           [e[0] for e in t.events].count("disconnect"), 1)
+
+
+# ---- 校时下行(连接建立后立即;每小时周期由 TIME_SYNC_INTERVAL_S 控制)----
+
+def _time_set_writes(events):
+    return [json.loads(e[2]) for e in events
+            if e[0] == "write" and e[1] == CTRL_UUID
+            and json.loads(e[2]).get("type") == "time.set"]
+
+
+async def test_time_sync_downlink_ble():
+    """BLE/WiFi: 连接后立即下行 time.set(CTRL), epoch 为 UTC 整数秒;
+    断开后 run 收束, 校时任务一并取消(无泄漏)。"""
+    t = FakeTransport()
+    relay = Relay(t,
+                  asr_factory=make_fake_asr_factory([], {}),
+                  inject_fn=FakeInjector(), timeout=5, do_approval=False)
+    task = asyncio.create_task(relay.run())
+    await wait_until(lambda: _time_set_writes(t.events), what="首次校时下行")
+    w = _time_set_writes(t.events)[0]
+    check("校时下行 type", w["type"], "time.set")
+    check("校时 epoch 是 int", isinstance(w["epoch"], int), True)
+    check("校时 epoch 近当前 UTC",
+          abs(w["epoch"] - int(time.time())) < 5, True)
+
+    t.disconnect_cb()
+    await wait_until(task.done, what="断开退出")
+    check("校时任务已收束", relay._time_task is None, True)
+
+
+async def test_time_sync_downlink_usb():
+    """USB: 校时走 SYS 命令面 `time set <epoch>`(console 命令表),
+    且不产生 CTRL 协议行。"""
+    t = FakeTransport()
+    syscmds = []
+
+    async def send_syscmd(line):
+        syscmds.append(line)
+
+    t.send_syscmd = send_syscmd   # 伪装 SerialTransport → USB 通道分支
+    relay = Relay(t,
+                  asr_factory=make_fake_asr_factory([], {}),
+                  inject_fn=FakeInjector(), timeout=5, do_approval=False,
+                  stdin_input=iter(()).__next__)   # stdin 立即 EOF
+    task = asyncio.create_task(relay.run(device_addr="FAKE:USB"))
+    await wait_until(lambda: len(syscmds) >= 1, what="USB 首次校时")
+    line = syscmds[0]
+    check("USB 校时命令前缀", line.startswith("time set "), True)
+    epoch = int(line.split()[-1])
+    check("USB 校时 epoch 近当前 UTC", abs(epoch - int(time.time())) < 5, True)
+    check("USB 不产生 CTRL 下行", _time_set_writes(t.events), [])
+
+    t.disconnect_cb()
+    await wait_until(task.done, what="断开退出")
+    check("校时任务已收束", relay._time_task is None, True)
 
 
 async def test_approval_flow():
@@ -821,6 +878,8 @@ async def main():
     test_split_transcript()
     print("== relay 流程 ==")
     await test_voice_flow()
+    await test_time_sync_downlink_ble()
+    await test_time_sync_downlink_usb()
     await test_approval_flow()
     await test_ctrl_write_no_response()
     await test_disconnect_cleanup()

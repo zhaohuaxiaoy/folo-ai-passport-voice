@@ -54,6 +54,9 @@ AUDIO_Q_MAX = 100   # 音频帧(3200B)上限 ≈10s 积压;ASR 停顿时丢帧�
 EVENT_Q_MAX = 64    # 控制事件上限(正常秒级几条;兜底防失控)
 CTRL_LINE_MAX = 2048        # 对齐固件 APP_PROTO_RX_CAP
 SCAN_TIMEOUT = 15
+# 每小时自动校时:校时源仅电脑客户端(无 SNTP)。连接建立后立即同步一次,
+# 此后每 TIME_SYNC_INTERVAL_S 秒一次;断链/退出时 _stop 收束任务。
+TIME_SYNC_INTERVAL_S = 3600
 # 下行 transcript 单条文本上限 = APP_TRANSCRIPT_MAX(128) - 1(固件 str_take 的
 # cap-1 NUL 保险):超长由 split_transcript 切分,逐条下行,设备逐条覆盖显示
 TRANSCRIPT_TEXT_MAX = 127
@@ -203,6 +206,7 @@ class Relay:
         self._closing = []          # 收尾中的会话集合(end 后台化后,断连时逐个 abort)
         self._approval_waiter = None
         self._approval_task = None  # 审批演示后台任务
+        self._time_task = None      # 每小时校时后台任务
         self._device_drop = None    # 最近 status 帧的设备掉帧数
         self.session_stats = []     # 每个 voice 会话的掉帧统计(AC3 对账)
         self.decisions = []         # 收到的 agent.action 列表
@@ -245,6 +249,8 @@ class Relay:
                 pass
             raise RelayError(f"连接/订阅失败: {e}") from e
         print("[relay] 等待语音(PTT 按住说话; Ctrl+C 退出)")
+        # 校时:连接建立后立即同步一次,此后每小时一次(_time_loop 内部周期)
+        self._time_task = asyncio.create_task(self._time_loop())
         try:
             # USB 通道: stdin `!命令` 交互与数据排空并行(控制台替代)
             if self._syscmd is not None:
@@ -259,6 +265,13 @@ class Relay:
                 except (asyncio.CancelledError, Exception):
                     pass
                 self._approval_task = None
+            if self._time_task is not None:
+                self._time_task.cancel()
+                try:
+                    await self._time_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                self._time_task = None
             # 断连/退出:收束会话——取消连接与结果任务、关 ASR WebSocket、
             # 补统计占位。覆盖"进行中"与"end 收尾中"的全部(_closing 多槽)。
             # 否则 _run/_results 任务与 ASR 连接泄漏到进程退出
@@ -529,6 +542,38 @@ class Relay:
             await self._transport.write_gatt_char(CTRL_UUID, payload)
         except Exception as e:
             raise RelayError(f"CTRL 写入失败: {e}") from e
+
+    async def _sync_time(self):
+        """下行 wall-clock 校时(UTC epoch 秒)。
+
+        transport 无关:BLE/WiFi 走 time.set 协议行(CTRL 通道),USB 走
+        SYS 命令面 `time set <epoch>`(console 命令表)。失败静默(日志),
+        下周期重试 —— 校时是尽力而为,不打断语音/控制主路径。
+        """
+        epoch = int(time.time())
+        try:
+            if self._syscmd is not None:
+                await self._syscmd(f"time set {epoch}")
+            else:
+                await self._send_ctrl({"type": "time.set", "epoch": epoch})
+        except Exception as e:
+            print(f"[time] 校时下行失败: {e}", file=sys.stderr)
+
+    async def _time_loop(self):
+        """连接建立后启动:立即同步一次,此后每 TIME_SYNC_INTERVAL_S 秒一次。
+
+        _stop 置位(断链/退出)时由 wait_for 提前返回,循环退出;
+        run() 的 finally 中再 cancel 兜底(任务此时通常已自然结束)。
+        """
+        while not self._stop.is_set():
+            await self._sync_time()
+            try:
+                await asyncio.wait_for(self._stop.wait(),
+                                       timeout=TIME_SYNC_INTERVAL_S)
+            except asyncio.TimeoutError:
+                pass    # 周期到,继续同步
+            except asyncio.CancelledError:
+                return
 
     @staticmethod
     def print_stats(s):
