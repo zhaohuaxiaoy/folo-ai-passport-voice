@@ -1,8 +1,16 @@
-# AI Passport Mac Companion
+# AI Passport Companion（macOS / Windows）
 
-Mac 端中转程序（BLE 中央 + 火山 ASR 流式 + 输入注入）。设备只做录音终端
-（BLE 外设，无 WiFi/HID），按住 ● 说话 → 本程序收音频流 → 火山转写 →
-设备屏幕实时预览（下行 TRANSCRIPT 帧）→ 定稿文本注入 Mac 当前聚焦输入框。
+中转程序（BLE 中央 + 火山 ASR 流式 + 输入注入）。设备只做录音终端，按住
+● 说话 → 本程序收音频流 → 火山转写 → 设备屏幕实时预览（下行 TRANSCRIPT
+帧）→ 定稿文本注入当前聚焦输入框。
+
+双通道（Windows 移植）：
+- `"ble"`（缺省）：BLE 直连，macOS / 有蓝牙的 Windows 通用；
+- `"wifi"`：无蓝牙的 Windows 电脑走 WiFi 通道（PC 起 WS server + mDNS，
+  设备 STA 主动连），WiFi 模式下设备蓝牙彻底关闭省电。
+
+通道与注入参数见 `config.local.json` 的 `channel` 等字段。**Windows 安装、
+配网、防火墙、注入焦点提示见 [WINDOWS.md](WINDOWS.md)。**
 
 ## 安装
 
@@ -68,10 +76,18 @@ companion/.venv/bin/python companion/asr_client.py /tmp/t.wav --nonstream     # 
 
 ```bash
 companion/.venv/bin/python companion/tests/test_relay.py
+companion/.venv/bin/python companion/tests/test_ws_transport.py
+companion/.venv/bin/python companion/tests/test_inject_win.py
 ```
 
-FakeTransport + FakeASR + FakeInjector 注入：分片重组跨界 / voice 状态机 /
-注入序列 / 掉帧对账 / 审批闭环 / 转写下行（final 标记与 128B 切分）/ 超时。
+- `test_relay.py`：FakeTransport + FakeASR + FakeInjector 注入 —— 分片重组
+  跨界 / voice 状态机 / 注入序列 / 掉帧对账 / 审批闭环 / 转写下行（final
+  标记与 128B 切分）/ 超时。
+- `test_ws_transport.py`：真实 WS 回环（模拟设备侧）—— 5 方法契约 / 帧类型
+  契约（下行文本帧 + `'\n'`）/ 订阅前缓冲 / 断连回调 / 超时 / 单设备 /
+  relay 集成全流程。
+- `test_inject_win.py`（Mac 可跑，不触碰 win32）：dry_run 跨平台 / 平台与
+  pywin32 缺失指引 / 前台护栏判定。真实粘贴为 Windows 真机项（见 WINDOWS.md）。
 
 ## 协议契约
 
