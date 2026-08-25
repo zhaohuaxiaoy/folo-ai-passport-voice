@@ -28,11 +28,20 @@ from relay import (  # noqa: E402
 )
 from ws_transport import WsTransport, WsError  # noqa: E402
 from test_relay import (  # noqa: E402
-    check, wait_until, wait_session_done,
+    wait_until, wait_session_done,
     FakeASR, FakeInjector, make_fake_asr_factory,
 )
 
 FAILURES = []
+
+
+def check(name, got, want):
+    """本地 check: 失败进本模块 FAILURES(不走 test_relay 的全局,退出码真实)。"""
+    ok = got == want
+    if not ok:
+        FAILURES.append(f"{name}: got {got!r}, want {want!r}")
+    print(f"[{'PASS' if ok else 'FAIL'}] {name}")
+    return ok
 
 
 async def wait_ws_connected(t):
@@ -80,6 +89,9 @@ def test_frame_contracts():
         await t.start_notify(EVENT_UUID, on_event)
         await t.start_notify(AUDIO_UUID, on_audio)
         check("两次订阅后缓冲清空", len(t._pending), 0)
+        # 回调是 async 的:_dispatch 经 create_task 投递,断言前须让出事件循环一轮
+        await wait_until(lambda: len(got["event"]) == 1,
+                         what="缓冲 hello 冲刷到 EVENT 回调")
         check("缓冲 hello 冲刷到 EVENT 回调",
               got["event"], [b'{"event":"device.hello","proto":1}\n'])
 
