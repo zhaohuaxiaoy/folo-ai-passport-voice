@@ -19,6 +19,7 @@ extern "C" {
 typedef enum {
     APP_MODE_BLE = 0,   // 缺省:BLE 直连(macOS/Windows 蓝牙)
     APP_MODE_WIFI,      // WiFi 通道(无蓝牙 Windows 电脑)
+    APP_MODE_USB,       // USB 有线通道(USB-Serial-JTAG;射频全关,省电)
     APP_MODE_COUNT,
 } app_mode_t;
 

@@ -100,6 +100,8 @@ esp_err_t nvs_settings_set_ws_mode(bool auto_mode) {
     return e;
 }
 
+// 模式三值映射(0=BLE/1=WiFi/2=USB,见 mode.h);非法值按 BLE 兜底
+// (v3 行为微调:旧实现"非零一律按 WiFi",新增 USB 后不再成立,注释保留)。
 esp_err_t nvs_settings_get_mode(uint8_t *mode) {
     nvs_handle_t h;
     esp_err_t e = nvs_open(APP_NS, NVS_READONLY, &h);
@@ -108,7 +110,7 @@ esp_err_t nvs_settings_get_mode(uint8_t *mode) {
     e = nvs_get_u8(h, K_MODE, &v);
     nvs_close(h);
     if (e == ESP_ERR_NVS_NOT_FOUND) v = 0;   // 首次使用:BLE
-    if (mode) *mode = (v == 0) ? 0 : 1;      // 非法值一律按 WiFi(非零)
+    if (mode) *mode = (v <= 2) ? v : 0;      // 既有设备只有 0/1,新增 2→USB;其余按 BLE
     return ESP_OK;
 }
 
@@ -116,10 +118,10 @@ esp_err_t nvs_settings_set_mode(uint8_t mode) {
     nvs_handle_t h;
     esp_err_t e = nvs_open(APP_NS, NVS_READWRITE, &h);
     if (e != ESP_OK) return e;
-    e = nvs_set_u8(h, K_MODE, mode ? 1 : 0);
+    e = nvs_set_u8(h, K_MODE, mode);         // 原样存三值(旧实现"非零写 1",v3 改为原样)
     if (e == ESP_OK) e = nvs_commit(h);
     nvs_close(h);
-    ESP_LOGI(TAG, "rf_mode = %s", mode ? "wifi" : "ble");
+    ESP_LOGI(TAG, "rf_mode = %d", (int)mode);
     return e;
 }
 

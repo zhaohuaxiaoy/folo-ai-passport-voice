@@ -78,6 +78,9 @@ typedef enum {
     APP_EV_WS_DISCONNECTED, // WS 通道断(断连/停止)
     APP_EV_WS_TARGET_FOUND, // mDNS 发现 Companion 地址(与缓存不同才投)
     APP_EV_MODE_SWITCH,     // 射频模式切换请求(不进归约器:main.c 排空循环直接执行)
+    // ---- USB 有线通道(第三通道:USB-Serial-JTAG,见 design.md)----
+    APP_EV_USB_CONNECTED,   // USB 会话通(收到 PC 握手 ping;link_up 的 USB 侧充分条件)
+    APP_EV_USB_DISCONNECTED, // USB 会话断(拔线:is_connected 翻转)
 } app_event_type_t;
 
 // Agent 状态(与协议字符串互转在 app_protocol.c)

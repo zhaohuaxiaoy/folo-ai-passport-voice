@@ -45,7 +45,14 @@ static int cmd_mode(int argc, char **argv)
         printf("switching to WiFi...\n");
         return 0;
     }
-    printf("usage: mode | mode ble | mode wifi\n");
+    if (argc == 2 && strcmp(argv[1], "usb") == 0) {
+        if (mode_get() == APP_MODE_USB) { printf("already USB\n"); return 0; }
+        app_event_t e = { .type = APP_EV_MODE_SWITCH, .u.mode_switch = { .target = APP_MODE_USB } };
+        app_event_post(&e);
+        printf("switching to USB (reboot)...\n");
+        return 0;
+    }
+    printf("usage: mode | mode ble | mode wifi | mode usb\n");
     return 1;
 }
 

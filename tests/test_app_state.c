@@ -716,6 +716,54 @@ static void test_ws_link_down(void) {
     assert(strcmp(snap.link_name, "WiFi") == 0);
 }
 
+// ---- USB 有线通道(第三通道):USB_CONNECTED = 链路通(与 BLE/WS 对等) ----
+static void test_usb_link_up(void) {
+    reset();
+    app_event_t c = { .type = APP_EV_USB_CONNECTED };
+    app_state_reduce(&s, &c, now, out, &on);
+    assert(s.link_up == true);
+    assert(s.ble_connected == false);
+    app_ui_snapshot_t snap;
+    app_state_snapshot(&s, now, &snap);
+    assert(strcmp(snap.link_name, "USB") == 0);              // 横幅按通道渲染
+
+    // USB 链路下 PTT 可用(HOME 单击进 READY,再按下开录)
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    assert(s.state == APP_ST_READY);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);
+    assert(s.state == APP_ST_LISTENING);
+    assert(has_action(APP_ACT_SEND_VOICE_START));
+}
+
+// ---- USB 断开:停流回 READY + 通道名保留(BLE/WS 断连同路径) ----
+static void test_usb_link_down(void) {
+    reset();
+    s.link_up = true;
+    s.link_channel = 2;
+    s.state = APP_ST_LISTENING;
+    s.state_since_ms = now;
+    app_event_t ev = { .type = APP_EV_USB_DISCONNECTED };
+    app_state_reduce(&s, &ev, now, out, &on);
+    assert(s.link_up == false);
+    assert(s.state == APP_ST_READY);
+    assert(has_action(APP_ACT_STREAM_CANCEL));               // 兜底停流,同 BLE 断连
+    assert(!has_action(APP_ACT_SEND_VOICE_END));             // 会话中止,不发 end
+    assert(strstr(s.toast, "USB disconnected"));
+
+    // APPROVAL 下断开:保持状态等待重连
+    reset();
+    s.link_up = true;
+    s.link_channel = 2;
+    s.state = APP_ST_APPROVAL;
+    app_state_reduce(&s, &ev, now, out, &on);
+    assert(s.state == APP_ST_APPROVAL);
+
+    // 快照横幅名:USB 断线后仍显示 USB
+    app_ui_snapshot_t snap;
+    app_state_snapshot(&s, now, &snap);
+    assert(strcmp(snap.link_name, "USB") == 0);
+}
+
 // ---- WiFi 失败 toast 按 reason 去重;链路恢复后允许再报 ----
 static void test_wifi_fail_dedup(void) {
     reset();
@@ -789,6 +837,8 @@ int main(void) {
     test_snapshot_link_up();
     test_ws_link_up();
     test_ws_link_down();
+    test_usb_link_up();
+    test_usb_link_down();
     test_wifi_fail_dedup();
     test_ws_target_found();
     test_bounded();

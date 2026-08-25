@@ -57,7 +57,9 @@ void app_state_snapshot(const app_state_t *s, uint64_t now_ms, app_ui_snapshot_t
     snap->net_busy         = s->net_busy;
     snap->ble_connected    = s->ble_connected;
     str_cpy(snap->link_name, sizeof(snap->link_name),
-            s->link_channel == 1 ? "WiFi" : "BLE");
+            s->link_channel == 1 ? "WiFi"
+            : s->link_channel == 2 ? "USB"
+            : "BLE");
     snap->elapsed_ms       = (uint32_t)(now_ms - s->state_since_ms);
     snap->battery_available = true; // 由主循环在快照后补真实值,见 app_ui
     snap->mac_cpu          = s->mac_cpu;
@@ -525,6 +527,25 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             app_action_t rs = { .type = APP_ACT_RESOLVE_SERVICE };
             emit(out, out_n, max, rs);
         }
+        break;
+
+    // ---- USB 有线通道(第三通道:语义与 BLE/WS 对等)----
+
+    case APP_EV_USB_CONNECTED:
+        // 与 BLE_CONNECTED 同构:USB 会话通 = 链路通,PTT 可用
+        s->link_channel = 2;
+        s->link_up = true;
+        {
+            app_action_t b = { .type = APP_ACT_UI_REFRESH };
+            emit(out, out_n, max, b);
+        }
+        break;
+
+    case APP_EV_USB_DISCONNECTED:
+        s->link_channel = 2;   // 断线横幅仍显示通道名(USB)
+        s->link_up = false;
+        // 状态收束与 BLE 断连同路径;toast 文案区分通道
+        handle_link_down(s, now_ms, "USB disconnected", out, out_n, max);
         break;
 
     case APP_EV_WS_TARGET_FOUND:

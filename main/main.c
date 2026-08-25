@@ -238,8 +238,16 @@ static void app_task(void *arg)
 }
 
 // ---- 控制台(USB-Serial-JTAG,避免 UART0 与背光引脚冲突) ----
+// USB 模式不启动 REPL:USB 数据通道独占串口(驱动安装与 REPL 互斥);
+// 控制台功能由 SYS 命令面经数据协议下行覆盖(relay `!<命令>`)。boot 顺序
+// 第 8 步 mode_init 先于此步,可安全按模式门禁。
 static void console_init(void)
 {
+    if (mode_get() == APP_MODE_USB) {
+        ESP_LOGI(TAG, "USB 模式:跳过 REPL(控制台走 SYS 命令面)");
+        console_cmds_register();   // 命令表仍需注册:SYS 帧走 console_cmds_run_line
+        return;
+    }
     esp_console_repl_config_t repl_cfg = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
     repl_cfg.max_cmdline_length = 128;
     esp_console_dev_usb_serial_jtag_config_t hw_cfg =
