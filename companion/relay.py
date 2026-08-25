@@ -694,6 +694,12 @@ def main():
         do_approval=not args.no_approval,
         dry_run=args.dry_run,
     )
+    # wifi 通道: mDNS 发布 _ai-passport._tcp(设备 STA 自动发现本 WS 服务)。
+    # 必须在事件循环外调用(zeroconf 同步 API 自阻塞, 见 mdns_pub.py 注释)。
+    zc = None
+    if cfg.get("channel", "ble") == "wifi":
+        from mdns_pub import publish_mdns
+        zc, _ = publish_mdns(int(cfg.get("ws_port", 8765)))
     try:
         asyncio.run(relay.run(args.device))
     except KeyboardInterrupt:
@@ -704,6 +710,12 @@ def main():
               "(ble: BLE 广播; wifi: 与电脑同一局域网), 然后重新运行本程序",
               file=sys.stderr)
         sys.exit(1)
+    finally:
+        if zc is not None:
+            try:
+                zc.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
