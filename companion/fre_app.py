@@ -1,27 +1,37 @@
 #!/usr/bin/env python3
-"""AI Passport 首次运行向导(tkinter 桌面应用)。
+"""AI Passport 安装/首次配置/设备诊断向导(tkinter + ttkbootstrap)。
 
-普通用户首次使用零命令行: 启动 → 自动发现设备 → 点击连接 → 授权引导
-(Mac) → 状态页显示运行就绪。config.local.json 自动生成(白名单字段),
-密钥等已有字段保留。
+5 步流程: 欢迎 → 发现设备(BLE→WiFi→USB 自动探测, 可手动) → ASR 配置
+(火山 Key + 真实测试连接) → 输入注入权限(macOS) → 完成(状态页)。
+进阶: 状态页 Advanced 进入诊断页(见 fre_app.py 诊断节)。
 
 架构: tkinter 主线程 + 后台 asyncio 线程(跑 relay 全流程), UI 更新经
-thread-safe queue + root.after 轮询(不跨线程碰控件)。
+thread-safe queue + root.after 轮询(不跨线程碰控件)。GUI 只是壳,
+核心业务在 relay / asr_client / probe 等模块, 全部可单测、CLI 可跑。
 
 用法:
   python3 companion/fre_app.py            # 正常启动
-  python3 companion/fre_app.py --dry-run  # 不真实连接, 用内置 fake 链路走通流程
+  python3 companion/fre_app.py --dry-run  # 不真实连接, 内置 fake 链路走通流程
+  python3 companion/fre_app.py --no-tray  # 连接成功后不启动系统托盘
 """
 import argparse
 import asyncio
-import os
 import queue
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import font as tkfont
 
+import ttkbootstrap as ttk
+
 import fre_state
+
+THEME = "litera"
+
+CHANNEL_LABELS = (("ble", "蓝牙 BLE"), ("wifi", "WiFi"), ("usb", "USB 有线"))
+INJECT_LABELS = {"unicode": "Unicode 键盘注入", "clipboard": "剪贴板",
+                 "auto": "Auto (unicode 优先)"}
 
 
 class _FakeTransport:
@@ -54,32 +64,33 @@ class _FakeInjector:
 
 
 class FREApp:
-    """tkinter 向导窗口。"""
+    """tkinter 向导窗口。页面名与测试/冒烟断言耦合。"""
 
-    PAGES = ("found", "connecting", "permission", "status")
+    PAGES = ("welcome", "discover", "asr_config", "permission", "connecting",
+             "status")
 
-    def __init__(self, root, dry_run=False):
+    def __init__(self, root, dry_run=False, no_tray=False):
         self.root = root
         self.dry_run = dry_run
-        self.phase_q = queue.Queue()     # 后台线程 → UI 的 phase 事件
+        self.no_tray = no_tray
+        self.phase_q = queue.Queue()     # 后台线程 → UI 的事件
         self.relay_task = None           # 后台 relay task
         self._loop = None                # 后台 asyncio 事件循环
         self._thread = None              # 后台 asyncio 线程
         self.device_addr = None
+        self.probe_result = None         # ("ble"|"wifi"|"usb", addr)
         self.last_error = ""
 
         self.cfg = fre_state.load_or_default_cfg()
         self.channel = self.cfg.get("channel", "ble")
 
         root.title("AI Passport")
-        root.geometry("420x560")
-        root.minsize(380, 480)
+        root.geometry("440x600")
+        root.minsize(400, 520)
         self._build_ui()
-        self.show_page("found")
+        self.show_page("welcome")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
-
-        # 自动开始扫描
-        self.start_scan()
+        self.root.after(100, self.poll)
 
     # ---------------- UI 构建 ----------------
 
@@ -90,63 +101,105 @@ class FREApp:
 
         self._pages = {}
         for name in self.PAGES:
-            self._pages[name] = tk.Frame(self.root, padx=24, pady=24)
-        self._build_found_page()
-        self._build_connecting_page()
+            self._pages[name] = ttk.Frame(self.root, padding=24)
+        self._build_welcome_page()
+        self._build_discover_page()
+        self._build_asr_config_page()
         self._build_permission_page()
+        self._build_connecting_page()
         self._build_status_page()
 
         self._status_var = tk.StringVar(value="")
-        tk.Label(self.root, textvariable=self._status_var,
-                 font=self._font_hint, fg="#666",
-                 anchor="w", padx=16).pack(side="bottom", fill="x")
+        ttk.Label(self.root, textvariable=self._status_var,
+                  font=self._font_hint, bootstyle="secondary",
+                  anchor="w", padding=12).pack(side="bottom", fill="x")
 
-    def _build_found_page(self):
-        p = self._pages["found"]
-        tk.Label(p, text="发现 AI Passport", font=self._font_title).pack(pady=(0, 8))
-        tk.Label(p, text="确保设备已开机并处于广播状态", font=self._font_hint,
-                 fg="#666").pack()
-        self._device_var = tk.StringVar(value="正在扫描…")
-        tk.Label(p, textvariable=self._device_var, font=self._font_body,
-                 pady=12).pack()
-        self._connect_btn = tk.Button(
-            p, text="连接", font=self._font_body, width=16, height=2,
-            command=self.connect, state="disabled")
-        self._connect_btn.pack(pady=8)
-        tk.Button(p, text="重新扫描", font=self._font_hint, command=self.start_scan
-                  ).pack()
+    def _page(self, name):
+        return self._pages[name]
+
+    def _build_welcome_page(self):
+        p = self._page("welcome")
+        ttk.Label(p, text="欢迎使用 AI Passport",
+                  font=self._font_title).pack(pady=(16, 10))
+        ttk.Label(p, text=(
+            "一个会听话的可穿戴 AI 硬件。\n"
+            "本向导将完成: 发现设备 → 语音识别配置 → 授权 → 连接。"),
+            font=self._font_body, justify="center").pack(pady=(0, 12))
+        ttk.Label(p, text=(
+            "准备: 设备已开机;\n"
+            "如需 USB 连接, 请先用数据线接上电脑。"),
+            font=self._font_hint, bootstyle="secondary",
+            justify="center").pack(pady=(0, 24))
+        ttk.Button(p, text="开始", bootstyle="primary",
+                   command=self.start_discover).pack(pady=8)
+
+    def _build_discover_page(self):
+        p = self._page("discover")
+        ttk.Label(p, text="发现设备", font=self._font_title).pack(pady=(0, 8))
+        self._probe_var = tk.StringVar(value="")
+        ttk.Label(p, textvariable=self._probe_var, font=self._font_hint,
+                  bootstyle="secondary", wraplength=360).pack()
+        self._device_var = tk.StringVar(value="尚未探测")
+        ttk.Label(p, textvariable=self._device_var, font=self._font_body,
+                  padding=(0, 10)).pack()
+
+        ttk.Label(p, text="连接通道", font=self._font_hint,
+                  bootstyle="secondary", padding=(0, 8)).pack()
         self._channel_var = tk.StringVar(value=self.channel)
-        tk.Frame(p).pack(pady=8)
-        tk.Label(p, text="连接通道", font=self._font_hint, fg="#666").pack()
-        for ch, label in (("ble", "蓝牙 BLE"), ("wifi", "WiFi"), ("usb", "USB 有线")):
-            tk.Radiobutton(p, text=label, value=ch, variable=self._channel_var,
-                           font=self._font_hint, command=self.on_channel_change
-                           ).pack(anchor="center")
+        for ch, label in CHANNEL_LABELS:
+            ttk.Radiobutton(p, text=label, value=ch, variable=self._channel_var,
+                            command=self.on_channel_change).pack(anchor="w")
+        ttk.Button(p, text="重新探测", bootstyle="secondary",
+                   command=self.start_discover).pack(pady=(14, 4))
+        ttk.Button(p, text="下一步", bootstyle="primary",
+                   command=self.on_discover_next).pack(pady=4)
+
+    def _build_asr_config_page(self):
+        p = self._page("asr_config")
+        ttk.Label(p, text="语音识别配置", font=self._font_title).pack(pady=(0, 8))
+        ttk.Label(p, text=(
+            "输入火山引擎豆包语音识别的 API Key。\n"
+            "Key 仅保存在本机配置文件(config.local.json), 不会上传或写入日志。"),
+            font=self._font_hint, bootstyle="secondary",
+            justify="left", wraplength=380).pack(anchor="w", pady=(0, 10))
+        self._asr_key_var = tk.StringVar(
+            value=self.cfg.get("volcano_api_key", ""))
+        ttk.Entry(p, textvariable=self._asr_key_var, show="*",
+                  font=self._font_body).pack(fill="x", pady=(0, 8))
+        ttk.Button(p, text="测试连接", bootstyle="info",
+                   command=self.test_asr_connection).pack(anchor="w")
+        self._asr_test_var = tk.StringVar(value="")
+        ttk.Label(p, textvariable=self._asr_test_var, font=self._font_hint,
+                  bootstyle="secondary", wraplength=380, justify="left",
+                  padding=(0, 8)).pack(anchor="w")
+        ttk.Button(p, text="下一步", bootstyle="primary",
+                   command=self.on_asr_next).pack(pady=(12, 4))
 
     def _build_connecting_page(self):
-        p = self._pages["connecting"]
-        tk.Label(p, text="正在连接…", font=self._font_title).pack(pady=(0, 12))
+        p = self._page("connecting")
+        ttk.Label(p, text="正在连接…", font=self._font_title).pack(pady=(0, 12))
         self._connecting_var = tk.StringVar(value="")
-        tk.Label(p, textvariable=self._connecting_var,
-                 font=self._font_body).pack()
+        ttk.Label(p, textvariable=self._connecting_var,
+                  font=self._font_body).pack()
 
     def _build_permission_page(self):
-        p = self._pages["permission"]
-        tk.Label(p, text="需要授权", font=self._font_title).pack(pady=(0, 8))
-        tk.Label(p, text="以下权限未开启, 语音与文字注入将无法工作:",
-                 font=self._font_body, justify="left").pack(anchor="w")
+        p = self._page("permission")
+        ttk.Label(p, text="需要授权", font=self._font_title).pack(pady=(0, 8))
+        ttk.Label(p, text="以下权限未开启, 语音与文字注入将无法工作:",
+                  font=self._font_body, justify="left").pack(anchor="w")
         self._perm_var = tk.StringVar(value="")
-        tk.Label(p, textvariable=self._perm_var, font=self._font_body,
-                 fg="#b00", pady=8, justify="left").pack(anchor="w")
-        tk.Button(p, text="打开系统设置", font=self._font_body,
-                  command=lambda: self.open_permission()).pack(pady=6)
-        tk.Button(p, text="我已授权, 继续", font=self._font_body,
-                  command=self.continue_after_permission).pack(pady=6)
+        ttk.Label(p, textvariable=self._perm_var, font=self._font_body,
+                  bootstyle="danger", padding=(0, 8),
+                  justify="left").pack(anchor="w")
+        ttk.Button(p, text="打开系统设置", bootstyle="secondary",
+                   command=self.open_permission).pack(pady=6)
+        ttk.Button(p, text="我已授权, 继续", bootstyle="primary",
+                   command=self.continue_after_permission).pack(pady=6)
 
     def _build_status_page(self):
-        p = self._pages["status"]
-        tk.Label(p, text="✅ AI Passport 已连接", font=self._font_title
-                 ).pack(pady=(0, 16))
+        p = self._page("status")
+        ttk.Label(p, text="✅ AI Passport 已连接", font=self._font_title
+                  ).pack(pady=(0, 16))
         rows = (
             ("输入方式", "按住 ● 讲话 · 松开发送\n双击 OK 清空 · DOWN 回车"),
             ("连接", None),
@@ -155,16 +208,16 @@ class FREApp:
         )
         self._row_vars = {}
         for label, static in rows:
-            row = tk.Frame(p)
+            row = ttk.Frame(p)
             row.pack(fill="x", pady=4)
-            tk.Label(row, text=label, font=self._font_body, width=10,
-                     anchor="w").pack(side="left")
+            ttk.Label(row, text=label, font=self._font_body, width=10,
+                      anchor="w").pack(side="left")
             v = tk.StringVar(value=static or "")
             self._row_vars[label] = v
-            tk.Label(row, textvariable=v, font=self._font_body,
-                     fg="#0a0").pack(side="left")
-        tk.Button(p, text="重新设置", font=self._font_hint,
-                  command=self.on_reset).pack(pady=16)
+            ttk.Label(row, textvariable=v, font=self._font_body,
+                      bootstyle="success").pack(side="left")
+        ttk.Button(p, text="重新设置", bootstyle="secondary",
+                   command=self.on_reset).pack(pady=16)
 
     # ---------------- 页面切换 ----------------
 
@@ -177,39 +230,92 @@ class FREApp:
     def set_status(self, text):
         self._status_var.set(text)
 
-    # ---------------- 扫描 ----------------
+    # ---------------- 探测 ----------------
 
-    def start_scan(self):
-        self.show_page("found")
-        self._device_var.set("正在扫描…")
-        self._connect_btn.config(state="disabled")
-        threading.Thread(target=self._scan_worker, daemon=True).start()
+    def start_discover(self):
+        self.show_page("discover")
+        self._probe_var.set("正在探测…")
+        self._device_var.set("尚未探测")
+        self.probe_result = None
+        threading.Thread(target=self._probe_worker, daemon=True).start()
 
-    def _scan_worker(self):
-        """后台线程执行扫描(bleak 阻塞式), 结果经队列回 UI。"""
+    def _probe_worker(self):
+        """后台线程执行通道探测(BLE→WiFi→USB), 结果经队列回 UI。"""
         if self.dry_run:
-            result = ("AA:BB:CC:DD:EE:FF", "")
+            time.sleep(0.3)   # 模拟探测耗时
+            result = ("ble", "AA:BB:CC:DD:EE:FF")
         else:
             try:
-                from relay import BleakTransport
-                addr = BleakTransport().scan_for_device("AI Passport", 5.0)
-                result = (addr,)
-            except Exception as e:
-                result = (None, f"扫描失败: {e}")
-        self.phase_q.put(("scan_result", result))
+                from probe import probe_channels
+                result = asyncio.run(probe_channels(
+                    self.cfg,
+                    on_status=lambda m: self.phase_q.put(("probe_progress", m))))
+            except Exception as e:  # noqa: BLE001
+                result = (None, None)
+                self.phase_q.put(("probe_progress", f"探测异常: {e}"))
+        self.phase_q.put(("probe_result", result))
 
-    def _on_scan_result(self, result):
-        addr, err = result
-        if addr:
-            self.device_addr = addr
-            self._device_var.set(f"AI Passport\n{addr}")
-            self._connect_btn.config(state="normal")
-            self.set_status("发现设备, 点击连接")
+    def _on_probe_result(self, result):
+        channel, addr = result
+        self.probe_result = result
+        if channel:
+            # 自动探测命中 → 推荐该通道(用户仍可手动改)
+            self._channel_var.set(channel)
+            self.channel = channel
+            name = dict(CHANNEL_LABELS).get(channel, channel)
+            self._device_var.set(f"{name}\n{addr}")
+            if channel == "ble":
+                self.device_addr = addr
+            self.set_status(f"发现设备 ({name}), 可下一步")
         else:
             self.device_addr = None
             self._device_var.set("未发现设备")
-            self._connect_btn.config(state="disabled")
-            self.set_status(err or "确认设备已开机并处于广播状态")
+            self.set_status("未发现设备, 可手动选择通道后下一步")
+
+    # ---------------- ASR 配置 ----------------
+
+    def test_asr_connection(self):
+        self._asr_test_var.set("正在测试…")
+        threading.Thread(target=self._test_asr_worker, daemon=True).start()
+
+    def _test_asr_worker(self):
+        """后台线程: 零音频握手验证 Key(不阻塞 UI)。"""
+        key = self._asr_key_var.get().strip()
+        if self.dry_run:
+            time.sleep(0.2)
+            result = ("ok", "连接成功 (dry-run)")
+        elif not key:
+            result = ("fail", "请先输入 API Key")
+        else:
+            try:
+                from asr_client import asr_test_connection
+                cfg = {**self.cfg, "volcano_api_key": key}
+                asyncio.run(asr_test_connection(cfg, timeout=8))
+                result = ("ok", "连接成功, Key 有效")
+            except Exception as e:  # noqa: BLE001
+                result = ("fail", str(e))
+        self.phase_q.put(("asr_test", result))
+
+    def _on_asr_test(self, result):
+        ok, msg = result
+        self._asr_test_var.set(("✓ " if ok else "✗ ") + msg)
+
+    # ---------------- 流程推进 ----------------
+
+    def on_discover_next(self):
+        self.channel = self._channel_var.get()
+        if not self.dry_run:
+            fre_state.write_cfg({"channel": self.channel})
+        self.show_page("asr_config")
+
+    def on_asr_next(self):
+        key = self._asr_key_var.get().strip()
+        if key and not self.dry_run:
+            fre_state.write_asr_cfg(key)
+        self.connect()
+
+    def on_channel_change(self):
+        self.channel = self._channel_var.get()
 
     # ---------------- 连接 ----------------
 
@@ -229,7 +335,6 @@ class FREApp:
 
         self._thread = threading.Thread(target=self._relay_worker, daemon=True)
         self._thread.start()
-        self.root.after(100, self.poll)
 
     def open_permission(self):
         for name, st in fre_state.mac_permission_status():
@@ -280,8 +385,12 @@ class FREApp:
         try:
             while True:
                 kind, payload = self.phase_q.get_nowait()
-                if kind == "scan_result":
-                    self._on_scan_result(payload)
+                if kind == "probe_progress":
+                    self._probe_var.set(payload)
+                elif kind == "probe_result":
+                    self._on_probe_result(payload)
+                elif kind == "asr_test":
+                    self._on_asr_test(payload)
                 elif kind == "phase":
                     self._on_phase(payload)
                 elif kind == "error":
@@ -297,32 +406,26 @@ class FREApp:
             self.channel = self.cfg.get("channel", self.channel)
             self._row_vars["连接"].set(self.channel.upper())
             mode = self.cfg.get("inject_mode", "auto")
-            self._row_vars["Injection"].set(
-                {"unicode": "Unicode 键盘注入", "clipboard": "剪贴板",
-                 "auto": "Auto (unicode 优先)"}.get(mode, mode))
+            self._row_vars["Injection"].set(INJECT_LABELS.get(mode, mode))
             key = self.cfg.get("volcano_api_key", "")
             if key:
                 self._row_vars["ASR"].set("Volcano")
             else:
-                self._row_vars["ASR"].set("未配置 (设置 config)")
+                self._row_vars["ASR"].set("未配置")
             self.show_page("status")
             self.set_status(f"已连接 {self.channel.upper()}, 按住 ● 讲话")
         elif phase == "disconnected":
-            self.show_page("found")
+            self.show_page("discover")
             self.set_status("连接已断开")
         elif phase == "failed":
-            self.show_page("found")
+            self.show_page("discover")
             self.set_status(self.last_error or "连接失败")
-
-    def on_channel_change(self):
-        self.channel = self._channel_var.get()
 
     def on_reset(self):
         if self._loop is not None and self.relay_task is not None:
             self._loop.call_soon_threadsafe(self.relay_task.cancel)
-        self.show_page("found")
         self.set_status("")
-        self.start_scan()
+        self.start_discover()
 
     def on_close(self):
         """收束后台 relay(取消 task + 等线程退出), 无残留。"""
@@ -337,9 +440,11 @@ def main():
     ap = argparse.ArgumentParser(description="AI Passport 首次运行向导")
     ap.add_argument("--dry-run", action="store_true",
                     help="不真实连接设备, 用内置 fake 链路走通流程")
+    ap.add_argument("--no-tray", action="store_true",
+                    help="连接成功后不启动系统托盘")
     args = ap.parse_args()
-    root = tk.Tk()
-    FREApp(root, dry_run=args.dry_run)
+    root = ttk.Window(themename=THEME)
+    FREApp(root, dry_run=args.dry_run, no_tray=args.no_tray)
     root.mainloop()
 
 
