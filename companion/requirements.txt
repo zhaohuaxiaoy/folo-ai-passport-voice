@@ -1,4 +1,9 @@
 # AI Passport Companion 依赖(与开发机 .venv 实测版本锁定)
 # 安装: python3 -m venv companion/.venv && companion/.venv/bin/pip install -r companion/requirements.txt
-bleak==3.0.2          # macOS 11+ 单后端 BLE 客户端
-websockets==17.0.1    # 火山 ASR 双向流式(WebSocket)
+# Windows 平台标记(PEP 508): Win10 1803+ / Win11 均满足 bleak winrt 后端要求。
+bleak==3.0.2; platform_system == "Darwin"      # macOS 11+ 单后端 BLE 客户端
+bleak[winrt]==3.0.2; platform_system == "Windows"   # Windows BLE(winrt 后端)
+websockets==17.0.1    # 火山 ASR 双向流式 + WiFi 通道 WS server(WsTransport)
+zeroconf==0.150.0     # WiFi 通道: mDNS 发布 _ai-passport._tcp(设备自动发现)
+pywin32>=306; platform_system == "Windows"     # Windows 注入(剪贴板+SendInput)
+pyserial>=3.5; platform_system == "Windows"    # Windows 侧 USB 串口控制台配网

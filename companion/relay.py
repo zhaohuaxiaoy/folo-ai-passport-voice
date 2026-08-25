@@ -654,16 +654,18 @@ def _build_transport(cfg):
         f"config.local.json 的 channel 值无效: {channel!r}(应为 \"ble\" 或 \"wifi\")")
 
 
-def _default_inject_fn():
-    """按平台选注入后端(契约一致: paste_text(text, dry_run=False)):
+def _default_inject_fn(cfg):
+    """按平台选注入后端(契约一致: 单参 text):
 
-    Windows → inject_win(剪贴板 CF_UNICODETEXT + SendInput Ctrl+V);
+    Windows → inject_win(剪贴板 CF_UNICODETEXT + SendInput Ctrl+V), 带入
+    inject_focus_delay(注入前等用户切到目标窗口的秒数);
     其余(macOS) → inject(pbcopy + osascript Cmd+V)。
     """
     if sys.platform == "win32":
         from inject_win import paste_text
-    else:
-        from inject import paste_text
+        delay = float(cfg.get("inject_focus_delay", 2.0))
+        return lambda text: paste_text(text, focus_delay=delay)
+    from inject import paste_text
     return paste_text
 
 
@@ -688,7 +690,7 @@ def main():
     cfg = load_config()
     relay = Relay(
         transport=_build_transport(cfg),
-        inject_fn=_default_inject_fn(),
+        inject_fn=_default_inject_fn(cfg),
         timeout=args.timeout,
         do_inject=not (args.no_inject or args.dry_run),
         do_approval=not args.no_approval,
