@@ -32,8 +32,9 @@ int usb_link_send_event(const char *line, size_t len);
 // 音频帧上行(组 AUDIO 帧,3200B)。返回 0 = 整帧写入;失败 -1(丢帧计数路径)。
 int usb_link_send_audio(const uint8_t *frame, size_t len);
 
-// 会话复位(离开 USB 模式时调用:会话 down,后续发送全部拒绝)。
-void usb_link_reset_session(void);
+// 离开 USB 模式(语义超集于会话复位):停读任务(自删,释放 2KB 栈)+ 会话 down,
+// 后续发送全部拒绝。静态缓冲保持,USB 重进必经重启(init 幂等)。
+void usb_link_shutdown(void);
 
 // 恢复 esp_log 输出到 USB 串口(离开 USB 模式时调用;驱动保持安装无冲突)。
 void usb_link_restore_log(void);

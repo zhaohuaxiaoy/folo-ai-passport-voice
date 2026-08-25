@@ -37,6 +37,9 @@ static const char *TAG = "usb_link";
 #define USB_SYS_LINE_MAX      128     /* SYS 命令文本上限(帧协议契约) */
 #define USB_RESP_MAX          2048    /* SYS_RESP 载荷上限 */
 
+/* 静态缓冲(~14.4KB)不可回收:驱动保持安装(卸载 = 阻断读悬空 UB),REPL 缺席时
+ * 仍留给重进 USB 使用——重进必须重启,init 幂等,无二次初始化路径(见 design.md)。 */
+static volatile bool s_running;            /* 离开 USB 模式置 false,读任务 ≤500ms 内自删 */
 static volatile bool s_session_up;         /* 收到 ping → true;跨任务读写,单核无撕裂,volatile 显式化 */
 static bool s_connected;                   /* is_connected 上次采样 */
 static SemaphoreHandle_t s_tx_mux;         /* 发送互斥:串行化三发送方对 s_tx_buf 的组帧+写 */
@@ -101,8 +104,11 @@ bool usb_link_session_active(void)
     return s_session_up && mode_get() == APP_MODE_USB;
 }
 
-void usb_link_reset_session(void)
+// 离开 USB 模式:停读任务(≤500ms 内自删,释放 2KB 任务栈)+ 会话 down。
+// 语义超集于 reset_session;静态缓冲保持(不可回收,注释见上)。
+void usb_link_shutdown(void)
 {
+    s_running = false;
     s_session_up = false;
 }
 
@@ -219,6 +225,7 @@ static void usb_read_task(void *arg)
     int64_t last_poll = 0;
 
     for (;;) {
+        if (!s_running) vTaskDelete(NULL);   // 自删(仅本任务,安全;阻塞读 ≤500ms 内返回)
         // 阻塞读(≤500ms);返回实际字节数(0 = 超时无数据)
         int got = usb_serial_jtag_read_bytes(buf, sizeof(buf),
                                              pdMS_TO_TICKS(USB_POLL_INTERVAL_MS));
@@ -259,6 +266,7 @@ static void usb_read_task(void *arg)
 
 esp_err_t usb_link_init(void)
 {
+    s_running = true;
     s_tx_mux = xSemaphoreCreateMutex();
     if (s_tx_mux == NULL) {
         ESP_LOGE(TAG, "发送互斥锁创建失败");

@@ -141,8 +141,8 @@ esp_err_t mode_switch(app_mode_t target)
     // 3. 射频切换:先彻底关旧射频,再启新射频
     if (target == APP_MODE_WIFI) {
         if (s_mode == APP_MODE_USB) {
-            usb_link_reset_session();
-            // 与切 BLE 同语义:恢复 esp_log 直出串口。会话已 reset,`!log` 不可达,
+            usb_link_shutdown();          // 停读任务(自删)+ 会话 down
+            // 与切 BLE 同语义:恢复 esp_log 直出串口。会话已 down,`!log` 不可达,
             // 不恢复则日志继续进 RAM 环静默丢弃,直到下次重启。
             usb_link_restore_log();
         }
@@ -158,7 +158,7 @@ esp_err_t mode_switch(app_mode_t target)
         return ESP_OK;                    // 不可达(esp_restart 不返回)
     } else {
         if (s_mode == APP_MODE_USB) {
-            usb_link_reset_session();
+            usb_link_shutdown();          // 停读任务(自删)+ 会话 down
             // 恢复日志输出到 USB 串口(驱动保持安装,REPL 缺席,无冲突;
             // 重启可恢复控制台 —— 文档注明)
             usb_link_restore_log();
