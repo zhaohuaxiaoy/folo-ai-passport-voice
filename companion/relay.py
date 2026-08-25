@@ -640,14 +640,15 @@ def _build_transport(cfg):
     """按 config.local.json 的 channel 选传输层(Windows 移植 P4+):
 
     - "ble"(缺省): bleak BLE 直连, macOS/Windows 蓝牙均可;
-    - "wifi": 本机起 WS server, 设备 STA 主动连(无蓝牙 Windows 电脑);
-      WsTransport 由 ws_transport.py 提供(P5 落地, 本阶段未实现)。
+    - "wifi": 本机起 WS server(mdns_pub 发布 _ai-passport._tcp), 设备
+      STA 主动连(无蓝牙 Windows 电脑); 端口/超时取 config ws_port 与
+      ws_connect_timeout。
     """
     channel = cfg.get("channel", "ble")
     if channel == "ble":
         return BleakTransport()
     if channel == "wifi":
-        from ws_transport import WsTransport   # 懒加载:模块缺失即报错(尚未实现)
+        from ws_transport import WsTransport   # 函数内懒加载, 避免顶层循环依赖
         return WsTransport(port=int(cfg.get("ws_port", 8765)),
                            connect_timeout=float(cfg.get("ws_connect_timeout", 120)))
     raise RelayError(

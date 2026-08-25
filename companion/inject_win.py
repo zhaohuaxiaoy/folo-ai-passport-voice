@@ -51,7 +51,8 @@ def _is_console_title(title):
 
 
 def _send_ctrl_v(win32api, win32con):
-    """SendInput 模拟 Ctrl+V(按下→释放顺序: Ctrl 下, V 下, V 上, Ctrl 上)。"""
+    """keybd_event 模拟 Ctrl+V(SendInput 的 pywin32 简化封装, Win10/11 均有效;
+    按下→释放顺序: Ctrl 下, V 下, V 上, Ctrl 上)。"""
     win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
     win32api.keybd_event(ord("V"), 0, 0, 0)
     win32api.keybd_event(ord("V"), 0, win32con.KEYEVENTF_KEYUP, 0)
@@ -86,9 +87,16 @@ def paste_text(text, dry_run=False, focus_delay=2.0):
     except ImportError as e:
         raise InjectError(f"缺少 pywin32: pip install pywin32 ({e})") from e
 
+    # win32 调用失败统一转 InjectError(带错误文本, 不裸 pywintypes traceback)
+    def _win32_err(e):
+        return InjectError(f"Windows 注入失败: {e}")
+
     # 1. 焦点护栏(先查): 前台是 relay 控制台 → 快速失败, 不等待
-    fg = win32gui.GetForegroundWindow()
-    title = win32gui.GetWindowText(fg)
+    try:
+        fg = win32gui.GetForegroundWindow()
+        title = win32gui.GetWindowText(fg)
+    except Exception as e:
+        raise _win32_err(f"读取前台窗口失败: {e}") from e
     if _is_console_title(title):
         raise InjectError(f"前台是 relay 控制台窗口({title!r}), 拒绝注入。{GUIDE}")
 
@@ -99,21 +107,32 @@ def paste_text(text, dry_run=False, focus_delay=2.0):
         time.sleep(focus_delay)
 
     # 3. 护栏复查: 用户仍停在控制台 → 中止
-    fg = win32gui.GetForegroundWindow()
-    title = win32gui.GetWindowText(fg)
+    try:
+        fg = win32gui.GetForegroundWindow()
+        title = win32gui.GetWindowText(fg)
+    except Exception as e:
+        raise _win32_err(f"读取前台窗口失败: {e}") from e
     if _is_console_title(title):
         raise InjectError(f"前台仍是 relay 控制台窗口({title!r}), 拒绝注入。{GUIDE}")
 
-    # 4. 剪贴板写入(CF_UNICODETEXT: UTF-16, 中文无忧)
-    win32clipboard.OpenClipboard()
+    # 4. 剪贴板写入(CF_UNICODETEXT: UTF-16, 中文无忧; OpenClipboard 可能被
+    #    其他进程持有而失败 —— 明确报错而非裸 traceback)
     try:
-        win32clipboard.EmptyClipboard()
-        win32clipboard.SetClipboardText(text, win32con.CF_UNICODETEXT)
-    finally:
-        win32clipboard.CloseClipboard()
+        win32clipboard.OpenClipboard()
+        try:
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardText(text, win32con.CF_UNICODETEXT)
+        finally:
+            win32clipboard.CloseClipboard()
+    except Exception as e:
+        raise _win32_err(f"剪贴板写入失败: {e}") from e
 
-    # 5. Ctrl+V 粘贴(不抢焦点: 只向当前前台窗口发键)
-    _send_ctrl_v(win32api, win32con)
+    # 5. Ctrl+V 粘贴(不抢焦点: 只向当前前台窗口发键; keybd_event 是
+    #    SendInput 的 pywin32 简化封装, Win10/11 均有效)
+    try:
+        _send_ctrl_v(win32api, win32con)
+    except Exception as e:
+        raise _win32_err(f"按键注入失败: {e}") from e
 
 
 def _main():

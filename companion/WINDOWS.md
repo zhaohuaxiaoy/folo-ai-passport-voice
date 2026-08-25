@@ -82,7 +82,8 @@ PC 侧把 `channel` 改为 `"wifi"` 后运行 relay：本机起 WS server（端�
 
 ## 注入焦点提示（Windows）
 
-注入 = 剪贴板（CF_UNICODETEXT）+ SendInput Ctrl+V。relay 收到定稿后：
+注入 = 剪贴板（CF_UNICODETEXT）+ SendInput Ctrl+V（实现为 pywin32
+`keybd_event`，Win10/11 均有效）。relay 收到定稿后：
 1. 先检查前台窗口——若还是 relay 自己的控制台（标题含 python/cmd/PowerShell
    等）→ **拒绝注入**并给出指引；
 2. 等 `inject_focus_delay` 秒（缺省 2s），此时请点击目标输入窗口；

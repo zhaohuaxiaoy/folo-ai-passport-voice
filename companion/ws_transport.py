@@ -132,7 +132,12 @@ class WsTransport:
         try:
             res = handler(raw.encode("utf-8") if isinstance(raw, str) else raw)
             if asyncio.iscoroutine(res):
-                asyncio.create_task(res)   # 兼容 async 回调(relay 用同步回调)
+                # 兼容 async 回调(relay 用同步回调): 异常记日志, 不产生
+                # "Task exception was never retrieved" 静默警告
+                asyncio.create_task(res).add_done_callback(
+                    lambda t: (t.exception() is not None and
+                               print(f"[ws] 回调协程异常: {t.exception()}",
+                                     file=sys.stderr)))
         except Exception:
             pass    # 回调异常不扩散进连接处理(与 bleak 回调语义一致)
 

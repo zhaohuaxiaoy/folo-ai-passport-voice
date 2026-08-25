@@ -41,7 +41,13 @@ async def wait_ws_connected(t):
 
 
 async def open_device(t):
-    """设备侧连入 WsTransport 的 server, 返回 websockets client。"""
+    """设备侧连入 WsTransport 的 server, 返回 websockets client。
+
+    必须先等服务端完成 start_serving(端口才绑定、t.port 才更新为实际
+    端口)——否则读到初始 0 会被 websockets 当缺省端口(80)去连, 报
+    ConnectionRefusedError(真实炸过的 flaky 源, 不能靠 sleep 侥幸)。
+    """
+    await wait_until(lambda: t._server is not None, what="WS server 已监听")
     ws = await websockets.connect(f"ws://127.0.0.1:{t.port}", open_timeout=3)
     await wait_ws_connected(t)
     return ws

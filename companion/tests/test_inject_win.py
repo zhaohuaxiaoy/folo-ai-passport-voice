@@ -99,12 +99,52 @@ def test_console_title_guard():
           f"护栏判定 {len(cases)} 例")
 
 
+def test_win32_api_failure_wrapped():
+    """win32 API 失败必须转 InjectError(不裸 pywintypes traceback)。
+
+    用 fake win32 模块模拟 API 抛错: 任意环节失败 → InjectError 带环节说明。
+    真实 win32 行为为 Windows 真机项(NOT RUN)。
+    """
+    saved = sys.platform
+    saved_mods = {}
+    try:
+        sys.platform = "win32"
+        # fake win32 模块: 普通属性访问即抛(模拟 API 调用失败);
+        # import 系统的元属性(__spec__ 等)返回 None 让 import 正常走通
+        class _Boom:
+            def __getattr__(self, name):
+                if name.startswith("__"):
+                    return None
+                raise RuntimeError(f"模拟 {name} 失败")
+        import sys as _sys
+        for m in ("win32api", "win32clipboard", "win32con", "win32gui"):
+            saved_mods[m] = _sys.modules.get(m)
+            _sys.modules[m] = _Boom()
+        try:
+            inject_win.paste_text("你好", focus_delay=0)
+            check("win32 API 失败转 InjectError", False, True)
+        except inject_win.InjectError as e:
+            msg = str(e)
+            check("win32 API 失败转 InjectError", "注入失败" in msg, True)
+            check("错误带环节说明", "读取前台窗口失败" in msg, True)
+        # 无 focus_delay 睡眠: focus_delay=0 跳过快查后直接复查, 仍在护栏处失败
+    finally:
+        sys.platform = saved
+        import sys as _sys
+        for m, mod in saved_mods.items():
+            if mod is None:
+                _sys.modules.pop(m, None)
+            else:
+                _sys.modules[m] = mod
+
+
 def main():
     test_dry_run_any_platform()
     test_non_str_rejected()
     test_non_win32_rejected()
     test_win32_without_pywin32()
     test_console_title_guard()
+    test_win32_api_failure_wrapped()
     if FAILURES:
         print(f"\n{len(FAILURES)} 项失败:")
         for f in FAILURES:
