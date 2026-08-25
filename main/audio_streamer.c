@@ -14,8 +14,10 @@ static const char *TAG = "audio";
 #define CHUNK_BYTES  3200
 #define RING_BYTES   4096   // 静态环,约可容一块
 // 信号量等待上限(F1 事件化替代轮询):在途 notify ≤50ms,环内残留 ≤2 块——
-// 200ms 余量充足。超时不破坏语义:丢帧模式保留,start() 会先等环空再清标志。
-// 最坏等待从 2.15s(轮询)降到 ≤400ms,典型 <30ms。
+// 200ms 余量充足。超时语义:stop 超时直接返回(提示音可能尾叠,非关键路径),
+// cancel 超时保留丢帧模式,start() 会先等环空再清标志——残留绝不流入新会话。
+// 等待不是单次 take:信号量只做唤醒加速,wait_worker_exit 循环复查 worker
+// 状态终判(陈旧 give 只会造成一次无效唤醒)。最坏等待 ≤400ms,典型 <30ms。
 #ifndef WORKER_EXIT_TIMEOUT_MS
 #define WORKER_EXIT_TIMEOUT_MS 200   // 等采集 worker 退出阻塞读(原 30×5ms 轮询)
 #endif
@@ -32,6 +34,8 @@ static SemaphoreHandle_t s_sem;          // 二值:空闲时两 worker 同等的
 // s_worker_exit_sem —— audio_worker 退出阻塞读时 give(stop/cancel 等它);
 // s_ring_empty_sem  —— ble_worker 归还块后环空时 give(cancel/start/drain 等它)。
 // 二值信号量记住状态:give 先于 take 则 take 立即返回;多次 give 不计数,无副作用。
+// s_worker_exit_sem 的消费端是 wait_worker_exit:give 只做唤醒加速,退出与否
+// 以 s_worker_busy 状态终判——stale give(上次退出未消费)不构成误判。
 static SemaphoreHandle_t s_worker_exit_sem;
 static SemaphoreHandle_t s_ring_empty_sem;
 static volatile bool s_active = false;
@@ -89,6 +93,21 @@ static bool wait_ring_empty(uint32_t ms) {
     }
 }
 
+// 等采集 worker 退出阻塞读(最多 ms 毫秒)。信号量只做唤醒加速,worker 状态做
+// 最终判定(对齐 wait_ring_empty 模式):循环复查 s_worker_busy,直到确实退出。
+// stale give(上次 worker 退出 give 无人消费的置位信号量)只会造成一次无效
+// 唤醒,循环再查状态——绝不会因陈旧 token 误判已退出(worker 仍在阻塞读时,
+// stop 提前返回会导致提示音与采集尾重叠)。返回 true ⇔ 判定时 worker 确实已退出。
+static bool wait_worker_exit(uint32_t ms) {
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(ms);
+    while (s_worker_busy) {
+        TickType_t remain = (TickType_t)(deadline - xTaskGetTickCount());
+        if ((int32_t)remain <= 0) return false;
+        xSemaphoreTake(s_worker_exit_sem, remain);
+    }
+    return true;
+}
+
 static void audio_worker(void *arg);
 static void ble_worker(void *arg);
 
@@ -142,11 +161,9 @@ void audio_streamer_start(void) {
 void audio_streamer_stop(void) {
     if (!s_active) return;
     s_active = false;             // audio worker 在下一次循环退出
-    // 等 worker 退出阻塞读(≤100ms,信号量即时返回),避免 SEND 提示音与采集
-    // 尾部重叠写码片。worker 空闲时信号量已置位,take 立即返回。
-    if (s_worker_busy) {
-        xSemaphoreTake(s_worker_exit_sem, pdMS_TO_TICKS(WORKER_EXIT_TIMEOUT_MS));
-    }
+    // 等 worker 退出阻塞读(信号量唤醒 + 状态终判,见 wait_worker_exit),
+    // 避免 SEND 提示音与采集尾部重叠写码片。
+    wait_worker_exit(WORKER_EXIT_TIMEOUT_MS);
     if (s_audio_task) {   // 首会话后即达深路径;真机据 HWM 再缩栈(见 init 注释)
         ESP_LOGI(TAG, "栈余量: audio %u/3072, ble %u/4096",
                  (unsigned)uxTaskGetStackHighWaterMark(s_audio_task),
@@ -170,9 +187,7 @@ void audio_streamer_cancel(void) {
     // 残留绝不会流入下一次会话(正确性优先于及时返回)。
     s_active = false;
     s_cancel = true;
-    if (s_worker_busy) {
-        xSemaphoreTake(s_worker_exit_sem, pdMS_TO_TICKS(WORKER_EXIT_TIMEOUT_MS));
-    }
+    wait_worker_exit(WORKER_EXIT_TIMEOUT_MS);
     bool drained = wait_ring_empty(CANCEL_DRAIN_TIMEOUT_MS);
     if (drained) {
         s_cancel = false;
