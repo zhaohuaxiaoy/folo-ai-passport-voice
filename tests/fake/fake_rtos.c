@@ -227,8 +227,13 @@ BaseType_t xTaskCreate(TaskFunction_t fn, const char *name, uint32_t stack_depth
     return (pthread_create(&tid, NULL, thread_main, c) == 0) ? pdPASS : pdFAIL;
 }
 
-// vTaskDelete 宿主桩:init 失败回滚路径调用,句柄指向的任务已被管理(pthread
-// join 由 xTaskCreate 线程自收),无实际可删对象 —— 空实现保证符号可链。
+// vTaskDelete 宿主桩:init 失败回滚路径调用(audio_worker 已建、ble_worker 失败)。
+// 空实现 = 遗留一个阻塞在旧信号量 cond_wait 上的挂起线程(无唤醒者,不碰全局
+// 状态),测试进程退出时回收 —— 宿主限制,不代表固件运行时泄漏(真机 vTaskDelete
+// 由内核立即回收任务)。不做"真删除"的原因:被删任务阻塞在 pthread_cond_wait,
+// pthread_cancel 在 cond_wait 是取消点且取消恢复时重新获取 mutex → 信号量
+// mutex 残留 locked,vSemaphoreDelete 的 pthread_mutex_destroy 返回 EBUSY,
+// 重试路径 start() 死锁;join 不退出线程只会挂起调用方。
 void vTaskDelete(TaskHandle_t h) { (void)h; }
 
 // ==================== 外围替身与可控钩子 ====================
