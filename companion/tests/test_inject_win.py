@@ -43,6 +43,30 @@ def test_dry_run_any_platform():
     check("dry_run 打印等待提示", "切换" in out, True)
 
 
+def test_key_action_dry_run():
+    """key_action dry_run: enter/clear 打印对应按键序列; 未知动作拒绝。"""
+    import io
+    from contextlib import redirect_stdout
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        inject_win.key_action("enter", dry_run=True)
+    check("key enter 打印", "VK_RETURN" in buf.getvalue(), True)
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        inject_win.key_action("clear", dry_run=True)
+    out = buf.getvalue()
+    check("key clear 打印全选", "Ctrl+A" in out, True)
+    check("key clear 打印删除", "VK_DELETE" in out, True)
+
+    try:
+        inject_win.key_action("bogus")
+        check("未知动作拒绝", False, True)
+    except inject_win.InjectError as e:
+        check("未知动作拒绝", "enter|clear" in str(e), True)
+
+
 def test_non_str_rejected():
     try:
         inject_win.paste_text(12345)
@@ -140,6 +164,7 @@ def test_win32_api_failure_wrapped():
 
 def main():
     test_dry_run_any_platform()
+    test_key_action_dry_run()
     test_non_str_rejected()
     test_non_win32_rejected()
     test_win32_without_pywin32()

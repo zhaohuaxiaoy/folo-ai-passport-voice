@@ -50,6 +50,66 @@ def _is_console_title(title):
     return bool(CONSOLE_TITLE_RE.search(title or ""))
 
 
+def _send_keys(win32api, win32con, combos):
+    """按组合序列模拟按键: combos 为 (按下时按住的修饰键, 主键) 列表。
+
+    每个组合: 修饰键(如 VK_CONTROL)下 → 主键下/上 → 修饰键上。
+    keybd_event 是 SendInput 的 pywin32 简化封装, Win10/11 均有效。
+    """
+    for mod, key in combos:
+        if mod:
+            win32api.keybd_event(mod, 0, 0, 0)
+        win32api.keybd_event(key, 0, 0, 0)
+        win32api.keybd_event(key, 0, win32con.KEYEVENTF_KEYUP, 0)
+        if mod:
+            win32api.keybd_event(mod, 0, win32con.KEYEVENTF_KEYUP, 0)
+
+
+def key_action(action, dry_run=False, focus_delay=2.0):
+    """把按键动作注入当前聚焦窗口(不依赖剪贴板)。
+
+    action: "enter"(回车提交)或 "clear"(Ctrl+A 全选 + Delete 清空)。
+    focus_delay 语义与 paste_text 相同(等用户切到目标窗口)。
+    失败抛 InjectError。
+    """
+    if action not in ("enter", "clear"):
+        raise InjectError(f"未知按键动作 {action!r} (enter|clear)")
+    if dry_run:
+        print(f"# 按键动作 {action!r}:")
+        if action == "enter":
+            print("# [SendInput] VK_RETURN")
+        else:
+            print("# [SendInput] Ctrl+A 全选 + VK_DELETE 清空")
+        return
+    if sys.platform != "win32":
+        raise InjectError(
+            "仅支持 Windows: 注入依赖 pywin32 SendInput, "
+            f"当前平台 {sys.platform} 不支持")
+    try:
+        import win32api
+        import win32con
+    except ImportError as e:
+        raise InjectError(f"缺少 pywin32: pip install pywin32 ({e})") from e
+
+    def _win32_err(e):
+        return InjectError(f"Windows 注入失败: {e}")
+
+    if focus_delay > 0:
+        print(f"[inject] {focus_delay:.1f}s 后注入(请切换到目标输入窗口)...")
+        time.sleep(focus_delay)
+
+    try:
+        if action == "enter":
+            _send_keys(win32api, win32con,
+                       [(None, win32con.VK_RETURN)])
+        else:
+            _send_keys(win32api, win32con,
+                       [(win32con.VK_CONTROL, ord("A")),
+                        (None, win32con.VK_DELETE)])
+    except Exception as e:
+        raise _win32_err(f"按键注入失败: {e}") from e
+
+
 def _send_ctrl_v(win32api, win32con):
     """keybd_event 模拟 Ctrl+V(SendInput 的 pywin32 简化封装, Win10/11 均有效;
     按下→释放顺序: Ctrl 下, V 下, V 上, Ctrl 上)。"""

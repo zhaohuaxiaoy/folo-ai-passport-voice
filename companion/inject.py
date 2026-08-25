@@ -66,6 +66,48 @@ def paste_text(text, dry_run=False):
                           + "\n原始错误: " + err)
 
 
+def key_action(action, dry_run=False):
+    """把按键动作注入当前聚焦输入框(不依赖剪贴板)。
+
+    action: "enter"(回车提交)或 "clear"(Cmd+A 全选 + 删除清空)。
+    与 paste_text 同一 osascript/System Events 通道, 同一授权要求。
+    失败抛 InjectError。
+    """
+    if action not in ("enter", "clear"):
+        raise InjectError(f"未知按键动作 {action!r} (enter|clear)")
+    if sys.platform != "darwin":
+        raise InjectError(
+            "仅支持 macOS: 注入依赖 osascript(System Events), "
+            f"当前平台 {sys.platform} 不支持")
+    if shutil.which("osascript") is None:
+        raise InjectError("缺少系统工具 osascript(仅 macOS 自带)")
+
+    if action == "enter":
+        cmds = [
+            ["osascript", "-e",
+             'tell application "System Events" to keystroke return'],
+        ]
+    else:   # clear: Cmd+A 全选, 再删除(退格)
+        cmds = [
+            ["osascript", "-e",
+             'tell application "System Events" to keystroke "a" using command down'],
+            ["osascript", "-e",
+             'tell application "System Events" to key code 51'],   # 51 = delete
+        ]
+    if dry_run:
+        print(f"# 按键动作 {action!r}:")
+        for c in cmds:
+            print("$", " ".join(c))
+        return
+
+    for c in cmds:
+        p = subprocess.run(c, capture_output=True, text=True)
+        if p.returncode != 0:
+            err = p.stderr.strip()
+            raise InjectError(f"按键注入失败(osascript 被拒)。{GUIDE}"
+                              + "\n原始错误: " + err)
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="把文本注入到当前聚焦的输入框(剪贴板 + Cmd+V)")

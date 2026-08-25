@@ -179,16 +179,18 @@ class Relay:
     """BLE 中转主逻辑。transport / asr_factory / inject_fn 均可注入(单测)。"""
 
     def __init__(self, transport=None, *, asr_factory=None, inject_fn=None,
-                 timeout=60.0, do_inject=True, do_approval=True,
-                 dry_run=False, connect_timeout_s=5.0, stdin_input=None):
+                 key_action_fn=None, timeout=60.0, do_inject=True,
+                 do_approval=True, dry_run=False, connect_timeout_s=5.0,
+                 stdin_input=None):
         from asr_client import StreamingASR
-        from inject import paste_text
+        from inject import paste_text, key_action
         self._transport = transport or BleakTransport()
         # USB 通道扩展探测:transport 带 send_syscmd(SerialTransport) →
         # 启用 stdin `!命令` 交互(USB 模式无控制台)与通道专属提示
         self._syscmd = getattr(self._transport, "send_syscmd", None)
         self._asr_factory = asr_factory or (lambda: StreamingASR())
         self._inject_fn = inject_fn or paste_text
+        self._key_action_fn = key_action_fn or key_action
         self.timeout = timeout
         self.connect_timeout_s = connect_timeout_s
         self._stdin_input = stdin_input or input   # USB 通道 stdin(测试注入 EOF)
@@ -405,6 +407,8 @@ class Relay:
             print(f"[event] device.hello proto={ev.get('proto')}")
         elif etype == "workflow.switch":
             print(f"[event] workflow.switch current={ev.get('current')}")
+        elif etype == "key.action":
+            await self._on_key_action(ev.get("action"))
         elif etype == "voice.start":
             await self._on_voice_start(ev)
         elif etype == "voice.end":
@@ -451,6 +455,19 @@ class Relay:
         print(f"[voice] start workflow={ev.get('workflow')}")
         self._session = _VoiceSession(self, self._asr_factory())
         await self._session.begin()        # 立即返回(ASR 连接后台化)
+
+    async def _on_key_action(self, action):
+        """DOWN 键动作上行: 注入回车(enter) / 清空输入框(clear)。
+
+        注入失败静默记日志(与转写注入失败语义一致, 不打断主流程)。
+        """
+        if action not in ("enter", "clear"):
+            print(f"[key] 未知按键动作 {action!r}, 忽略", file=sys.stderr)
+            return
+        try:
+            self._key_action_fn(action)
+        except Exception as e:
+            print(f"[key] 注入失败({action}): {e}", file=sys.stderr)
 
     async def _on_audio_frame(self, frame):
         s = self._session
@@ -813,6 +830,16 @@ def _default_inject_fn(cfg):
     return paste_text
 
 
+def _default_key_action_fn(cfg):
+    """按平台选按键注入后端(契约一致: 单参 action: enter|clear)。"""
+    if sys.platform == "win32":
+        from inject_win import key_action
+        delay = float(cfg.get("inject_focus_delay", 2.0))
+        return lambda action: key_action(action, focus_delay=delay)
+    from inject import key_action
+    return key_action
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="AI Passport 中转: 设备音频 → 火山 ASR → 注入输入框"
@@ -836,6 +863,7 @@ def main():
     relay = Relay(
         transport=_build_transport(cfg),
         inject_fn=_default_inject_fn(cfg),
+        key_action_fn=_default_key_action_fn(cfg),
         timeout=args.timeout,
         do_inject=not (args.no_inject or args.dry_run),
         do_approval=not args.no_approval,

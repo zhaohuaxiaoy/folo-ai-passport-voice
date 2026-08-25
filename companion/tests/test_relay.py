@@ -147,6 +147,16 @@ class FakeInjector:
         self.calls.append(text)
 
 
+class FakeKeyAction:
+    """记录 DOWN 键动作(enter/clear), 不触碰真实注入。"""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, action):
+        self.calls.append(action)
+
+
 class GatedASR(FakeASR):
     """connect 由门控制(测慢握手:ASR 连接未就绪不阻塞事件消费)。"""
 
@@ -381,6 +391,57 @@ async def test_time_sync_downlink_usb():
     t.disconnect_cb()
     await wait_until(task.done, what="断开退出")
     check("校时任务已收束", relay._time_task is None, True)
+
+
+# ---- DOWN 键动作上行(enter/clear → 注入)----
+
+async def test_key_action_downlink():
+    """key.action 上行 → 注入后端按动作调用; 未知动作忽略不注入。"""
+    t = FakeTransport()
+    keyer = FakeKeyAction()
+    relay = Relay(t,
+                  asr_factory=make_fake_asr_factory([], {}),
+                  inject_fn=FakeInjector(), key_action_fn=keyer,
+                  timeout=5, do_approval=False)
+    task = asyncio.create_task(relay.run())
+    await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
+
+    t.notify_event(b'{"event":"key.action","action":"enter"}\n')
+    await wait_until(lambda: keyer.calls == ["enter"], what="回车注入")
+    t.notify_event(b'{"event":"key.action","action":"clear"}\n')
+    await wait_until(lambda: keyer.calls == ["enter", "clear"], what="清空注入")
+    t.notify_event(b'{"event":"key.action","action":"bogus"}\n')
+    await asyncio.sleep(0.05)   # 未知动作路径: 无注入发生
+    check("未知动作不注入", keyer.calls, ["enter", "clear"])
+
+    t.disconnect_cb()
+    await wait_until(task.done, what="断开退出")
+
+
+def test_key_action_mac_dry_run():
+    """Mac key_action dry_run: enter/clear 的 osascript 命令序列。"""
+    import io
+    from contextlib import redirect_stdout
+    from inject import key_action
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        key_action("enter", dry_run=True)
+    out = buf.getvalue()
+    check("Mac enter 打印", "keystroke return" in out, True)
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        key_action("clear", dry_run=True)
+    out = buf.getvalue()
+    check("Mac clear 打印全选", 'keystroke "a" using command down' in out, True)
+    check("Mac clear 打印删除", "key code 51" in out, True)
+
+    try:
+        key_action("bogus")
+        check("未知动作拒绝", False, True)
+    except Exception as e:
+        check("未知动作拒绝", "enter|clear" in str(e), True)
 
 
 async def test_approval_flow():
@@ -880,6 +941,8 @@ async def main():
     await test_voice_flow()
     await test_time_sync_downlink_ble()
     await test_time_sync_downlink_usb()
+    await test_key_action_downlink()
+    test_key_action_mac_dry_run()
     await test_approval_flow()
     await test_ctrl_write_no_response()
     await test_disconnect_cleanup()
