@@ -161,18 +161,34 @@ static void app_task(void *arg)
         app_action_t acts[APP_ACT_MAX];
         bool got = false;
 
-        // 排空当前积压事件(每次 reduce 立即执行其动作)。
+        // 阻塞等首个事件,超时 = 距下一心跳(性能轮):按键/转写下行/TONE_DONE/
+        // 断连事件由生产者直接唤醒,延迟从最坏 ~100ms(原 vTaskDelay 睡到下一
+        // 心跳)降至 ~1ms;心跳 cadence 由阻塞超时兜底,与事件流量独立(息屏/
+        // 超时/秒表节奏不变)。关键边界:心跳已到期(sleep<=0)时非阻塞探针
+        // 只探不睡 —— 先走下方 TICK 归约再睡,绝不把已到期的心跳再拖 100ms。
+        // 排空批量/让出语义在下方循环原样保留。
+        int64_t sleep = (int64_t)next_tick - (int64_t)(esp_timer_get_time() / 1000);
+        BaseType_t have;
+        if (sleep <= 0) {
+            have = xQueueReceive(q, &ev, 0);
+        } else {
+            if (sleep > 200) sleep = APP_TICK_MS;   // esp_timer 回绕兜底(原语义)
+            have = xQueueReceive(q, &ev, pdMS_TO_TICKS((uint32_t)sleep));
+        }
+
+        // 排空当前积压事件(每次 reduce 立即执行其动作;首事件已取出)。
         // 批上限:持续事件洪峰下(如按住按键/流控风暴)无界排空会饿死
         // 低优先级投递方(event_worker/sound_worker)——每 16 条让出 2ms
         // 给它们调度窗口,事件吞吐不变(第 7 轮 F2)。
         int n_batch = 0;
-        while (xQueueReceive(q, &ev, 0) == pdTRUE) {
+        while (have == pdTRUE) {
             got = true;
             now_ms = esp_timer_get_time() / 1000;
             if (ev.type == APP_EV_MODE_SWITCH) {
                 // 射频模式切换不进归约器:先投的断连事件会由本循环继续消费,
                 // 状态机幂等收束后再切射频(避免切换期间渲染/按键被冻结过久)。
                 mode_switch((app_mode_t)ev.u.mode_switch.target);
+                have = xQueueReceive(q, &ev, 0);
                 continue;
             }
             uint8_t n = 0;
@@ -182,6 +198,7 @@ static void app_task(void *arg)
                 vTaskDelay(pdMS_TO_TICKS(2));
                 n_batch = 0;
             }
+            have = xQueueReceive(q, &ev, 0);
         }
 
         // 心跳(与事件独立计时,保证息屏/超时/秒表不依赖事件流量)
@@ -227,13 +244,8 @@ static void app_task(void *arg)
             }
             s_last_render_ms = now_ms;
         }
-
-        // 无事件时睡到下一个心跳,避免空转
-        if (!got) {
-            int64_t sleep = (int64_t)next_tick - (int64_t)(esp_timer_get_time() / 1000);
-            if (sleep <= 0 || sleep > 200) sleep = APP_TICK_MS;
-            vTaskDelay(pdMS_TO_TICKS((uint32_t)sleep));
-        }
+        // 睡眠已由循环顶部阻塞 xQueueReceive 承担(超时 = 距下一心跳):
+        // 事件即到即醒,心跳到期由超时兜底 —— 无独立睡眠段(性能轮)。
     }
 }
 
