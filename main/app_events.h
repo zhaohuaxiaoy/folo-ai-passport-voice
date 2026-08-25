@@ -11,6 +11,10 @@ extern "C" {
 
 esp_err_t app_events_init(void);
 void app_event_post(const app_event_t *ev);   // 非阻塞投递(满则丢弃+日志)
+// 重要事件投递(模式切换断连等):等队列空位最多 timeout_ms(满则等 app_task
+// 消费而非丢弃 —— 关键收束事件不丢)。超时返回 ESP_ERR_TIMEOUT,调用方决定
+// 后续(日志告警继续)。队列未建返回 ESP_ERR_INVALID_STATE。
+esp_err_t app_event_post_important(const app_event_t *ev, uint32_t timeout_ms);
 void *app_events_queue(void);                 // QueueHandle_t,供 app_task 消费
 
 #ifdef __cplusplus

@@ -30,4 +30,14 @@ void app_event_post(const app_event_t *ev) {
     }
 }
 
+esp_err_t app_event_post_important(const app_event_t *ev, uint32_t timeout_ms) {
+    if (!s_queue || !ev) return ESP_ERR_INVALID_STATE;
+    if (xQueueSend(s_queue, ev, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+        ESP_LOGW(TAG, "重要事件投递超时(%u ms),type=%d",
+                 (unsigned)timeout_ms, (int)ev->type);
+        return ESP_ERR_TIMEOUT;
+    }
+    return ESP_OK;
+}
+
 QueueHandle_t app_events_queue(void) { return s_queue; }

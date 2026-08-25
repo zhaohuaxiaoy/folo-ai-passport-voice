@@ -125,11 +125,15 @@ esp_err_t mode_switch(app_mode_t target)
 {
     if (target >= APP_MODE_COUNT || target == s_mode) return ESP_OK;   // 幂等
 
-    // 1. 先投当前通道断连事件:排空循环续跑时状态机幂等收束(停流/回 READY/审批保持)
+    // 1. 先投当前通道断连事件:排空循环续跑时状态机幂等收束(停流/回 READY/审批保持)。
+    //    重要投递:队列满等 app_task 消费(≤500ms)而非丢弃 —— 断连事件丢失则
+    //    状态机不收束,录音/审批悬挂(审查 P2-2);超时兜底日志,切换继续。
     app_event_t d = { .type = (s_mode == APP_MODE_WIFI)  ? APP_EV_WS_DISCONNECTED
                              : (s_mode == APP_MODE_USB)  ? APP_EV_USB_DISCONNECTED
                              : APP_EV_BLE_DISCONNECTED };
-    app_event_post(&d);
+    if (app_event_post_important(&d, 500) != ESP_OK) {
+        ESP_LOGW(TAG, "断连事件投递超时(队列满),切换继续");
+    }
 
     // 2. NVS 持久化:失败中止,射频不动(模式一致性优先)
     esp_err_t e = nvs_settings_set_mode((uint8_t)target);
