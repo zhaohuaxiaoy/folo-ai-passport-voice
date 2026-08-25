@@ -79,7 +79,10 @@ static void on_ws_event(void *handler_arg, esp_event_base_t base, int32_t id, vo
             s_connected = false;
             ESP_LOGW(TAG, "WS 断开 (ev=%d)", (int)id);
             app_event_t ev = { .type = APP_EV_WS_DISCONNECTED };
-            app_event_post(&ev);
+            // 收束关键事件:important 投递,队列满时不丢(性能轮队列 16→8 后
+            // 更关键;与 mode.c 断连投递语义对齐)。事件回调在 WS 客户端任务
+            // 上下文,非 ISR,阻塞 ≤100ms 安全。
+            app_event_post_important(&ev, 100);
         }
         break;
     case WEBSOCKET_EVENT_DATA:
@@ -173,7 +176,7 @@ esp_err_t ws_client_stop(void) {
         s_connected = false;
         ESP_LOGW(TAG, "WS 主动停止");
         app_event_t ev = { .type = APP_EV_WS_DISCONNECTED };
-        app_event_post(&ev);
+        app_event_post_important(&ev, 100);   // 收束关键事件不丢(见上)
     }
     return esp_websocket_client_stop(s_client);
 }

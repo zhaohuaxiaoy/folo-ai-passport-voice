@@ -331,7 +331,10 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg) {
             s_audio_conn = 0xFFFF;
             s_event_subscribed = false;
             app_event_t d = { .type = APP_EV_BLE_DISCONNECTED };
-            app_event_post(&d);
+            // 收束关键事件:important 投递,队列满时不丢(性能轮队列 16→8 后
+            // 更关键;与 mode.c 断连投递语义对齐)。调用在 NimBLE host 任务
+            // 上下文,非 ISR,阻塞 ≤100ms 安全。
+            app_event_post_important(&d, 100);
         }
         start_advertising();
         break;
@@ -347,7 +350,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg) {
             } else {
                 ESP_LOGW(TAG, "EVENT 订阅取消,链路断");
                 app_event_t d = { .type = APP_EV_BLE_DISCONNECTED };
-                app_event_post(&d);
+                app_event_post_important(&d, 100);   // 收束关键事件不丢(见上)
             }
         }
         if (event->subscribe.attr_handle == s_audio_val_handle) {

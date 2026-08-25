@@ -313,7 +313,10 @@ static void usb_read_task(void *arg)
                     if (s_session_up) {
                         s_session_up = false;
                         app_event_t d = { .type = APP_EV_USB_DISCONNECTED };
-                        app_event_post(&d);
+                        // 收束关键事件:important 投递,队列满时不丢(性能轮
+                        // 队列 16→8 后更关键;与 mode.c 断连投递语义对齐)。
+                        // 读任务上下文,非 ISR,阻塞 ≤100ms 安全。
+                        app_event_post_important(&d, 100);
                     }
                 }
             }
