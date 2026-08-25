@@ -52,41 +52,54 @@ static void reset(void) {
     s.last_key_ms = now;
 }
 
-// ---- HOME:▲/▼ 进入 READY 并轮播;● 单击进入 READY ----
+// ---- HOME:● 单击进入 READY;▼ 单击=回车 / 双击=清空;▲ 空闲 ----
 static void test_home_nav(void) {
-    reset();
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 10);
-    assert(s.state == APP_ST_READY);
-    assert(s.workflow == APP_WF_CAPTURE);           // BUILD 上一个是 CAPTURE(回绕)
-    assert(has_action(APP_ACT_SEND_WORKFLOW_SWITCH));
-
-    reset();
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 10);
-    assert(s.state == APP_ST_READY);
-    assert(s.workflow == APP_WF_DEBUG);
-
     reset();
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
     assert(s.state == APP_ST_READY);
-    assert(s.workflow == APP_WF_BUILD);             // OK 进 READY 不改工作流
+    assert(s.workflow == APP_WF_BUILD);             // 工作流固定 build,无切换
+
+    reset();
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 10);
+    assert(s.state == APP_ST_HOME);                // HOME 不切走
+    app_action_t *a = find_action(APP_ACT_SEND_KEY_ACTION);
+    assert(a && a->u.key_action.action == APP_KEY_ENTER);
+
+    reset();
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_DOWN, now + 10);
+    assert(s.state == APP_ST_HOME);
+    a = find_action(APP_ACT_SEND_KEY_ACTION);
+    assert(a && a->u.key_action.action == APP_KEY_CLEAR);
+
+    // ▲ 空闲:无切换、无动作
+    reset();
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 10);
+    assert(s.state == APP_ST_HOME);
+    assert(!has_action(APP_ACT_SEND_KEY_ACTION));
 }
 
-// ---- READY:▲/▼ 轮播 5 工作流并回绕 ----
-static void test_workflow_cycle(void) {
+// ---- READY:▼ 单击=回车 / 双击=清空;OK=PTT;工作流固定 build ----
+static void test_down_enter_clear(void) {
     reset();
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);   // → READY (BUILD)
-    app_workflow_t wf = APP_WF_BUILD;
-    for (int i = 0; i < 5; i++) {
-        reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 10 + i);
-        wf = (app_workflow_t)((wf + 1) % APP_WF_COUNT);
-        assert(s.workflow == wf);
-        app_action_t *a = find_action(APP_ACT_SEND_WORKFLOW_SWITCH);
-        assert(a && a->u.workflow == (uint8_t)wf);
-    }
-    // 5 次后回绕到 BUILD;再按 ▲ 应回到 CAPTURE
-    assert(s.workflow == APP_WF_BUILD);
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 10);
-    assert(s.workflow == APP_WF_CAPTURE);
+    assert(s.state == APP_ST_READY);
+
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 20);
+    app_action_t *a = find_action(APP_ACT_SEND_KEY_ACTION);
+    assert(a && a->u.key_action.action == APP_KEY_ENTER);
+
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_DOWN, now + 30);
+    a = find_action(APP_ACT_SEND_KEY_ACTION);
+    assert(a && a->u.key_action.action == APP_KEY_CLEAR);
+
+    // UP 空闲
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 40);
+    assert(!has_action(APP_ACT_SEND_KEY_ACTION));
+
+    // PTT 不受影响
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 50);
+    assert(s.state == APP_ST_LISTENING);
+    assert(has_action(APP_ACT_SEND_VOICE_START));
 }
 
 // ---- PTT:离线被拒 + 错误音;在线开流 ----
@@ -268,7 +281,7 @@ static void test_timeouts(void) {
     reduce(APP_EV_TICK, s.state_since_ms + 31 * 1000);     // 进入后 31s 超时
     assert(s.state == APP_ST_READY);
     assert(strstr(s.toast, "timeout"));
-    assert(!has_action(APP_ACT_SEND_WORKFLOW_SWITCH));     // 中止路径不该重发工作流
+    assert(!has_action(APP_ACT_SEND_KEY_ACTION));          // 中止路径不该产生上行
 }
 
 static void test_agent_running_timeout(void) {
@@ -827,7 +840,7 @@ static void test_time_set(void) {
 
 int main(void) {
     test_home_nav();
-    test_workflow_cycle();
+    test_down_enter_clear();
     test_ptt_offline_online();
     test_tone_press_produce();
     test_tone_done_idempotent();

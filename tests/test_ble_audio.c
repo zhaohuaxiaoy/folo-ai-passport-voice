@@ -207,7 +207,7 @@ static void test_event_chunks(void) {
     n = app_protocol_voice_end(line, sizeof(line));
     assert_reassembly_line(line, n, 247);
 
-    n = app_protocol_workflow_switch(line, sizeof(line), APP_WF_CAPTURE);
+    n = app_protocol_key_action(line, sizeof(line), APP_KEY_CLEAR);
     assert_reassembly_line(line, n, 247);
 
     n = app_protocol_agent_action(line, sizeof(line), "task_9821", APP_ACTION_APPROVE);

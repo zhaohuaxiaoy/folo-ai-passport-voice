@@ -20,7 +20,8 @@ bool app_protocol_parse(const char *json, size_t len, app_event_t *ev);
 size_t app_protocol_device_hello(char *buf, size_t cap, int proto);
 size_t app_protocol_voice_start(char *buf, size_t cap, app_workflow_t wf);
 size_t app_protocol_voice_end(char *buf, size_t cap);
-size_t app_protocol_workflow_switch(char *buf, size_t cap, app_workflow_t wf);
+// 上行按键动作(enter/clear,PC client 执行注入;见 key-remap 任务)
+size_t app_protocol_key_action(char *buf, size_t cap, app_key_action_t action);
 // decision: app_approval_decision_t (approve/reject/details)
 size_t app_protocol_agent_action(char *buf, size_t cap, const char *task_id,
                                  uint8_t decision);

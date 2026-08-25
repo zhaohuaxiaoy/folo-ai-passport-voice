@@ -75,7 +75,6 @@ void app_state_snapshot(const app_state_t *s, uint64_t now_ms, app_ui_snapshot_t
     str_cpy(snap->approval_target, sizeof(snap->approval_target), s->approval_target);
     str_cpy(snap->approval_diff, sizeof(snap->approval_diff), s->approval_diff);
     snap->approval_risk    = s->approval_risk;
-    snap->approval_details = s->approval_details;
     if (s->toast[0] && s->toast_until_ms > 0) {
         str_cpy(snap->toast, sizeof(snap->toast), s->toast);
     }
@@ -87,17 +86,19 @@ void app_state_snapshot(const app_state_t *s, uint64_t now_ms, app_ui_snapshot_t
     }
 }
 
-// 工作流轮播(▲ 上一个 / ▼ 下一个)
-static void cycle_workflow(app_state_t *s, int dir) {
-    s->workflow = (app_workflow_t)((s->workflow + dir + APP_WF_COUNT) % APP_WF_COUNT);
+// DOWN 键动作(单击=回车 / 双击=清空):上行给 PC client 执行注入。
+// 工作流切换已取消(2026-08-25 按键重映射),工作流固定 BUILD。
+static void send_key_action(app_state_t *s, app_key_action_t action,
+                            app_action_t *out, uint8_t *n, uint8_t max) {
+    (void)s;
+    app_action_t a = { .type = APP_ACT_SEND_KEY_ACTION };
+    a.u.key_action.action = (uint8_t)action;
+    emit(out, n, max, a);
 }
 
 static void go_ready(app_state_t *s, uint64_t now_ms, app_action_t *out, uint8_t *n, uint8_t max) {
     s->state = APP_ST_READY;
     s->state_since_ms = now_ms;
-    app_action_t a = { .type = APP_ACT_SEND_WORKFLOW_SWITCH };
-    a.u.workflow = (uint8_t)s->workflow;
-    emit(out, n, max, a);
     app_action_t r = { .type = APP_ACT_UI_REFRESH };
     emit(out, n, max, r);
 }
@@ -132,22 +133,20 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
 
     switch (s->state) {
     case APP_ST_HOME:
-        if (ev->type == APP_EV_KEY_CLICK && (b == APP_BTN_UP || b == APP_BTN_DOWN)) {
-            cycle_workflow(s, b == APP_BTN_UP ? -1 : +1);
+        if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_OK) {
             go_ready(s, now_ms, out, n, max);
-        } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_OK) {
-            go_ready(s, now_ms, out, n, max);
+        } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
+            send_key_action(s, APP_KEY_ENTER, out, n, max);
+        } else if (ev->type == APP_EV_KEY_DOUBLE && b == APP_BTN_DOWN) {
+            send_key_action(s, APP_KEY_CLEAR, out, n, max);
         }
         break;
 
     case APP_ST_READY:
-        if (ev->type == APP_EV_KEY_CLICK && (b == APP_BTN_UP || b == APP_BTN_DOWN)) {
-            cycle_workflow(s, b == APP_BTN_UP ? -1 : +1);
-            app_action_t a = { .type = APP_ACT_SEND_WORKFLOW_SWITCH };
-            a.u.workflow = (uint8_t)s->workflow;
-            emit(out, n, max, a);
-            app_action_t r = { .type = APP_ACT_UI_REFRESH };
-            emit(out, n, max, r);
+        if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
+            send_key_action(s, APP_KEY_ENTER, out, n, max);
+        } else if (ev->type == APP_EV_KEY_DOUBLE && b == APP_BTN_DOWN) {
+            send_key_action(s, APP_KEY_CLEAR, out, n, max);
         } else if (ev->type == APP_EV_KEY_PRESS && b == APP_BTN_OK) {
             if (!s->link_up) {
                 set_toast(s, now_ms, "OFFLINE - PTT blocked");
@@ -245,19 +244,22 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             app_action_t r = { .type = APP_ACT_UI_REFRESH };
             emit(out, n, max, r);
         } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
-            s->approval_details = !s->approval_details;
-            app_action_t r = { .type = APP_ACT_UI_REFRESH };
-            emit(out, n, max, r);
+            send_key_action(s, APP_KEY_ENTER, out, n, max);
+        } else if (ev->type == APP_EV_KEY_DOUBLE && b == APP_BTN_DOWN) {
+            send_key_action(s, APP_KEY_CLEAR, out, n, max);
         }
         break;
 
     case APP_ST_DONE:
-        if (ev->type == APP_EV_KEY_CLICK && (b == APP_BTN_OK || b == APP_BTN_DOWN)) {
+        if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_OK) {
             s->state = APP_ST_HOME;
             s->state_since_ms = now_ms;
-            s->approval_details = false;
             app_action_t r = { .type = APP_ACT_UI_REFRESH };
             emit(out, n, max, r);
+        } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
+            send_key_action(s, APP_KEY_ENTER, out, n, max);
+        } else if (ev->type == APP_EV_KEY_DOUBLE && b == APP_BTN_DOWN) {
+            send_key_action(s, APP_KEY_CLEAR, out, n, max);
         }
         break;
 
@@ -406,7 +408,6 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         str_cpy(s->approval_target, sizeof(s->approval_target), ev->u.approval.target);
         str_cpy(s->approval_diff, sizeof(s->approval_diff), ev->u.approval.diff_summary);
         s->approval_risk = ev->u.approval.risk < APP_RISK_COUNT ? ev->u.approval.risk : APP_RISK_MEDIUM;
-        s->approval_details = false;
         s->state = APP_ST_APPROVAL;
         s->state_since_ms = now_ms;
         app_action_t t = { .type = APP_ACT_PLAY_TONE };

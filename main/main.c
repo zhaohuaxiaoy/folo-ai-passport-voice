@@ -80,9 +80,9 @@ static void run_actions(const app_action_t *acts, uint8_t n)
             len = app_protocol_device_status(buf, sizeof(buf), s_last_drop_count);
             send_event_line(buf, len);
             break;
-        case APP_ACT_SEND_WORKFLOW_SWITCH:
-            len = app_protocol_workflow_switch(buf, sizeof(buf),
-                                               (app_workflow_t)a->u.workflow);
+        case APP_ACT_SEND_KEY_ACTION:
+            len = app_protocol_key_action(buf, sizeof(buf),
+                                          (app_key_action_t)a->u.key_action.action);
             send_event_line(buf, len);
             break;
         case APP_ACT_SEND_AGENT_ACTION:

@@ -214,11 +214,11 @@ size_t app_protocol_device_status(char *buf, size_t cap, uint32_t drop_count) {
     return n;
 }
 
-size_t app_protocol_workflow_switch(char *buf, size_t cap, app_workflow_t wf) {
+size_t app_protocol_key_action(char *buf, size_t cap, app_key_action_t action) {
     cJSON *o = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "event", "workflow.switch");
-    cJSON_AddStringToObject(o, "current",
-                            wf < APP_WF_COUNT ? WF_WIRE_NAMES[wf] : "build");
+    cJSON_AddStringToObject(o, "event", "key.action");
+    cJSON_AddStringToObject(o, "action",
+                            action == APP_KEY_CLEAR ? "clear" : "enter");
     size_t n = serialize(o, buf, cap);
     cJSON_Delete(o);
     return n;

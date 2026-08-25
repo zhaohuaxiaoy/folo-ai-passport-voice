@@ -21,6 +21,12 @@ typedef enum {
 
 extern const char *const APP_WORKFLOW_NAMES[APP_WF_COUNT];
 
+// ---------------- 按键动作(下行注入,由 PC client 执行) ----------------
+typedef enum {
+    APP_KEY_ENTER = 0,   // 输入框回车(提交)
+    APP_KEY_CLEAR,       // 清空输入框全部文字
+} app_key_action_t;
+
 // ---------------- 状态 ----------------
 // 注意:命名为 app_stage_t 而非 app_state_t —— 后者是 app_state.h 里的完整状态结构体。
 typedef enum {
@@ -168,7 +174,7 @@ typedef enum {
     APP_ACT_UI_SCREEN_ON,
     APP_ACT_SEND_VOICE_START,
     APP_ACT_SEND_VOICE_END,
-    APP_ACT_SEND_WORKFLOW_SWITCH,
+    APP_ACT_SEND_KEY_ACTION,   // 上行按键动作(enter/clear,PC client 执行注入)
     APP_ACT_SEND_AGENT_ACTION,
     APP_ACT_STREAM_START,
     APP_ACT_STREAM_STOP,
@@ -185,7 +191,7 @@ typedef struct {
     app_action_type_t type;
     union {
         uint8_t tone;                                   // PLAY_TONE
-        uint8_t workflow;                               // SEND_WORKFLOW_SWITCH(app_workflow_t)
+        struct { uint8_t action; } key_action;          // SEND_KEY_ACTION(app_key_action_t)
         struct {
             char task_id[APP_TASK_ID_MAX];
             uint8_t decision;                           // app_approval_decision_t
@@ -219,7 +225,6 @@ typedef struct {
     char           approval_target[APP_TARGET_MAX];
     char           approval_diff[APP_DIFF_MAX];
     uint8_t        approval_risk;   // app_risk_t
-    bool           approval_details; // ▼ 展开的 Diff 详情视图
     uint32_t       elapsed_ms;      // 当前状态已持续时长(主循环在快照时补)
     char           toast[APP_TOAST_MAX];
 } app_ui_snapshot_t;

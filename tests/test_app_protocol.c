@@ -196,10 +196,15 @@ static void test_serialize(void) {
     assert(n > 0);
     assert(strstr(buf, "\"event\":\"voice.end\""));
 
-    n = app_protocol_workflow_switch(buf, sizeof(buf), APP_WF_DEBUG);
+    n = app_protocol_key_action(buf, sizeof(buf), APP_KEY_ENTER);
     assert(n > 0);
-    assert(strstr(buf, "\"event\":\"workflow.switch\""));
-    assert(strstr(buf, "\"current\":\"debug\""));
+    assert(strstr(buf, "\"event\":\"key.action\""));
+    assert(strstr(buf, "\"action\":\"enter\""));
+
+    n = app_protocol_key_action(buf, sizeof(buf), APP_KEY_CLEAR);
+    assert(n > 0);
+    assert(strstr(buf, "\"event\":\"key.action\""));
+    assert(strstr(buf, "\"action\":\"clear\""));
 
     n = app_protocol_agent_action(buf, sizeof(buf), "task_9821", APP_ACTION_APPROVE);
     assert(n > 0);
