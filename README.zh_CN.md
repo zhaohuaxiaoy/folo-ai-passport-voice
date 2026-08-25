@@ -64,17 +64,30 @@ FoloToy AI Passport 是一个面向 AI agent 的开放式可穿戴 AI 硬件，�
 
 ## 首次运行体验（面向普通用户）
 
-非开发者可以不碰终端直接上手：
+非开发者可以不碰终端直接上手。Companion 是跨平台向导
+（macOS Apple Silicon + Windows 10/11；Windows 打包需要 Windows 构建机，
+本仓库不产 Setup.exe）：
 
-1. **下载**打包好的应用（macOS `dist/AI Passport.app` / Windows `dist/AI Passport.exe`，用 `companion/build/pack.py` 构建，或使用发布的构建产物）。
-2. **启动**：向导自动扫描 AI Passport 设备（BLE）。
-3. **点击连接**：后台自动启动 relay 全流程（ASR 流式转写、实时预览、文本注入）。
-4. **授权**（仅 macOS）：辅助功能/蓝牙权限缺失时，向导列出缺失项并一键打开对应系统设置面板。
-5. **完成**：状态页显示 连接通道 / ASR 后端 / 注入模式 / 按键说明（按住 ● 讲话、松开发送；双击 OK 清空；DOWN 回车）。
+1. **下载**打包好的应用（macOS `dist/AI Passport.app`，用 `companion/build/pack.py` 构建，或使用发布的构建产物）。
+2. **启动** —— 5 步向导：
+   - **欢迎** — 设备是什么、需要准备什么。
+   - **发现设备** — 按 **BLE → WiFi → USB** 优先级自动探测（也可手动选通道）。
+   - **ASR 配置** — 填火山 API Key 并 **测试连接**（真实零音频 WebSocket 握手，
+     不回显密钥）。
+   - **授权**（仅 macOS）— 辅助功能/蓝牙权限缺失时列出缺失项并一键打开系统设置。
+   - **完成** — 状态页显示 连接通道 / ASR 后端 / 注入模式 / 按键说明
+     （按住 ● 讲话、松开发送；双击 OK 清空；DOWN 回车）。
+3. **Advanced 诊断**（状态页 → Advanced）— USB 通道可用完整设备 console 命令面
+   （Mode / WiFi / WebSocket / mDNS / Logs / System / Factory Reset / reboot，
+   破坏性命令有确认对话框）；BLE/WiFi 通道只读显示运行状态。
+4. 连接成功后驻留**系统托盘**（macOS 菜单栏 / Windows 托盘）：状态行
+   （连接 / 设备 / 聆听）、设置（重开窗口）、诊断、退出。关闭窗口只隐藏到
+   托盘，托盘 Quit 才完整退出。
 
-首次运行自动生成 `companion/config.local.json`（channel / inject_mode 等），
-已有字段（含火山 API key）原样保留。直接跑源码而非打包产物：
-`python3 companion/fre_app.py`（`--dry-run` 可用假链路走通全流程）。
+首次运行自动生成 `companion/config.local.json`（channel / inject_mode /
+火山 API key），已有字段原样保留。直接跑源码而非打包产物：
+`python3 companion/fre_app.py`（`--dry-run` 假链路走通全流程；
+`--no-tray` 不启动托盘）。
 
 ## 用一句需求开始开发
 

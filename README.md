@@ -64,15 +64,37 @@ Requirements involving these capabilities must begin with a schematic, board rev
 
 ## First Run Experience (for end users)
 
-Non-developers can get started without touching a terminal:
+Non-developers can get started without touching a terminal. The companion is a
+cross-platform wizard (macOS Apple Silicon + Windows 10/11; Windows packaging
+requires a Windows build machine and is not produced here):
 
-1. **Download** the packaged app (`dist/AI Passport.app` on macOS, `dist/AI Passport.exe` on Windows — build with `companion/build/pack.py`, or use a released build).
-2. **Launch** it: the wizard auto-scans for the AI Passport device (BLE).
-3. **Click Connect** — the relay starts in the background (ASR streaming, live transcript preview, text injection).
-4. **Authorize** (macOS only): if Accessibility or Bluetooth permission is missing, the wizard shows what to enable and opens the right System Settings pane.
-5. **Done** — the status page shows connection channel, ASR backend, injection mode, and the button layout (hold ● to talk, release to send; double-click OK to clear; DOWN = Enter).
+1. **Download** the packaged app (`dist/AI Passport.app` on macOS — build with `companion/build/pack.py`, or use a released build).
+2. **Launch** it — the 5-step wizard opens:
+   - **Welcome** — what the device does and what to prepare.
+   - **Discover** — auto-probes the device over **BLE → WiFi → USB** (in that
+     order); you can still pick a channel manually.
+   - **ASR config** — paste your Volcano API key and **Test connection**
+     (real zero-audio WebSocket handshake, no key echoed back).
+   - **Authorize** (macOS only) — if Accessibility or Bluetooth permission is
+     missing, the wizard lists what to enable and opens the right System
+     Settings pane.
+   - **Done** — the status page shows connection channel, ASR backend,
+     injection mode, and the button layout (hold ● to talk, release to send;
+     double-click OK to clear; DOWN = Enter).
+3. **Advanced diagnostics** (status page → *Advanced*) — on the USB channel the
+   full device console command surface is available (Mode / WiFi / WebSocket /
+   mDNS / Logs / System / Factory Reset / reboot, with confirmation dialogs for
+   destructive ones); on BLE/WiFi channels it shows read-only runtime state.
+4. After connecting, the app stays in the **system tray** (macOS menu bar /
+   Windows tray): status rows (connected / device / listening), Settings
+   (re-open the window), Diagnostics, Quit. Closing the window hides to tray;
+   Quit exits fully.
 
-First run writes `companion/config.local.json` automatically (channel, `inject_mode`, etc.). Existing fields — including the Volcano API key — are preserved. If you run the source directly instead of the packaged app: `python3 companion/fre_app.py` (or `--dry-run` to walk through the flow with a fake link).
+First run writes `companion/config.local.json` automatically (channel,
+`inject_mode`, Volcano API key when provided). Existing fields are preserved.
+If you run the source directly instead of the packaged app:
+`python3 companion/fre_app.py` (`--dry-run` walks the whole flow with a fake
+link; `--no-tray` skips the tray).
 
 ## Start development with one requirement
 
