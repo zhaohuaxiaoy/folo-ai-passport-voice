@@ -22,6 +22,7 @@ import threading
 import time
 import tkinter as tk
 from tkinter import font as tkfont
+from tkinter import messagebox
 
 import ttkbootstrap as ttk
 
@@ -32,6 +33,19 @@ THEME = "litera"
 CHANNEL_LABELS = (("ble", "蓝牙 BLE"), ("wifi", "WiFi"), ("usb", "USB 有线"))
 INJECT_LABELS = {"unicode": "Unicode 键盘注入", "clipboard": "剪贴板",
                  "auto": "Auto (unicode 优先)"}
+
+# 诊断页快捷命令(设备 console 命令表, 与 main/console_cmds.c 对齐):
+# (按钮名, 命令, 需确认?)  前两项需确认: 恢复出厂 / 重启
+DIAG_QUICK = (
+    ("Mode", "mode", False),
+    ("WiFi", "wifi status", False),
+    ("WebSocket", "ws status", False),
+    ("mDNS", "mdns", False),
+    ("Logs", "log", False),
+    ("System", "st", False),
+    ("Factory Reset", "factory", True),
+    ("reboot", "reboot", True),
+)
 
 
 class _FakeTransport:
@@ -55,6 +69,10 @@ class _FakeTransport:
     async def disconnect(self):
         pass
 
+    async def send_syscmd(self, line):
+        """伪装 SerialTransport: dry-run 下诊断命令有假响应。"""
+        return f"[fake] {line}"
+
 
 class _FakeInjector:
     """dry-run 专用: 注入后端空实现(不碰剪贴板/键盘)。"""
@@ -67,7 +85,7 @@ class FREApp:
     """tkinter 向导窗口。页面名与测试/冒烟断言耦合。"""
 
     PAGES = ("welcome", "discover", "asr_config", "permission", "connecting",
-             "status")
+             "status", "diagnostics")
 
     def __init__(self, root, dry_run=False, no_tray=False):
         self.root = root
@@ -108,6 +126,7 @@ class FREApp:
         self._build_permission_page()
         self._build_connecting_page()
         self._build_status_page()
+        self._build_diagnostics_page()
 
         self._status_var = tk.StringVar(value="")
         ttk.Label(self.root, textvariable=self._status_var,
@@ -216,8 +235,43 @@ class FREApp:
             self._row_vars[label] = v
             ttk.Label(row, textvariable=v, font=self._font_body,
                       bootstyle="success").pack(side="left")
+        self._diag_btn = ttk.Button(p, text="Advanced 诊断", bootstyle="info",
+                                    command=self.show_diagnostics)
+        self._diag_btn.pack(pady=(4, 4))
         ttk.Button(p, text="重新设置", bootstyle="secondary",
-                   command=self.on_reset).pack(pady=16)
+                   command=self.on_reset).pack(pady=4)
+
+    def _build_diagnostics_page(self):
+        p = self._page("diagnostics")
+        ttk.Label(p, text="设备诊断 (Advanced)", font=self._font_title
+                  ).pack(pady=(0, 8))
+        self._diag_hint = tk.StringVar(value="")
+        ttk.Label(p, textvariable=self._diag_hint, font=self._font_hint,
+                  bootstyle="secondary", wraplength=380, justify="left",
+                  padding=(0, 6)).pack(anchor="w")
+        btns = ttk.Frame(p)
+        btns.pack(fill="x", pady=6)
+        for i, (label, cmd, needs_conf) in enumerate(DIAG_QUICK):
+            ttk.Button(btns, text=label, bootstyle="info-outline",
+                       command=lambda c=cmd, n=needs_conf:
+                           self.diag_cmd(c, confirm=n)
+                       ).grid(row=i // 4, column=i % 4, padx=2, pady=2,
+                              sticky="ew")
+        for col in range(4):
+            btns.columnconfigure(col, weight=1)
+        self._diag_entry_var = tk.StringVar()
+        ttk.Entry(p, textvariable=self._diag_entry_var,
+                  font=self._font_body).pack(fill="x", pady=(4, 2))
+        ttk.Button(p, text="执行", bootstyle="primary",
+                   command=self.diag_run_entry).pack(anchor="e")
+        self._diag_out = tk.Text(p, height=10, font=tkfont.Font(
+            family="Menlo", size=11), state="disabled")
+        sb = ttk.Scrollbar(p, orient="vertical", command=self._diag_out.yview)
+        self._diag_out.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self._diag_out.pack(fill="both", expand=True, pady=(6, 0))
+        ttk.Button(p, text="返回", bootstyle="secondary",
+                   command=lambda: self.show_page("status")).pack(pady=6)
 
     # ---------------- 页面切换 ----------------
 
@@ -368,6 +422,8 @@ class FREApp:
             relay = Relay(transport,
                           inject_fn=inject_fn, key_action_fn=key_action_fn,
                           on_phase=lambda ph: self.phase_q.put(("phase", ph)))
+            self._relay = relay                      # 诊断页命令桥用
+            self.syscmd_available = getattr(relay, "_syscmd", None) is not None
             # BLE 直接连已发现地址; WiFi/USB 由 relay 内部扫描/等待
             self.relay_task = loop.create_task(
                 relay.run(self.device_addr if self.channel == "ble" else None))
@@ -393,6 +449,8 @@ class FREApp:
                     self._on_asr_test(payload)
                 elif kind == "phase":
                     self._on_phase(payload)
+                elif kind == "syscmd_resp":
+                    self._on_syscmd_resp(payload)
                 elif kind == "error":
                     self.last_error = payload
                 elif kind == "relay_done":
@@ -426,6 +484,63 @@ class FREApp:
             self._loop.call_soon_threadsafe(self.relay_task.cancel)
         self.set_status("")
         self.start_discover()
+
+    # ---------------- 诊断页 ----------------
+
+    def show_diagnostics(self):
+        syscmd_ok = getattr(self, "syscmd_available", False)
+        if syscmd_ok:
+            self._diag_hint.set(
+                f"USB 命令面已连接(channel={self.channel}), 可直接执行设备"
+                " console 命令。Factory Reset / reboot 需确认。")
+        else:
+            self._diag_hint.set(
+                f"当前通道 {self.channel.upper()} 无 SYS 命令面 "
+                "(仅 USB 通道支持完整诊断); 以下为只读运行状态。")
+        self.show_page("diagnostics")
+
+    def _diag_append(self, text):
+        self._diag_out.configure(state="normal")
+        self._diag_out.insert("end", text.rstrip("\n") + "\n")
+        self._diag_out.see("end")
+        self._diag_out.configure(state="disabled")
+
+    def diag_run_entry(self):
+        cmd = self._diag_entry_var.get().strip()
+        if not cmd:
+            return
+        self.diag_cmd(cmd)
+
+    def diag_cmd(self, cmd, confirm=False):
+        if confirm:
+            sure = messagebox.askyesno(
+                "确认", f"命令 {cmd} 将作用于设备:\n"
+                        f"{'恢复出厂(清空 NVS)并重启' if cmd == 'factory' else '重启设备'}。"
+                        "确认执行?")
+            if not sure:
+                return
+        self._diag_append(f"> {cmd}")
+        if not getattr(self, "syscmd_available", False):
+            self._diag_append("! 当前通道无 SYS 命令面(仅 USB 通道支持)")
+            return
+        relay = getattr(self, "_relay", None)
+        if relay is None or self.relay_task is None or self.relay_task.done():
+            self._diag_append("! relay 未运行")
+            return
+        fut = asyncio.run_coroutine_threadsafe(relay.run_syscmd(cmd),
+                                                self._loop)
+
+        def on_done(f):
+            try:
+                resp = f.result()
+                self.phase_q.put(("syscmd_resp", resp))
+            except Exception as e:  # noqa: BLE001
+                self.phase_q.put(("syscmd_resp", f"! {e}"))
+
+        fut.add_done_callback(on_done)
+
+    def _on_syscmd_resp(self, resp):
+        self._diag_append(str(resp))
 
     def on_close(self):
         """收束后台 relay(取消 task + 等线程退出), 无残留。"""
