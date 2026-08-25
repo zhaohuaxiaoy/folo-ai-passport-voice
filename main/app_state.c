@@ -131,22 +131,25 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         return;
     }
 
+    // OK 双击 = 清空输入框(全局语义,各态统一;录音态不会收到双击 —— 双击的
+    // 第二按落在松开后的 TRANSCRIBING,DOUBLE 事件在会话结束后才上报)。
+    if (ev->type == APP_EV_KEY_DOUBLE && b == APP_BTN_OK) {
+        send_key_action(s, APP_KEY_CLEAR, out, n, max);
+        return;
+    }
+
     switch (s->state) {
     case APP_ST_HOME:
         if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_OK) {
             go_ready(s, now_ms, out, n, max);
         } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
             send_key_action(s, APP_KEY_ENTER, out, n, max);
-        } else if (ev->type == APP_EV_KEY_DOUBLE && b == APP_BTN_DOWN) {
-            send_key_action(s, APP_KEY_CLEAR, out, n, max);
         }
         break;
 
     case APP_ST_READY:
         if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
             send_key_action(s, APP_KEY_ENTER, out, n, max);
-        } else if (ev->type == APP_EV_KEY_DOUBLE && b == APP_BTN_DOWN) {
-            send_key_action(s, APP_KEY_CLEAR, out, n, max);
         } else if (ev->type == APP_EV_KEY_PRESS && b == APP_BTN_OK) {
             if (!s->link_up) {
                 set_toast(s, now_ms, "OFFLINE - PTT blocked");
@@ -172,27 +175,9 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         break;
 
     case APP_ST_LISTENING:
-        // 松开不立即结束,进入"待定结束"——单击窗口内再按 = 双击取消,窗口到期 = 发送。
-        // 原因:iot_button 的 SINGLE/DOUBLE_CLICK 都要等双击窗口才上报,若松开即结束,
-        // 双击的第二次按键必然落在 TRANSCRIBING(忽略),"双击取消"就成了死代码。
+        // 松开立即结束并发送(无取消窗口)。双击的第二按落在 TRANSCRIBING
+        // (录音已发送),其 DOUBLE 事件由上方全局分支处理为"清空输入框"。
         if (ev->type == APP_EV_KEY_RELEASE && b == APP_BTN_OK) {
-            s->ptt_pending_end = true;
-            app_action_t r = { .type = APP_ACT_UI_REFRESH };
-            emit(out, n, max, r);
-        } else if (ev->type == APP_EV_KEY_PRESS && b == APP_BTN_OK && s->ptt_pending_end) {
-            // 双击的第二次按下:立即取消(不用等 DOUBLE 事件,响应更快)。
-            // CANCEL 清残留(防流入下一次会话) + voice.end 结束 Mac 端会话
-            // (否则 relay 的 ASR 会话悬挂到超时)。
-            app_action_t st = { .type = APP_ACT_STREAM_CANCEL };
-            emit(out, n, max, st);
-            app_action_t v = { .type = APP_ACT_SEND_VOICE_END };
-            emit(out, n, max, v);
-            s->ptt_pending_end = false;
-            set_toast(s, now_ms, "Recording cancelled");
-            abort_to_ready(s, now_ms, NULL, out, n, max); // toast 已设,不再覆盖
-        } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_OK) {
-            // 单击窗口到期:正式结束并发送
-            s->ptt_pending_end = false;
             app_action_t st = { .type = APP_ACT_STREAM_STOP };
             emit(out, n, max, st);
             app_action_t v = { .type = APP_ACT_SEND_VOICE_END };
@@ -205,15 +190,6 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             s->agent_state_name[0] = '\0';   // 新会话开始,清除旧 agent 状态
             app_action_t r = { .type = APP_ACT_UI_REFRESH };
             emit(out, n, max, r);
-        } else if (ev->type == APP_EV_KEY_DOUBLE && b == APP_BTN_OK) {
-            // 防御分支:某些驱动在双击检测中抑制第二次 PRESS_DOWN,届时由 DOUBLE 取消
-            app_action_t st = { .type = APP_ACT_STREAM_CANCEL };
-            emit(out, n, max, st);
-            app_action_t v = { .type = APP_ACT_SEND_VOICE_END };
-            emit(out, n, max, v);
-            s->ptt_pending_end = false;
-            set_toast(s, now_ms, "Recording cancelled");
-            abort_to_ready(s, now_ms, NULL, out, n, max);
         }
         break;
 
@@ -245,8 +221,6 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             emit(out, n, max, r);
         } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
             send_key_action(s, APP_KEY_ENTER, out, n, max);
-        } else if (ev->type == APP_EV_KEY_DOUBLE && b == APP_BTN_DOWN) {
-            send_key_action(s, APP_KEY_CLEAR, out, n, max);
         }
         break;
 
@@ -258,8 +232,6 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             emit(out, n, max, r);
         } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
             send_key_action(s, APP_KEY_ENTER, out, n, max);
-        } else if (ev->type == APP_EV_KEY_DOUBLE && b == APP_BTN_DOWN) {
-            send_key_action(s, APP_KEY_CLEAR, out, n, max);
         }
         break;
 
@@ -325,7 +297,6 @@ static void handle_link_down(app_state_t *s, uint64_t now_ms, const char *toast,
     set_toast(s, now_ms, toast);   // 任何状态都提示断开(审批保持等场景也可见)
     switch (s->state) {
     case APP_ST_LISTENING:
-        s->ptt_pending_end = false;
         abort_to_ready(s, now_ms, NULL, out, n, max);   // toast 已设,不再覆盖
         break;
     case APP_ST_TRANSCRIBING:
@@ -401,7 +372,6 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             emit(out, out_n, max, st);
             app_action_t ve = { .type = APP_ACT_SEND_VOICE_END };
             emit(out, out_n, max, ve);
-            s->ptt_pending_end = false;
         }
         str_cpy(s->task_id, sizeof(s->task_id), ev->u.approval.task_id);
         str_cpy(s->approval_title, sizeof(s->approval_title), ev->u.approval.title);

@@ -52,7 +52,7 @@ static void reset(void) {
     s.last_key_ms = now;
 }
 
-// ---- HOME:● 单击进入 READY;▼ 单击=回车 / 双击=清空;▲ 空闲 ----
+// ---- HOME:● 单击进入 READY;● 双击=清空;▼ 单击=回车;▲ 空闲 ----
 static void test_home_nav(void) {
     reset();
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
@@ -67,7 +67,12 @@ static void test_home_nav(void) {
 
     reset();
     reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_DOWN, now + 10);
-    assert(s.state == APP_ST_HOME);
+    assert(s.state == APP_ST_HOME);                // DOWN 双击无动作
+    assert(!has_action(APP_ACT_SEND_KEY_ACTION));
+
+    reset();
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 10);
+    assert(s.state == APP_ST_HOME);                // OK 双击=清空,不切走
     a = find_action(APP_ACT_SEND_KEY_ACTION);
     assert(a && a->u.key_action.action == APP_KEY_CLEAR);
 
@@ -78,7 +83,7 @@ static void test_home_nav(void) {
     assert(!has_action(APP_ACT_SEND_KEY_ACTION));
 }
 
-// ---- READY:▼ 单击=回车 / 双击=清空;OK=PTT;工作流固定 build ----
+// ---- READY:▼ 单击=回车 / 双击无动作;OK=PTT / 双击=清空;工作流固定 build ----
 static void test_down_enter_clear(void) {
     reset();
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);   // → READY (BUILD)
@@ -89,8 +94,7 @@ static void test_down_enter_clear(void) {
     assert(a && a->u.key_action.action == APP_KEY_ENTER);
 
     reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_DOWN, now + 30);
-    a = find_action(APP_ACT_SEND_KEY_ACTION);
-    assert(a && a->u.key_action.action == APP_KEY_CLEAR);
+    assert(!has_action(APP_ACT_SEND_KEY_ACTION));    // DOWN 双击已移除
 
     // UP 空闲
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 40);
@@ -160,24 +164,23 @@ static void test_tone_done_idempotent(void) {
     assert(on == 0);                                       // 幂等:无动作
 }
 
-// ---- S3:双击取消在滴声期间,迟到的 TONE_DONE 必须忽略(不误开流) ----
-static void test_tone_done_late_after_cancel(void) {
+// ---- S3:松开即发后,滴声期间迟到的 TONE_DONE 必须忽略(不误开流) ----
+static void test_tone_done_late_after_send(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
     reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);    // 按下 #1:入 LISTENING,未开流
     assert(!has_action(APP_ACT_STREAM_START));
-    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 30);  // 待定
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 200);   // 按下 #2:取消 → READY
-    assert(s.state == APP_ST_READY);
+    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 30);  // 松开:立即发送
+    assert(s.state == APP_ST_TRANSCRIBING);
     app_event_t ev = { .type = APP_EV_TONE_DONE };
     app_state_reduce(&s, &ev, now + 210, out, &on);        // 滴声播完事件此刻才到
     assert(on == 0);                                       // 已离开 LISTENING → 忽略
     assert(!has_action(APP_ACT_STREAM_START));
 }
 
-// ---- S3:单击发送完整序列——先 TONE_DONE 开流,单击窗口到期才停流 ----
-static void test_tone_single_tap_order(void) {
+// ---- S3:松开即发完整序列——先 TONE_DONE 开流,RELEASE 立即停流 ----
+static void test_tone_release_sends_order(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
@@ -186,10 +189,9 @@ static void test_tone_single_tap_order(void) {
     app_state_reduce(&s, &ev, now + 110, out, &on);        // 滴声播完 → 开流
     assert(has_action(APP_ACT_STREAM_START));
     assert(s.stream_started == true);
-    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 3000); // 待定
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 3300);  // 窗口到期 → 发送
+    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 3000); // 松开:立即停流发送
     assert(s.state == APP_ST_TRANSCRIBING);
-    assert(has_action(APP_ACT_STREAM_STOP));               // 停流仍由 CLICK 产出
+    assert(has_action(APP_ACT_STREAM_STOP));               // 停流由 RELEASE 产出
     assert_action_order(APP_ACT_STREAM_STOP, APP_ACT_SEND_VOICE_END);
 }
 
@@ -223,17 +225,14 @@ static void test_tone_done_ignored_elsewhere(void) {
     assert(on == 0);
 }
 
-// ---- LISTENING:松开进入"待定结束",单击到期发送,窗口内再按 = 取消 ----
-static void test_listening_single_tap(void) {
+// ---- LISTENING:松开立即结束并发送 ----
+static void test_listening_release_sends(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
     reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);    // 开录
     assert(s.state == APP_ST_LISTENING);
-    // 真实事件序列:按下 → 松开(不立即结束,等单击窗口) → 单击
-    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 3000);
-    assert(s.state == APP_ST_LISTENING);                   // 松开不结束,待定
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 3300);  // 窗口到期 → 正式发送
+    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 3000); // 松开:立即发送
     assert(s.state == APP_ST_TRANSCRIBING);
     assert(has_action(APP_ACT_STREAM_STOP));
     assert(has_action(APP_ACT_SEND_VOICE_END));
@@ -242,29 +241,35 @@ static void test_listening_single_tap(void) {
     assert(t && t->u.tone == APP_TONE_SEND);
 }
 
-// ---- LISTENING:双击取消(真实事件序列,第二次按下即取消) ----
-static void test_listening_double_cancel(void) {
+// ---- OK 双击 = 清空输入框(录音松开已发送,DOUBLE 事件全局处理) ----
+static void test_ok_double_clears_input(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
     reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);    // 按下 #1:开录
-    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 30);  // 松开 #1:待定
-    assert(s.state == APP_ST_LISTENING);
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 200);   // 按下 #2:取消
-    assert(s.state == APP_ST_READY);
-    assert(has_action(APP_ACT_STREAM_CANCEL));             // 清残留,防流入下一次会话
-    assert(has_action(APP_ACT_SEND_VOICE_END));            // 结束 Mac 端会话(防 ASR 悬挂)
-    assert(strstr(s.toast, "cancelled"));
-    // 双击窗口后的收尾事件(松开 #2 / DOUBLE)在 READY 下全部忽略
-    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 500);
-    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 600);
-    assert(s.state == APP_ST_READY);
+    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 30);  // 松开 #1:立即发送
+    assert(s.state == APP_ST_TRANSCRIBING);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 200);   // 双击的第二按(转写中忽略)
+    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 300);
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 400);  // DOUBLE → 清空输入框
+    app_action_t *a = find_action(APP_ACT_SEND_KEY_ACTION);
+    assert(a && a->u.key_action.action == APP_KEY_CLEAR);
+    assert(!has_action(APP_ACT_STREAM_CANCEL));            // 不清会话(无取消语义)
+    assert(!has_action(APP_ACT_STREAM_STOP));
+    assert(s.state == APP_ST_TRANSCRIBING);                // 会话状态不受影响
+
+    // READY 态(离线)直接双击 OK 同样清空
+    reset();
+    s.link_up = false;
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 10);
+    a = find_action(APP_ACT_SEND_KEY_ACTION);
+    assert(a && a->u.key_action.action == APP_KEY_CLEAR);
 }
 
-// ---- LISTENING 端:见 test_listening_single_tap / test_listening_double_cancel ----
+// ---- LISTENING 端:见 test_listening_release_sends / test_ok_double_clears_input ----
 static void test_listening_end(void) {
-    test_listening_single_tap();
-    test_listening_double_cancel();
+    test_listening_release_sends();
+    test_ok_double_clears_input();
 }
 
 // ---- 超时:TRANSCRIBING 30s / AGENT_RUNNING 90s → READY ----
@@ -844,8 +849,8 @@ int main(void) {
     test_ptt_offline_online();
     test_tone_press_produce();
     test_tone_done_idempotent();
-    test_tone_done_late_after_cancel();
-    test_tone_single_tap_order();
+    test_tone_done_late_after_send();
+    test_tone_release_sends_order();
     test_tone_tick_fallback();
     test_tone_done_ignored_elsewhere();
     test_listening_end();

@@ -170,7 +170,7 @@ static void build_home(void)
     label(plate, "AI PASSPORT", &lv_font_montserrat_20, UI_INK, 0, 8, 200);
     ui_pixel_mascot_create(p->root, 101, 100);
     label(p->root, "hold OK to enter", &lv_font_montserrat_14, UI_MUTED, 0, 200, W);
-    hint_label(p->root, "OK: ENTER   DOWN: ENTER/DBL-CLEAR");
+    hint_label(p->root, "OK: ENTER   DBL-OK: CLEAR   DOWN: ENTER");
 }
 
 static void build_ready(void)
@@ -186,7 +186,7 @@ static void build_ready(void)
 
     // 工作流切换已取消(固定 build),READY 为简单就绪页
     label(p->root, "READY", &lv_font_montserrat_20, UI_INK, 0, CONTENT_Y + 24, W);
-    hint_label(p->root, "HOLD OK: SPEAK   DOWN: ENTER   DBL: CLEAR");
+    hint_label(p->root, "HOLD OK: SPEAK   DOWN: ENTER   DBL-OK: CLEAR");
 }
 
 static void build_listening(void)
@@ -208,7 +208,7 @@ static void build_listening(void)
     p->rec_bar_fill = block(p->root, 22, 174, 0, 14, UI_GRASS);
 
     p->rec_elapsed = label(p->root, "0s", &lv_font_montserrat_20, UI_INK, 0, 200, W);
-    hint_label(p->root, "RELEASE OK: SEND   DOUBLE-CLICK: CANCEL");
+    hint_label(p->root, "RELEASE OK: SEND");
 }
 
 static void build_transcribing(void)
@@ -271,7 +271,7 @@ static void build_approval(void)
     lv_label_set_long_mode(p->ap_diff, LV_LABEL_LONG_WRAP);
     lv_obj_set_height(p->ap_diff, 88);
 
-    hint_label(p->root, "OK: APPROVE   UP: REJECT   DOWN: ENTER/DBL-CLEAR");
+    hint_label(p->root, "OK: APPROVE   UP: REJECT   DOWN: ENTER");
 }
 
 static void build_done(void)
@@ -295,7 +295,7 @@ static void build_done(void)
     label(p->root, "DONE", &lv_font_montserrat_20, UI_INK, 0, 164, W);
     label(p->root, "text injected into your editor", &lv_font_montserrat_14,
           UI_MUTED, 0, 196, W);
-    hint_label(p->root, "OK: BACK TO HOME   DOWN: ENTER/DBL-CLEAR");
+    hint_label(p->root, "OK: BACK TO HOME   DOWN: ENTER");
 }
 
 static void set_hidden(lv_obj_t *o, bool hidden)
