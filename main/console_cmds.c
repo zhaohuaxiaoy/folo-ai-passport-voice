@@ -7,6 +7,7 @@
 #include "app_events.h"
 #include "mode.h"
 #include "nvs_settings.h"
+#include "time_sync.h"
 #include "ble_audio.h"
 #include "audio_streamer.h"
 #include "mdns_resolver.h"
@@ -113,6 +114,39 @@ static int cmd_wifi(int argc, char **argv)
         return 0;
     }
     out("usage: wifi set <ssid> <pass> | wifi get | wifi status\n");
+    return 1;
+}
+
+// ---- time:wall-clock 校时(校时源仅电脑客户端;SYS `time set` 供 USB 模式)----
+static int cmd_time(int argc, char **argv)
+{
+    if (argc == 1) {
+        char t[16];
+        time_sync_format_local(t, sizeof(t));
+        out("time: %s (%s, tz %+d)\n", t,
+            time_sync_valid() ? "synced" : "unsynced", time_sync_tz_hour());
+        return 0;
+    }
+    if (argc == 3 && strcmp(argv[1], "set") == 0) {
+        // epoch 为 UTC 秒(int64,负值表示 1970 前);strtoll 拒绝即报错
+        char *end = NULL;
+        long long epoch = strtoll(argv[2], &end, 10);
+        if (end == argv[2] || *end != '\0') {
+            out("time set: invalid epoch '%s'\n", argv[2]);
+            return 1;
+        }
+        time_sync_set_epoch((int64_t)epoch);
+        out("time set: ok\n");
+        return 0;
+    }
+    if (argc == 3 && strcmp(argv[1], "tz") == 0) {
+        int h = atoi(argv[2]);
+        esp_err_t e = time_sync_set_tz(h);
+        out("time tz: %s (%+d)\n", e == ESP_OK ? "ok" : esp_err_to_name(e),
+            time_sync_tz_hour());
+        return 0;
+    }
+    out("usage: time | time set <epoch> | time tz <±hh>\n");
     return 1;
 }
 
@@ -321,6 +355,7 @@ esp_err_t console_cmds_register(void)
     reg("mdns", "手动触发 mDNS 解析", NULL, cmd_mdns);
     reg("log", "导出 USB 模式日志环(REPL 模式下为空)", NULL, cmd_log);
     reg("st", "系统状态一览(模式/双链路/MTU/掉帧/堆)", NULL, cmd_st);
+    reg("time", "校时:time | time set <epoch> | time tz <±hh>", NULL, cmd_time);
     reg("reboot", "重启设备", NULL, cmd_reboot);
     reg("factory", "清空 NVS 并重启", NULL, cmd_factory);
     return ESP_OK;

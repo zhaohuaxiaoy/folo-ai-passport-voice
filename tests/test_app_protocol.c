@@ -91,6 +91,28 @@ static void test_parse_transcript(void) {
     assert(ev.u.transcript.final == false);                    // 显式 false 仍预览
 }
 
+static void test_parse_time_set(void) {
+    const char *j = "{\"type\":\"time.set\",\"epoch\":1767225600}";
+    app_event_t ev;
+    assert(app_protocol_parse(j, strlen(j), &ev));
+    assert(ev.type == APP_EV_TIME_SET);
+    assert(ev.u.time_set.epoch == 1767225600LL);
+
+    // 负 epoch(1970 前,UTC 秒)
+    const char *j2 = "{\"type\":\"time.set\",\"epoch\":-1}";
+    assert(app_protocol_parse(j2, strlen(j2), &ev));
+    assert(ev.type == APP_EV_TIME_SET);
+    assert(ev.u.time_set.epoch == -1);
+
+    // 缺 epoch / 非数字 / 超 int64 范围:拒绝
+    const char *j3 = "{\"type\":\"time.set\"}";
+    assert(!app_protocol_parse(j3, strlen(j3), &ev));
+    const char *j4 = "{\"type\":\"time.set\",\"epoch\":\"abc\"}";
+    assert(!app_protocol_parse(j4, strlen(j4), &ev));
+    const char *j5 = "{\"type\":\"time.set\",\"epoch\":1e300}";
+    assert(!app_protocol_parse(j5, strlen(j5), &ev));
+}
+
 static void test_parse_rejects(void) {
     app_event_t ev;
     assert(!app_protocol_parse("{\"type\":\"nope\"}", 14, &ev));             // 未知 type
@@ -210,6 +232,7 @@ int main(void) {
     test_parse_agent_status();
     test_parse_approval();
     test_parse_transcript();
+    test_parse_time_set();
     test_parse_rejects();
     test_parse_deep_nesting_rejected();
     test_parse_long_line_truncation();

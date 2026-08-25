@@ -2,6 +2,7 @@
 #include "app_ui.h"
 #include "bsp_battery.h"     // 电量(主循环已把真实值补进快照,此处仅渲染)
 #include "bsp_display.h"
+#include "time_sync.h"       // 顶栏 HH:MM(校时源仅电脑客户端,未校时 "--:--")
 #include "ui_pixel.h"
 #include "lvgl.h"
 #include <stdarg.h>
@@ -17,10 +18,15 @@
 #define W            240
 #define H            320
 
-// 顶栏左→右:BLE 图标 12px、电量、CPU/RAM、活跃应用(右对齐截断)
+// 顶栏左→右:BLE 图标 12px、电量、CPU/RAM(压缩 "C50 R60")、HH:MM 时间、
+// 活跃应用(右对齐截断)。240px 满:6+12 / 24+36 / 64+48 / 116+52 / 172+64。
 #define BLE_X        6
 #define BATT_X       24
 #define METRICS_X    64
+#define METRICS_W    48
+#define TIME_X       116
+#define TIME_W       52
+#define APP_X        172
 
 // ---- 页内部件索引(与 page 切换共用) ----
 typedef struct {
@@ -44,6 +50,7 @@ static lv_obj_t *s_chrome;                // 顶层容器(lv_layer_top)
 static lv_obj_t *s_ble_icon;
 static lv_obj_t *s_batt_label;
 static lv_obj_t *s_metrics_label;
+static lv_obj_t *s_time_label;
 static lv_obj_t *s_app_label;
 static lv_obj_t *s_offline_banner;
 static lv_obj_t *s_netbusy_banner;
@@ -129,9 +136,11 @@ static void build_chrome(void)
     s_batt_label = label(s_chrome, "--", &lv_font_montserrat_14, 0xFFFFFF,
                          BATT_X, 5, 36);
     s_metrics_label = label(s_chrome, "", &lv_font_montserrat_14, 0xFFFFFF,
-                            METRICS_X, 5, 104);
+                            METRICS_X, 5, METRICS_W);
+    s_time_label = label(s_chrome, "--:--", &lv_font_montserrat_14, 0xFFFFFF,
+                         TIME_X, 5, TIME_W);
     s_app_label = label(s_chrome, "", &lv_font_montserrat_14, UI_MUTED,
-                        168, 5, 68);
+                        APP_X, 5, W - APP_X);
 
     // BLE 断线横幅(链路断时整宽显示;link_up = EVENT 特征已订阅)
     s_offline_banner = block(s_chrome, 0, BANNER_Y, W, BANNER_H, UI_RED);
@@ -384,8 +393,13 @@ void app_ui_render(const app_ui_snapshot_t *snap, uint16_t mic_peak)
     } else {
         label_set_if_changed(s_batt_label, "--");
     }
-    label_set_fmt_if_changed(s_metrics_label, "CPU %d  RAM %d",
+    label_set_fmt_if_changed(s_metrics_label, "C%d R%d",
                              snap->mac_cpu, snap->mac_ram);
+    {
+        char t[16];
+        time_sync_format_local(t, sizeof(t));
+        label_set_if_changed(s_time_label, t);
+    }
     label_set_if_changed(s_app_label, snap->active_app[0] ? snap->active_app : "");
 
     // 横幅互斥:OFFLINE(通道断线)> BUSY(同位置 BANNER_Y)

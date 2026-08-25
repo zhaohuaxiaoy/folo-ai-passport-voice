@@ -81,6 +81,7 @@ typedef enum {
     // ---- USB 有线通道(第三通道:USB-Serial-JTAG,见 design.md)----
     APP_EV_USB_CONNECTED,   // USB 会话通(收到 PC 握手 ping;link_up 的 USB 侧充分条件)
     APP_EV_USB_DISCONNECTED, // USB 会话断(拔线:is_connected 翻转)
+    APP_EV_TIME_SET,         // 校时下行(epoch 秒 UTC;三通道共用:CTRL/WS time.set 行 + SYS time set)
 } app_event_type_t;
 
 // Agent 状态(与协议字符串互转在 app_protocol.c)
@@ -155,6 +156,7 @@ typedef struct {
         struct { uint16_t reason; } wifi_fail;          // WIFI_CONNECT_FAIL
         struct { char url[APP_WS_URL_MAX]; } ws_target; // WS_TARGET_FOUND
         struct { uint8_t target; } mode_switch;         // MODE_SWITCH(0=BLE/1=WiFi)
+        struct { int64_t epoch; } time_set;             // TIME_SET(UTC 秒,int64 对齐 8,union 仍 ≤228B)
     } u;
 } app_event_t;
 
@@ -174,6 +176,7 @@ typedef enum {
     APP_ACT_PLAY_TONE,
     APP_ACT_WS_RETARGET,     // ws_client_retarget(运行时 URL,不写 NVS;mDNS 发现结果)
     APP_ACT_RESOLVE_SERVICE, // mdns_resolver_request(触发 mDNS 重查)
+    APP_ACT_TIME_SET,        // time_sync_set_epoch(校时落地)
 } app_action_type_t;
 
 #define APP_ACT_MAX 4   // 单事件最多产出的动作数
@@ -188,6 +191,7 @@ typedef struct {
             uint8_t decision;                           // app_approval_decision_t
         } agent_action;                                 // SEND_AGENT_ACTION
         struct { char url[APP_WS_URL_MAX]; } ws_target; // WS_RETARGET
+        struct { int64_t epoch; } time_set;             // TIME_SET
     } u;
 } app_action_t;
 

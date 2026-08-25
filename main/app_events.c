@@ -8,12 +8,13 @@ static const char *TAG = "app_evt";
 
 #define APP_EVENT_QUEUE_DEPTH 8
 
-// 静态队列:8×~232B ≈ 1.9KB 静态分配,消除启动堆峰值与创建失败分支(M2)。
+// 静态队列:8×240B ≈ 1.9KB 静态分配,消除启动堆峰值与创建失败分支(M2)。
 // 深度 16→8(性能轮,省 1856B):消费 ~µs/条,积压仅发生在 app_task 长动作
 // 窗口(voice.end drain ≤500ms / cancel ≤200ms / mode_switch ≤500ms),与
 // 高突发源(转写/CTRL 行)时间正交;满即丢+日志兜底不变,关键收束事件走
 // post_important 阻塞投递不丢;被丢的最坏是 display-only 转写行(逐行覆盖
-// 自愈,日志可观测)。
+// 自愈,日志可观测)。注:TIME_SET 引入 int64 后结构 240B(8 深 = 1920B),
+// 上述分析不变(长度无关)。
 static StaticQueue_t s_queue_struct;
 static uint8_t s_queue_storage[APP_EVENT_QUEUE_DEPTH * sizeof(app_event_t)];
 static QueueHandle_t s_queue;

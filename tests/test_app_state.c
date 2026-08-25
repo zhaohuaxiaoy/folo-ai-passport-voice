@@ -804,6 +804,27 @@ static void test_ws_target_found(void) {
     assert(strcmp(snap.link_name, "BLE") == 0);
 }
 
+// ---- 校时下行:透传动作,状态不变(与链路状态正交) ----
+static void test_time_set(void) {
+    reset();
+    s.link_up = true;
+    s.state = APP_ST_READY;
+    app_event_t ev = { .type = APP_EV_TIME_SET, .u.time_set.epoch = 1767225600LL };
+    app_state_reduce(&s, &ev, now, out, &on);
+    assert(on == 1);                                        // 仅 TIME_SET 动作
+    app_action_t *t = find_action(APP_ACT_TIME_SET);
+    assert(t && t->u.time_set.epoch == 1767225600LL);       // epoch 透传无损
+    assert(s.state == APP_ST_READY);                        // 状态机不受影响
+    assert(s.link_up == true);
+
+    // 负 epoch 同样透传(校时值域不含正负限制)
+    reset();
+    ev = (app_event_t){ .type = APP_EV_TIME_SET, .u.time_set.epoch = -1 };
+    app_state_reduce(&s, &ev, now, out, &on);
+    t = find_action(APP_ACT_TIME_SET);
+    assert(t && t->u.time_set.epoch == -1);
+}
+
 int main(void) {
     test_home_nav();
     test_workflow_cycle();
@@ -841,6 +862,7 @@ int main(void) {
     test_usb_link_down();
     test_wifi_fail_dedup();
     test_ws_target_found();
+    test_time_set();
     test_bounded();
     printf("test_app_state: all assertions passed\n");
     return 0;

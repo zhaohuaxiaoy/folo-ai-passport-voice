@@ -44,6 +44,11 @@ add_executable(test_ble_audio test_ble_audio.c ${MAIN_DIR}/ble_audio.c
 target_include_directories(test_ble_audio PRIVATE ${MAIN_DIR} ${CJSON_DIR})
 add_test(NAME ble_audio COMMAND test_ble_audio)
 
+# --- wall-clock 校时(纯 C;NVS 桩在测试文件内,settimeofday 走 ESP_PLATFORM 隔离) ---
+add_executable(test_time_sync test_time_sync.c ${MAIN_DIR}/time_sync.c)
+target_include_directories(test_time_sync PRIVATE ${MAIN_DIR} ${FAKE_DIR})
+add_test(NAME time_sync COMMAND test_time_sync)
+
 # --- 音频流管线(fake RTOS 层在宿主编译,真并发线程;编译期拦截"不存在的
 #     ESP-IDF API"类回归 —— 见 test_audio_streamer.c 头注释;超时用例
 #     注入 200ms(默认即 200,注入保持显式)) ---

@@ -13,6 +13,7 @@ static const char *K_WIFI_PASS = "wifi_pass";
 static const char *K_WS_URL    = "ws_url";
 static const char *K_WS_MODE   = "ws_mode";
 static const char *K_MODE      = "rf_mode";
+static const char *K_TZ_HOUR   = "tz_hour";
 
 // 默认 WS 地址(通过控制台 `ws set` 修改)
 static const char *DEFAULT_WS_URL = "ws://192.168.1.100:8765";
@@ -122,6 +123,31 @@ esp_err_t nvs_settings_set_mode(uint8_t mode) {
     if (e == ESP_OK) e = nvs_commit(h);
     nvs_close(h);
     ESP_LOGI(TAG, "rf_mode = %d", (int)mode);
+    return e;
+}
+
+// 时区偏移小时(int8 支持负偏移,±12);缺省 8(Asia/Shanghai)
+esp_err_t nvs_settings_get_tz_hour(int8_t *hour) {
+    nvs_handle_t h;
+    esp_err_t e = nvs_open(APP_NS, NVS_READONLY, &h);
+    if (e != ESP_OK) { if (hour) *hour = 8; return ESP_OK; }   // 打不开按默认兜底
+    int8_t v = 8;
+    e = nvs_get_i8(h, K_TZ_HOUR, &v);
+    nvs_close(h);
+    if (e == ESP_ERR_NVS_NOT_FOUND) v = 8;   // 首次使用:默认 +8
+    if (hour) *hour = (v >= -12 && v <= 12) ? v : 8;   // 损坏值兜底
+    return ESP_OK;
+}
+
+esp_err_t nvs_settings_set_tz_hour(int8_t hour) {
+    if (hour < -12 || hour > 12) return ESP_ERR_INVALID_ARG;
+    nvs_handle_t h;
+    esp_err_t e = nvs_open(APP_NS, NVS_READWRITE, &h);
+    if (e != ESP_OK) return e;
+    e = nvs_set_i8(h, K_TZ_HOUR, hour);
+    if (e == ESP_OK) e = nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGI(TAG, "tz_hour = %d", (int)hour);
     return e;
 }
 

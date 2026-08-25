@@ -132,6 +132,19 @@ static bool parse_transcript(const cJSON *o, app_event_t *ev) {
     return true;
 }
 
+// 校时下行:epoch 为 UTC 秒。double 承载 int64 精度到 2^53(≈9e15 秒,
+// 约 2.9 亿年),epoch 实际量级 1.7e9,精度无损;范围检查防御恶意大值
+// (cJSON valuedouble 可到 1.8e308,防 int64 转换 UB)。
+static bool parse_time_set(const cJSON *o, app_event_t *ev) {
+    const cJSON *ep = cJSON_GetObjectItemCaseSensitive(o, "epoch");
+    if (!cJSON_IsNumber(ep)) return false;
+    double d = ep->valuedouble;
+    if (d < -9.2e18 || d > 9.2e18) return false;   // 超出 int64 范围:拒绝
+    ev->u.time_set.epoch = (int64_t)d;
+    ev->type = APP_EV_TIME_SET;
+    return true;
+}
+
 bool app_protocol_parse(const char *json, size_t len, app_event_t *ev) {
     if (!json || len == 0 || len > APP_PROTO_RX_CAP) return false;
     if (!json_depth_ok(json, len)) return false;   // 深层嵌套:拒绝,保护解析者栈
@@ -144,6 +157,7 @@ bool app_protocol_parse(const char *json, size_t len, app_event_t *ev) {
         else if (strcmp(type->valuestring, "agent.status") == 0)         ok = parse_agent_status(root, ev);
         else if (strcmp(type->valuestring, "agent.approval_request") == 0) ok = parse_approval(root, ev);
         else if (strcmp(type->valuestring, "transcript") == 0)           ok = parse_transcript(root, ev);
+        else if (strcmp(type->valuestring, "time.set") == 0)             ok = parse_time_set(root, ev);
         // 未知 type:丢弃(返回 false,调用方记日志)
     }
     cJSON_Delete(root);

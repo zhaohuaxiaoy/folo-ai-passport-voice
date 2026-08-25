@@ -12,9 +12,9 @@
 // 事件行上限必须与协议 TX 上限一致(打包层 512 即 app_protocol 的 APP_PROTO_TX_CAP)
 _Static_assert(EVENT_LINE_MAX == APP_PROTO_TX_CAP, "EVENT_LINE_MAX must equal APP_PROTO_TX_CAP");
 _Static_assert(AUDIO_FRAME_BYTES == 3200, "audio frame is 100ms @16kHz/16bit/mono");
-// 事件 union 尺寸上限:232B 只减不增(approval 是最大成员 225B;
-// transcript 加 final 标志后 130B 仍低于它,持平不涨)
-_Static_assert(sizeof(app_event_t) == 232, "app_event_t must stay at 232 bytes");
+// 事件 union 尺寸上限:240B 只减不增(approval 最大成员 225B 对齐到 8 ——
+// TIME_SET 引入 int64 成员把 union 对齐顶到 8,结构 240B;8 深队列 = 1920B)
+_Static_assert(sizeof(app_event_t) == 240, "app_event_t must stay at 240 bytes");
 
 static void test_constants(void) {
     assert(ATT_MTU_MIN == 23);

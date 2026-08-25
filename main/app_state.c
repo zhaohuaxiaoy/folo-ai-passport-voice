@@ -488,6 +488,16 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         handle_tick(s, now_ms, out, out_n, max);
         break;
 
+    case APP_EV_TIME_SET:
+        // 校时落地:透传 epoch 到动作(app_task 执行 settimeofday)。
+        // 与链路事件正交:任何模式下收到即生效,无状态依赖。
+        {
+            app_action_t t = { .type = APP_ACT_TIME_SET,
+                               .u.time_set.epoch = ev->u.time_set.epoch };
+            emit(out, out_n, max, t);
+        }
+        break;
+
     // ---- WiFi/WS 通道(Windows 移植:无蓝牙 PC 走 WiFi,语义与 BLE 对等)----
 
     case APP_EV_WIFI_CONNECTED:

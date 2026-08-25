@@ -13,6 +13,7 @@
 #include "mdns_resolver.h"
 #include "mode.h"
 #include "nvs_settings.h"
+#include "time_sync.h"
 #include "ws_client.h"
 #include "bsp_audio.h"
 #include "bsp_battery.h"
@@ -102,6 +103,10 @@ static void run_actions(const app_action_t *acts, uint8_t n)
         case APP_ACT_STREAM_CANCEL:
             // 取消/断链:停采集 + 清残留 + 丢弃在途帧(残留不流入下一次会话)
             audio_streamer_cancel();
+            break;
+        case APP_ACT_TIME_SET:
+            // 校时落地:写系统时间 + 置校时标志(app_task 上下文,单写点)
+            time_sync_set_epoch(a->u.time_set.epoch);
             break;
         case APP_ACT_WS_RETARGET:
             // mDNS 发现新目标:运行时改 WS URL(不写 NVS,auto 模式语义)
