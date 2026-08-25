@@ -3,7 +3,9 @@
 
 帧格式:
   [magic 2B: 0xA5 0x5A][type 1B][payload_len 2B LE][payload][checksum 1B]
-  checksum = 帧头+payload 全部字节和 mod 256;总帧长 = 6 + len, len ≤ 4096。
+  checksum = 帧头+payload 全部字节和 mod 256;总帧长 = 6 + len, len ≤ 3200
+  (任一方向最大合法载荷 = 音频帧;下行 CTRL 2048/SYS 128、上行 AUDIO 3200/
+  EVENT 512/SYS_RESP 2048 全部 ≤3200;与固件 USB_FRAME_PAYLOAD_MAX 契约一致)。
 
 失同步恢复:滑动重扫状态机(任何一步非法立即重扫且当前字节重新当 magic0 判;
 0xA5 0xA5 0x5A 假锚点不丢帧;日志噪声/启动残帧只损失个别字节)。
@@ -14,7 +16,9 @@
 MAGIC0 = 0xA5
 MAGIC1 = 0x5A
 HEADER = 6
-PAYLOAD_MAX = 4096
+# 任一方向最大合法载荷(音频帧 3200):固件侧同值(USB_FRAME_PAYLOAD_MAX),
+# 两侧 oversize 阈值必须一致 —— 改本模块必须同步改固件 framing.h。
+PAYLOAD_MAX = 3200
 
 # 帧类型(与固件 USB_FRAME_* 契约一致)
 FRAME_EVENT = 0x01     # 设备→PC: EVENT JSON 行(含 '\n')

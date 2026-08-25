@@ -107,12 +107,27 @@ def test_false_anchor():
 
 def test_oversize_len():
     # payload_len 超上限:立即 ERR_OVERSIZE 重扫,且不缓冲巨型长度
-    head = bytes((0xA5, 0x5A, FRAME_EVENT, 0x00, 0x11))  # len = 0x1100 > 4096
+    head = bytes((0xA5, 0x5A, FRAME_EVENT, 0x00, 0x11))  # len = 0x1100 > 3200
     dec = FrameDecoder()
     rc = FRAME_NONE
     for b in head:
         rc = dec.feed_byte(b)
     assert rc == FRAME_ERR_OVERSIZE
+
+    # 边界(阈值 4096→3200 与固件契约一致):3201 → OVERSIZE;3200 → DONE
+    head1 = bytes((0xA5, 0x5A, FRAME_AUDIO, 0x81, 0x0C))  # len = 3201
+    dec = FrameDecoder()
+    rc = FRAME_NONE
+    for b in head1:
+        rc = dec.feed_byte(b)
+    assert rc == FRAME_ERR_OVERSIZE
+    frame = encode_frame(FRAME_AUDIO, bytes(PAYLOAD_MAX))  # 3200 边界合法
+    dec = FrameDecoder()
+    for b in frame:
+        rc = dec.feed_byte(b)
+    assert rc == FRAME_DONE
+    assert dec.type == FRAME_AUDIO
+    assert len(dec.payload) == PAYLOAD_MAX
 
     # 重扫后正常帧仍可解析
     frame = encode_frame(FRAME_SYS, b"\x01")
