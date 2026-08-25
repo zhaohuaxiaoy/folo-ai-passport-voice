@@ -120,6 +120,8 @@ def load_config():
     cfg.setdefault("ws_port", 8765)             # WiFi 通道:本机 WS server 端口(设备 STA 主动连)
     cfg.setdefault("ws_connect_timeout", 120)   # WiFi 通道:等设备连上 WS 的超时(秒)
     cfg.setdefault("inject_focus_delay", 2.0)   # Windows 注入:等用户切到目标窗口的秒数
+    # FRE 向导 + 注入双策略(P7): unicode(键盘事件, 不碰剪贴板) / clipboard / auto
+    cfg.setdefault("inject_mode", "auto")
     return cfg
 
 

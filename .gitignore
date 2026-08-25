@@ -1,4 +1,6 @@
 build/
+!companion/build/
+!companion/build/pack.py
 sdkconfig
 sdkconfig.old
 managed_components/

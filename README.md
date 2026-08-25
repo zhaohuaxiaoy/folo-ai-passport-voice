@@ -62,6 +62,18 @@ The repository does not currently provide enough evidence to guarantee touch inp
 
 Requirements involving these capabilities must begin with a schematic, board revision, component documentation, or physical measurements. Only then should the BSP and its acceptance criteria be extended.
 
+## First Run Experience (for end users)
+
+Non-developers can get started without touching a terminal:
+
+1. **Download** the packaged app (`dist/AI Passport.app` on macOS, `dist/AI Passport.exe` on Windows — build with `companion/build/pack.py`, or use a released build).
+2. **Launch** it: the wizard auto-scans for the AI Passport device (BLE).
+3. **Click Connect** — the relay starts in the background (ASR streaming, live transcript preview, text injection).
+4. **Authorize** (macOS only): if Accessibility or Bluetooth permission is missing, the wizard shows what to enable and opens the right System Settings pane.
+5. **Done** — the status page shows connection channel, ASR backend, injection mode, and the button layout (hold ● to talk, release to send; double-click OK to clear; DOWN = Enter).
+
+First run writes `companion/config.local.json` automatically (channel, `inject_mode`, etc.). Existing fields — including the Volcano API key — are preserved. If you run the source directly instead of the packaged app: `python3 companion/fre_app.py` (or `--dry-run` to walk through the flow with a fake link).
+
 ## Start development with one requirement
 
 A simple request can be given directly to an agent:

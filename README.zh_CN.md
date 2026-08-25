@@ -62,6 +62,20 @@ FoloToy AI Passport 是一个面向 AI agent 的开放式可穿戴 AI 硬件，�
 
 需要这些能力时，先补充原理图、板卡修订号、器件资料或实测结果，再扩展 BSP 和验收项。
 
+## 首次运行体验（面向普通用户）
+
+非开发者可以不碰终端直接上手：
+
+1. **下载**打包好的应用（macOS `dist/AI Passport.app` / Windows `dist/AI Passport.exe`，用 `companion/build/pack.py` 构建，或使用发布的构建产物）。
+2. **启动**：向导自动扫描 AI Passport 设备（BLE）。
+3. **点击连接**：后台自动启动 relay 全流程（ASR 流式转写、实时预览、文本注入）。
+4. **授权**（仅 macOS）：辅助功能/蓝牙权限缺失时，向导列出缺失项并一键打开对应系统设置面板。
+5. **完成**：状态页显示 连接通道 / ASR 后端 / 注入模式 / 按键说明（按住 ● 讲话、松开发送；双击 OK 清空；DOWN 回车）。
+
+首次运行自动生成 `companion/config.local.json`（channel / inject_mode 等），
+已有字段（含火山 API key）原样保留。直接跑源码而非打包产物：
+`python3 companion/fre_app.py`（`--dry-run` 可用假链路走通全流程）。
+
 ## 用一句需求开始开发
 
 简单需求可以直接这样交给 agent：
