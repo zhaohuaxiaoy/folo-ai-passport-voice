@@ -16,13 +16,24 @@
 #define USB_FRAME_MAGIC0      0xA5
 #define USB_FRAME_MAGIC1      0x5A
 #define USB_FRAME_HEADER      6    /* magic2 + type1 + len2 + checksum1 */
-/* 上限分方向(性能:静态缓冲按实际最大合法载荷分配,不浪费 ~2.9KB):
- * 下行(PC→设备)CTRL ≤2048、SYS ≤128 → 2048;上行(设备→PC)AUDIO 3200、
- * EVENT ≤512、SYS_RESP ≤2048 → 3200。任一方向校验统一按 3200(feed 不区分
- * 方向;下行 CTRL 2048 < 3200 不受影响,AUDIO 3200 恰为边界,用 > 判界放行)。 */
+/* 方向感知契约(审查 P1):feed 按本端接收方向过滤合法类型 —— 固件 RX 只收
+ * CTRL/SYS、companion RX 只收 EVENT/AUDIO/SYS_RESP;方向不符在 TYPE 状态即
+ * ERR_BAD(写 payload 前拒绝)。类型固有上限在 LEN_HI 校验(超 → ERR_OVERSIZE)。
+ * 缓冲按方向实际最大分配:下行 RX 2048(CTRL 上限)、上行 TX 3200(AUDIO 帧),
+ * 省 ~2.9KB 静态 RAM —— 方向过滤 + 类型上限保证 2048 缓冲永不被写越界。 */
 #define USB_FRAME_RX_PAYLOAD_MAX 2048 /* 下行缓冲分配(CTRL 上限) */
 #define USB_FRAME_TX_PAYLOAD_MAX 3200 /* 上行缓冲分配(AUDIO 帧) */
-#define USB_FRAME_PAYLOAD_MAX    3200 /* 任一方向最大合法载荷:超限立即重扫 */
+#define USB_FRAME_CTRL_MAX       2048 /* PC→设备 协议 JSON 下行 */
+#define USB_FRAME_SYS_MAX        128  /* PC→设备 命令文本 */
+#define USB_FRAME_EVENT_MAX      512  /* 设备→PC 事件行(JSON) */
+#define USB_FRAME_AUDIO_MAX      3200 /* 设备→PC 音频帧 */
+#define USB_FRAME_SYS_RESP_MAX   2048 /* 设备→PC 命令输出 */
+#define USB_FRAME_PAYLOAD_MAX    3200 /* 任一类型最大载荷(总闸,文档值) */
+
+/* 本端接收方向:DOWIN = PC→设备(固件 RX);UP = 设备→PC(companion RX)。
+ * 方向决定合法类型集合(见 usb_frame_dir_ok),防止上行类型帧经下行链路
+ * 写爆 RX 缓冲(审查 P1)。 */
+typedef enum { USB_FRAME_DIR_DOWN = 0, USB_FRAME_DIR_UP } usb_frame_dir_t;
 
 /* 帧类型(设备↔PC 契约,见 design.md 帧协议节) */
 #define USB_FRAME_EVENT     0x01 /* 设备→PC: EVENT JSON 行(含 '\n') */
@@ -55,6 +66,7 @@ typedef enum {
 
 typedef struct {
     uint8_t  state;   /* usb_frame_state_t */
+    uint8_t  dir;     /* usb_frame_dir_t:本端接收方向(初始化设置,feed 只读) */
     uint16_t len;     /* payload_len(帧头解析出) */
     size_t   pos;     /* payload 已收字节 */
     uint8_t  sum;     /* 累计校验(magic0 起) */
@@ -62,8 +74,10 @@ typedef struct {
 } usb_frame_ctx_t;
 
 /* 逐字节喂入(调用方循环 read_bytes 后逐字节调用)。
- * payload 为调用方缓冲(容量 ≥ USB_FRAME_PAYLOAD_MAX),DONE 时帧载荷已写入。
- * 任何返回码之后 ctx 均已回扫描起点,可继续喂下一字节。 */
+ * ctx.dir 在初始化时设置(USB_FRAME_DIR_DOWN = 固件 RX / USB_FRAME_DIR_UP =
+ * companion RX);payload 为调用方缓冲(容量 ≥ 该方向的 RX_PAYLOAD_MAX),
+ * DONE 时帧载荷已写入。方向过滤与类型上限校验均发生在写 payload 之前
+ * (审查 P1)。任何返回码之后 ctx 均已回扫描起点,可继续喂下一字节。 */
 usb_frame_feed_rc_t usb_frame_feed(usb_frame_ctx_t *ctx, uint8_t b,
                                    uint8_t *type, uint8_t *payload,
                                    size_t *payload_len);

@@ -31,7 +31,8 @@ import serial
 from serial.tools import list_ports
 
 from serial_frame import (FRAME_AUDIO, FRAME_CTRL, FRAME_DONE, FRAME_EVENT,
-                          FRAME_SYS, FRAME_SYS_RESP, FrameDecoder, encode_frame)
+                          FRAME_SYS, FRAME_SYS_RESP, DIR_UP, FrameDecoder,
+                          encode_frame)
 
 SERVICE_UUID = "0000A2B0-0000-1000-8000-00805F9B34FB"   # 契约占位(USB 无特征)
 CTRL_UUID = "0000A2B1-0000-1000-8000-00805F9B34FB"
@@ -90,7 +91,10 @@ class SerialTransport:
         self._pending = []          # (type, payload) 订阅前缓冲
         self._pong = None           # asyncio.Event: 握手 pong
         self._sys_resp_future = None
-        self._dec = FrameDecoder()  # 帧解码状态机(跨 read 保留:帧可分片到达)
+        # 帧解码状态机(跨 read 保留:帧可分片到达)。companion 永远收设备上行,
+        # 方向 DIR_UP:只收 EVENT/AUDIO/SYS_RESP,下行类型帧(CTRL/SYS)被拒
+        # (方向感知契约,审查 P1)。
+        self._dec = FrameDecoder(dir=DIR_UP)
 
     # -- 5 方法契约(对齐 BleakTransport/WsTransport) --
 

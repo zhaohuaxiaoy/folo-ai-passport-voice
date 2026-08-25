@@ -16,9 +16,6 @@
 MAGIC0 = 0xA5
 MAGIC1 = 0x5A
 HEADER = 6
-# 任一方向最大合法载荷(音频帧 3200):固件侧同值(USB_FRAME_PAYLOAD_MAX),
-# 两侧 oversize 阈值必须一致 —— 改本模块必须同步改固件 framing.h。
-PAYLOAD_MAX = 3200
 
 # 帧类型(与固件 USB_FRAME_* 契约一致)
 FRAME_EVENT = 0x01     # 设备→PC: EVENT JSON 行(含 '\n')
@@ -28,6 +25,25 @@ FRAME_SYS = 0x04       # PC→设备: 控制台命令文本(≤128B)
 FRAME_SYS_RESP = 0x05  # 设备→PC: 命令输出(≤2048B 超限截断)
 
 TYPE_MIN, TYPE_MAX = FRAME_EVENT, FRAME_SYS_RESP
+
+# 类型固有最大载荷(方向无关;与固件 USB_FRAME_*_MAX 契约一致,改一侧必须
+# 同步另一侧 —— 两侧测试共享边界意图)。帧协议方向感知(审查 P1):解码器
+# 按本端接收方向过滤合法类型 + 类型上限校验,均在写 payload 前拒绝。
+TYPE_MAX_PAYLOAD = {
+    FRAME_CTRL: 2048,
+    FRAME_SYS: 128,
+    FRAME_EVENT: 512,
+    FRAME_AUDIO: 3200,
+    FRAME_SYS_RESP: 2048,
+}
+PAYLOAD_MAX = max(TYPE_MAX_PAYLOAD.values())   # 总闸(任一类型上限)
+
+# 本端接收方向(DIR_DOWN = 固件 RX 只收 CTRL/SYS;DIR_UP = companion RX 只收
+# EVENT/AUDIO/SYS_RESP)。方向不符 → FRAME_ERR_BAD(写 payload 前拒绝)。
+DIR_DOWN = "down"
+DIR_UP = "up"
+_DIR_TYPES = {DIR_DOWN: (FRAME_CTRL, FRAME_SYS),
+              DIR_UP: (FRAME_EVENT, FRAME_AUDIO, FRAME_SYS_RESP)}
 
 # 状态机状态(与固件 usb_frame_state_t 对应)
 _S_MAGIC0, _S_MAGIC1, _S_TYPE, _S_LEN_LO, _S_LEN_HI, _S_PAYLOAD, _S_CHECKSUM = range(7)
@@ -45,10 +61,11 @@ class FrameError(Exception):
 
 
 def encode_frame(frametype, payload):
-    """组帧: bytes。len 超上限抛 FrameError。"""
+    """组帧: bytes。len 超该类型上限抛 FrameError。"""
     payload = bytes(payload)
-    if len(payload) > PAYLOAD_MAX:
-        raise FrameError(f"payload {len(payload)}B 超上限 {PAYLOAD_MAX}B")
+    limit = TYPE_MAX_PAYLOAD.get(frametype, 0)
+    if len(payload) > limit:
+        raise FrameError(f"payload {len(payload)}B 超 {frametype} 上限 {limit}B")
     head = bytes((MAGIC0, MAGIC1, frametype,
                   len(payload) & 0xFF, (len(payload) >> 8) & 0xFF))
     csum = (-(sum(head) + sum(payload))) & 0xFF
@@ -59,14 +76,17 @@ class FrameDecoder:
     """逐字节喂入的分帧解码器(与固件 usb_frame_feed 逐字节同构)。
 
     用法:
-        dec = FrameDecoder()
+        dec = FrameDecoder(dir=DIR_UP)   # companion 永远收设备上行
         rc = dec.feed_byte(b)
         if rc == FRAME_DONE:
             use(dec.type, dec.payload)
     也提供 feed(bytes) 一次喂多字节,返回 (rcs 列表或最后一个 rc, 帧列表)。
+    dir 默认 DIR_DOWN(=固件 RX 方向语义):显式传参,方向决定合法类型集合
+    (方向不符 → FRAME_ERR_BAD,写 payload 前拒绝,审查 P1)。
     """
 
-    def __init__(self):
+    def __init__(self, dir=DIR_DOWN):
+        self._dir = dir
         self.reset()
 
     def reset(self):
@@ -93,7 +113,7 @@ class FrameDecoder:
                 self._rescan(b)
             return FRAME_NONE
         if st == _S_TYPE:
-            if TYPE_MIN <= b <= TYPE_MAX:
+            if TYPE_MIN <= b <= TYPE_MAX and b in _DIR_TYPES[self._dir]:
                 self._state = _S_LEN_LO
                 self._sum = (self._sum + b) & 0xFF
                 self.type = b
@@ -109,7 +129,7 @@ class FrameDecoder:
         if st == _S_LEN_HI:
             self._len |= b << 8
             self._sum = (self._sum + b) & 0xFF
-            if self._len > PAYLOAD_MAX:
+            if self._len > TYPE_MAX_PAYLOAD[self.type]:
                 self._rescan(b)
                 return FRAME_ERR_OVERSIZE
             self._pos = 0

@@ -43,8 +43,10 @@ static volatile bool s_running;            /* 离开 USB 模式置 false,读任�
 static volatile bool s_session_up;         /* 收到 ping → true;跨任务读写,单核无撕裂,volatile 显式化 */
 static bool s_connected;                   /* is_connected 上次采样 */
 static SemaphoreHandle_t s_tx_mux;         /* 发送互斥:串行化三发送方对 s_tx_buf 的组帧+写 */
-static usb_frame_ctx_t s_fr_ctx;           /* 帧解码状态机 */
-static uint8_t s_fr_payload[USB_FRAME_RX_PAYLOAD_MAX];  /* 下行缓冲:CTRL ≤2048 */
+static usb_frame_ctx_t s_fr_ctx;           /* 帧解码状态机(dir 初始化见 usb_link_init) */
+/* 下行缓冲:方向过滤 + 类型上限保证 feed 只写 0..2047;+1 尾字节专容 CTRL
+ * 尾 NUL(feed 不写,见 dispatch_frame;审查 P1) */
+static uint8_t s_fr_payload[USB_FRAME_RX_PAYLOAD_MAX + 1];
 static uint8_t s_tx_buf[USB_FRAME_HEADER + USB_FRAME_TX_PAYLOAD_MAX];  /* 上行:AUDIO 3200 */
 static char s_sys_cmd[USB_SYS_LINE_MAX + 1];
 static char s_sys_resp[USB_RESP_MAX];
@@ -197,7 +199,7 @@ static void dispatch_frame(uint8_t type, const uint8_t *payload, size_t len)
                      APP_PROTO_RX_CAP);
             return;
         }
-        s[len] = '\0';   // payload 缓冲 4096 ≥ RX_CAP 2048,安全
+        s[len] = '\0';   // 尾 NUL:缓冲 [2048+1] 尾字节专位(feed 只写 0..2047)
         app_event_t ev;
         if (app_protocol_parse(s, len, &ev)) {
             app_event_post(&ev);
@@ -267,6 +269,9 @@ static void usb_read_task(void *arg)
 esp_err_t usb_link_init(void)
 {
     s_running = true;
+    // 本端接收方向 = DOWN(PC→设备):feed 只收 CTRL/SYS,方向过滤 + 类型上限
+    // 保证 s_fr_payload[2048] 永不越界(审查 P1;静态零初始化已等于该值,显式锁语义)
+    s_fr_ctx.dir = USB_FRAME_DIR_DOWN;
     s_tx_mux = xSemaphoreCreateMutex();
     if (s_tx_mux == NULL) {
         ESP_LOGE(TAG, "发送互斥锁创建失败");
