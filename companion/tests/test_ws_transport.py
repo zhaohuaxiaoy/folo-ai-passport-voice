@@ -124,12 +124,12 @@ def test_subscribe_order_irrelevant():
         await asyncio.sleep(0.05)
         ws = await open_device(t)
         await task
-        await ws.send('{"event":"voice.start","workflow":"build"}\n')
+        await ws.send('{"event":"voice.start"}\n')
         await asyncio.sleep(0.05)
         await t.start_notify(AUDIO_UUID, lambda d: got.append(("a", d)))
         check("仅 AUDIO 注册,EVENT 缓冲未冲刷", len(t._pending), 1)
         await t.start_notify(EVENT_UUID, lambda d: got.append(("e", d)))
-        check("EVENT 后注册,缓冲行冲刷", got, [("e", b'{"event":"voice.start","workflow":"build"}\n')])
+        check("EVENT 后注册,缓冲行冲刷", got, [("e", b'{"event":"voice.start"}\n')])
         await t.disconnect()
         await ws.close()
     asyncio.run(scenario())
@@ -216,7 +216,7 @@ def test_relay_over_ws():
 
         # 设备侧上行: hello → voice.start → 音频帧 → voice.end
         await ws.send('{"event":"device.hello","proto":1}\n')
-        await ws.send('{"event":"voice.start","workflow":"build"}\n')
+        await ws.send('{"event":"voice.start"}\n')
         await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
         for _ in range(3):
             await ws.send(bytes(AUDIO_FRAME_BYTES))

@@ -5,7 +5,7 @@
   Service 0xA2B0 (0000A2B0-0000-1000-8000-00805F9B34FB)
     0xA2B1 CTRL   WRITE|WRITE_ENC   Mac→设备: JSON 行 ≤2048B
     0xA2B2 EVENT  NOTIFY            设备→Mac: JSON 行(device.hello /
-                                    voice.start / voice.end / workflow.switch /
+                                    voice.start / voice.end / key.action /
                                     agent.action / status)
     0xA2B3 AUDIO  NOTIFY            设备→Mac: 3200B 裸 PCM 帧(100ms @16k/16bit)
 ATT 分片: 任何超过 MTU-3 的载荷按 MTU-3 chunk 逐片 notify(ATT 载荷上限 =
@@ -405,8 +405,6 @@ class Relay:
         etype = ev.get("event")
         if etype == "device.hello":
             print(f"[event] device.hello proto={ev.get('proto')}")
-        elif etype == "workflow.switch":
-            print(f"[event] workflow.switch current={ev.get('current')}")
         elif etype == "key.action":
             await self._on_key_action(ev.get("action"))
         elif etype == "voice.start":
@@ -452,7 +450,7 @@ class Relay:
             s = self._session
             self._session = None
             self._start_closing(s)         # 旧会话后台收尾 + 进收尾槽(不阻塞)
-        print(f"[voice] start workflow={ev.get('workflow')}")
+        print("[voice] start")
         self._session = _VoiceSession(self, self._asr_factory())
         await self._session.begin()        # 立即返回(ASR 连接后台化)
 

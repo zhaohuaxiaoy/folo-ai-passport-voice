@@ -10,7 +10,6 @@ extern "C" {
 
 typedef struct {
     app_stage_t    state;
-    app_workflow_t workflow;
     bool           link_up;       // 当前通道已通(BLE:EVENT 已订阅 / WiFi:WS 已连);false → 禁 PTT + OFFLINE
     bool           net_busy;
     bool           screen_on;

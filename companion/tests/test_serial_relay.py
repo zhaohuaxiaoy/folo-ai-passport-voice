@@ -75,7 +75,7 @@ def device_script(master, results):
     write_all(master, encode_frame(FRAME_EVENT,
                                    b'{"event":"device.hello","proto":2}\n'))
     write_all(master, encode_frame(FRAME_EVENT,
-                                   b'{"event":"voice.start","workflow":"build"}\n'))
+                                   b'{"event":"voice.start"}\n'))
     sys_frame = None
     deadline = time.monotonic() + 2.5
     for _ in range(3):

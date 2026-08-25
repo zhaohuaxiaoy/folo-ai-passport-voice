@@ -229,7 +229,7 @@ def test_reassembly_audio():
 
 
 def test_reassembly_event():
-    line = b'{"event":"voice.start","workflow":"build"}'
+    line = b'{"event":"voice.start"}'
     nl = line + b"\n"
 
     # 单行跨 chunk
@@ -291,7 +291,7 @@ async def test_voice_flow():
           [EVENT_UUID, AUDIO_UUID])
 
     # voice.start + 音频分片(MTU247: 13×244+28) + 第二帧整帧 + voice.end + status
-    t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    t.notify_event(b'{"event":"voice.start"}\n')
     # 屏障:等待 voice.start 处理完(会话已建),否则音频帧可能被 drain 丢弃
     await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
     for _ in range(13):
@@ -434,7 +434,7 @@ def test_key_action_mac_dry_run():
     with redirect_stdout(buf):
         key_action("clear", dry_run=True)
     out = buf.getvalue()
-    check("Mac clear 打印全选", 'keystroke "a" using command down' in out, True)
+    check("Mac clear 打印全选", "key code 115" in out and "key code 119" in out, True)
     check("Mac clear 打印删除", "key code 51" in out, True)
 
     try:
@@ -453,7 +453,7 @@ async def test_approval_flow():
     task = asyncio.create_task(relay.run())
     await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
 
-    t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    t.notify_event(b'{"event":"voice.start"}\n')
     await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
     t.notify_audio(bytes(3200))
     t.notify_event(b'{"event":"voice.end"}\n')
@@ -489,7 +489,7 @@ async def test_ctrl_write_no_response():
     task = asyncio.create_task(relay.run())
     await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
 
-    t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    t.notify_event(b'{"event":"voice.start"}\n')
     await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
     t.notify_audio(bytes(3200))
     t.notify_event(b'{"event":"voice.end"}\n')
@@ -520,7 +520,7 @@ async def test_disconnect_cleanup():
     task = asyncio.create_task(relay.run())
     await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
 
-    t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    t.notify_event(b'{"event":"voice.start"}\n')
     await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
     t.notify_audio(bytes(3200))
     await wait_until(lambda: holder["asr"].connected, what="ASR 已连接")
@@ -544,7 +544,7 @@ async def test_disconnect_during_final():
     task = asyncio.create_task(relay.run())
     await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
 
-    t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    t.notify_event(b'{"event":"voice.start"}\n')
     await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
     t.notify_audio(bytes(3200))
     t.notify_event(b'{"event":"voice.end"}\n')
@@ -574,9 +574,9 @@ async def test_disconnect_overlapping_closing():
     await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
 
     # s1 进行中; 重复 voice.start → s1 进收尾槽后台收尾, s2 成为当前会话
-    t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    t.notify_event(b'{"event":"voice.start"}\n')
     await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
-    t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    t.notify_event(b'{"event":"voice.start"}\n')
     await wait_until(lambda: len(relay._closing) == 1, what="s1 进收尾槽")
 
     # s2 voice.end → s2 也进收尾槽(槽内: s1 + s2 两个后台收尾会话)
@@ -620,7 +620,7 @@ async def test_connect_timeout():
     task = asyncio.create_task(relay.run())
     await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
 
-    t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    t.notify_event(b'{"event":"voice.start"}\n')
     await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
     t.notify_audio(bytes(3200))        # feed 挂起等 _connected
     await asyncio.sleep(0.6)           # 0.2s 超时生效
@@ -677,7 +677,7 @@ async def test_no_approval_and_no_inject():
     task = asyncio.create_task(relay.run())
     await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
 
-    t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    t.notify_event(b'{"event":"voice.start"}\n')
     await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
     t.notify_audio(bytes(3200))
     t.notify_event(b'{"event":"voice.end"}\n')
@@ -736,7 +736,7 @@ async def test_transcript_downlink_long():
     task = asyncio.create_task(relay.run())
     await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
 
-    t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    t.notify_event(b'{"event":"voice.start"}\n')
     await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
     t.notify_audio(bytes(3200))
     t.notify_event(b'{"event":"voice.end"}\n')
@@ -775,7 +775,7 @@ async def test_downlink_write_failure():
     task = asyncio.create_task(relay.run())
     await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
 
-    t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    t.notify_event(b'{"event":"voice.start"}\n')
     await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
     t.notify_audio(bytes(3200))
     t.notify_event(b'{"event":"voice.end"}\n')
@@ -801,7 +801,7 @@ async def test_final_timeout():
     task = asyncio.create_task(relay.run())
     await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
 
-    t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    t.notify_event(b'{"event":"voice.start"}\n')
     await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
     t.notify_audio(bytes(3200))
     t.notify_event(b'{"event":"voice.end"}\n')
@@ -829,7 +829,7 @@ async def test_slow_connect_does_not_block_events():
     task = asyncio.create_task(relay.run())
     await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
 
-    t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    t.notify_event(b'{"event":"voice.start"}\n')
     await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
     t.notify_audio(bytes(3200))
     t.notify_event(b'{"event":"voice.end"}\n')
@@ -864,7 +864,7 @@ async def test_slow_final_does_not_block_status():
     task = asyncio.create_task(relay.run())
     await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
 
-    t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    t.notify_event(b'{"event":"voice.start"}\n')
     await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
     t.notify_audio(bytes(3200))
     t.notify_event(b'{"event":"voice.end"}\n')
@@ -895,11 +895,11 @@ async def test_duplicate_voice_start_no_cross_talk():
     task = asyncio.create_task(relay.run())
     await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
 
-    t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    t.notify_event(b'{"event":"voice.start"}\n')
     await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
     t.notify_audio(bytes(3200))
     # 重复 start(异常/快速连续会话):旧会话收尾不阻塞事件消费
-    t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    t.notify_event(b'{"event":"voice.start"}\n')
     # 屏障:等旧会话收尾占位入列(仍存在旧 _session,不能用 _session is None)
     await wait_until(lambda: len(relay.session_stats) >= 1, what="旧会话已收尾占位")
     t.notify_audio(bytes(3200))

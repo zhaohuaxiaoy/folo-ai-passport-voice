@@ -5,15 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-// wire 契约用小写(build/debug/...);UI 显示用 APP_WORKFLOW_NAMES(大写)区分。
-static const char *const WF_WIRE_NAMES[APP_WF_COUNT] = {
-    [APP_WF_BUILD]   = "build",
-    [APP_WF_DEBUG]   = "debug",
-    [APP_WF_REVIEW]  = "review",
-    [APP_WF_TEST]    = "test",
-    [APP_WF_CAPTURE] = "capture",
-};
-
 // JSON 嵌套深度上限:解析在 NimBLE host task(默认栈 4KB)上下文执行,cJSON 的
 // 递归解析没有深度限制——2KB 载荷内的深层嵌套(如 [[[[...]]]])可爆栈崩溃。
 // 预检只扫结构字符({ [ 计数配对),跳过字符串(含转义),O(len) 微秒级早退。
@@ -187,11 +178,9 @@ size_t app_protocol_device_hello(char *buf, size_t cap, int proto) {
     return n;
 }
 
-size_t app_protocol_voice_start(char *buf, size_t cap, app_workflow_t wf) {
+size_t app_protocol_voice_start(char *buf, size_t cap) {
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "event", "voice.start");
-    cJSON_AddStringToObject(o, "workflow",
-                            wf < APP_WF_COUNT ? WF_WIRE_NAMES[wf] : "build");
     size_t n = serialize(o, buf, cap);
     cJSON_Delete(o);
     return n;

@@ -9,18 +9,6 @@
 extern "C" {
 #endif
 
-// ---------------- 工作流 ----------------
-typedef enum {
-    APP_WF_BUILD = 0,
-    APP_WF_DEBUG,
-    APP_WF_REVIEW,
-    APP_WF_TEST,
-    APP_WF_CAPTURE,
-    APP_WF_COUNT,
-} app_workflow_t;
-
-extern const char *const APP_WORKFLOW_NAMES[APP_WF_COUNT];
-
 // ---------------- 按键动作(下行注入,由 PC client 执行) ----------------
 typedef enum {
     APP_KEY_ENTER = 0,   // 输入框回车(提交)
@@ -204,7 +192,6 @@ typedef struct {
 // ---------------- UI 快照 ----------------
 typedef struct {
     app_stage_t    state;
-    app_workflow_t workflow;
     bool           link_up;       // false → OFFLINE(link_name DISCONNECTED)横幅 + 禁 PTT;true = 通道已通
     bool           screen_on;
     bool           net_busy;      // 音频丢帧中 → BUSY 横幅

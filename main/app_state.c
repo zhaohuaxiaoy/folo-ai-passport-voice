@@ -4,14 +4,6 @@
 #include <string.h>
 #include <stdio.h>
 
-const char *const APP_WORKFLOW_NAMES[APP_WF_COUNT] = {
-    [APP_WF_BUILD]   = "BUILD",
-    [APP_WF_DEBUG]   = "DEBUG",
-    [APP_WF_REVIEW]  = "REVIEW",
-    [APP_WF_TEST]    = "TEST",
-    [APP_WF_CAPTURE] = "CAPTURE",
-};
-
 static const char *const AGENT_STATE_NAMES[APP_AGENT_COUNT] = {
     [APP_AGENT_READY]    = "ready",
     [APP_AGENT_THINKING] = "thinking",
@@ -23,7 +15,6 @@ static const char *const AGENT_STATE_NAMES[APP_AGENT_COUNT] = {
 void app_state_init(app_state_t *s) {
     memset(s, 0, sizeof(*s));
     s->state = APP_ST_HOME;
-    s->workflow = APP_WF_BUILD;
     s->screen_on = true;
     // 开机即按"未连接"渲染(无 Mac 时不会收到断开事件,初始 true 会一直误判为
     // 链路通 → PTT 可用但音频全丢且无离线横幅)。Mac 连入订阅 EVENT 后翻 true。
@@ -51,7 +42,6 @@ static void set_toast(app_state_t *s, uint64_t now_ms, const char *msg) {
 void app_state_snapshot(const app_state_t *s, uint64_t now_ms, app_ui_snapshot_t *snap) {
     memset(snap, 0, sizeof(*snap));
     snap->state            = s->state;
-    snap->workflow         = s->workflow;
     snap->link_up          = s->link_up;
     snap->screen_on        = s->screen_on;
     snap->net_busy         = s->net_busy;
@@ -86,8 +76,7 @@ void app_state_snapshot(const app_state_t *s, uint64_t now_ms, app_ui_snapshot_t
     }
 }
 
-// DOWN 键动作(单击=回车 / 双击=清空):上行给 PC client 执行注入。
-// 工作流切换已取消(2026-08-25 按键重映射),工作流固定 BUILD。
+// 按键动作(enter/clear):上行给 PC client 执行注入。
 static void send_key_action(app_state_t *s, app_key_action_t action,
                             app_action_t *out, uint8_t *n, uint8_t max) {
     (void)s;
@@ -111,7 +100,6 @@ static void abort_to_ready(app_state_t *s, uint64_t now_ms, const char *toast,
     s->agent_state_name[0] = '\0';   // 清除旧的 agent 状态,防止 UI 残留
     app_action_t r = { .type = APP_ACT_UI_REFRESH };
     emit(out, n, max, r);
-    // 注意:不重发 workflow.switch —— 工作流未变,Mac 侧无需重复通知
 }
 
 static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,

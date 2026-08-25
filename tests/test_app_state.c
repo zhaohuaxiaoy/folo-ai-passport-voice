@@ -57,7 +57,6 @@ static void test_home_nav(void) {
     reset();
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
     assert(s.state == APP_ST_READY);
-    assert(s.workflow == APP_WF_BUILD);             // 工作流固定 build,无切换
 
     reset();
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 10);
@@ -577,7 +576,6 @@ static void test_listening_arrows_ignored(void) {
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 30);
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 40);
     assert(s.state == APP_ST_LISTENING);
-    assert(s.workflow == APP_WF_BUILD);                    // 工作流未变
 }
 
 // ---- DONE 下 60s 无按键同样熄屏,任意键唤醒 ----

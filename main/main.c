@@ -66,7 +66,7 @@ static void run_actions(const app_action_t *acts, uint8_t n)
         case APP_ACT_UI_SCREEN_ON:
             break;                       // 渲染/背光由主循环末尾统一做(快照驱动)
         case APP_ACT_SEND_VOICE_START:
-            len = app_protocol_voice_start(buf, sizeof(buf), s_state.workflow);
+            len = app_protocol_voice_start(buf, sizeof(buf));
             send_event_line(buf, len);
             break;
         case APP_ACT_SEND_VOICE_END:
