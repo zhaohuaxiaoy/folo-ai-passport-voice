@@ -366,6 +366,20 @@ class Relay:
         resp = await asyncio.wait_for(self._syscmd(cmd), timeout=10.0)
         print(f"[usb] {resp}", file=sys.stderr)
 
+    async def run_syscmd(self, line, timeout=10.0):
+        """GUI 诊断页命令桥: 执行 SYS 命令, 返回设备响应文本。
+
+        仅 USB 通道有命令面(SerialTransport.send_syscmd); BLE/WiFi 通道
+        抛 RelayError 提示。并发安全: SerialTransport 内部按 future 路由
+        SYS_RESP, 多调用方(诊断页 + stdin 循环)可同时发起。GUI 侧用
+        run_coroutine_threadsafe 从 tk 线程调用。
+        """
+        if self._syscmd is None:
+            raise RelayError(
+                "SYS 命令面仅 USB 通道支持(当前为 BLE/WiFi 通道); "
+                "完整诊断需以 USB 连接设备(mode usb)")
+        return await asyncio.wait_for(self._syscmd(line), timeout=timeout)
+
     def _cb(self, kind):
         def handler(data):
             # bleak 回调线程安全: 投递到事件循环队列, 由 drain 协程处理

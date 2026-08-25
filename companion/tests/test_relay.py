@@ -984,6 +984,60 @@ async def test_no_device():
           [e[0] for e in t.events], ["scan"])
 
 
+# ---- GUI 命令桥 run_syscmd(诊断页用)----
+
+async def test_run_syscmd():
+    """USB 通道(transport 带 send_syscmd): run_syscmd 往返设备响应。
+
+    在 relay.run() 运行期间并发调用(模拟 GUI 用 run_coroutine_threadsafe
+    从 tk 线程发起), 验证与主循环共存安全。
+    """
+    t = FakeTransport()
+    sent = []
+
+    async def send_syscmd(line):
+        sent.append(line)
+        return f"resp:{line}"
+
+    t.send_syscmd = send_syscmd   # 伪装 SerialTransport
+    relay = Relay(t,
+                  asr_factory=make_fake_asr_factory([], {}),
+                  inject_fn=FakeInjector(), timeout=5, do_approval=False,
+                  stdin_input=iter(()).__next__)   # stdin 立即 EOF
+    task = asyncio.create_task(relay.run(device_addr="FAKE:USB"))
+    await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
+
+    # relay 运行中并发调用(诊断页路径: 不做 run_coroutine_threadsafe,
+    # 直接并发 await 等价)
+    check("run_syscmd 往返", await relay.run_syscmd("st"), "resp:st")
+    # USB 通道首次校时也会经 send_syscmd(time set), 故只断言 st 在列
+    check("run_syscmd 命令透传", "st" in sent, True)
+    check("run_syscmd 不产生 CTRL 下行",
+          [e for e in t.events if e[0] == "write_gatt_char"], [])
+
+    t.disconnect_cb()
+    await wait_until(task.done, what="断开退出")
+
+
+async def test_run_syscmd_unsupported():
+    """BLE/WiFi 通道(无 send_syscmd): run_syscmd 明确报错。"""
+    t = FakeTransport()           # 无 send_syscmd → _syscmd = None
+    relay = Relay(t,
+                  asr_factory=make_fake_asr_factory([], {}),
+                  inject_fn=FakeInjector(), timeout=5)
+    task = asyncio.create_task(relay.run())
+    await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
+
+    try:
+        await relay.run_syscmd("st")
+        check("无命令面通道明确报错", False, True)
+    except RelayError as e:
+        check("无命令面通道明确报错", "仅 USB 通道" in str(e), True)
+
+    t.disconnect_cb()
+    await wait_until(task.done, what="断开退出")
+
+
 # ---- 主入口 ----
 
 async def main():
@@ -1001,6 +1055,8 @@ async def main():
     test_paste_mac_dry_run_modes()
     test_default_inject_fn_mode()
     test_key_action_mac_dry_run()
+    await test_run_syscmd()
+    await test_run_syscmd_unsupported()
     await test_approval_flow()
     await test_ctrl_write_no_response()
     await test_disconnect_cleanup()
