@@ -197,6 +197,10 @@ BaseType_t xTaskCreate(TaskFunction_t fn, const char *name, uint32_t stack_depth
     return (pthread_create(&tid, NULL, thread_main, c) == 0) ? pdPASS : pdFAIL;
 }
 
+// vTaskDelete 宿主桩:init 失败回滚路径调用,句柄指向的任务已被管理(pthread
+// join 由 xTaskCreate 线程自收),无实际可删对象 —— 空实现保证符号可链。
+void vTaskDelete(TaskHandle_t h) { (void)h; }
+
 // ==================== 外围替身与可控钩子 ====================
 
 const char *esp_err_to_name(esp_err_t code) { return code == 0 ? "ESP_OK" : "ESP_FAIL"; }

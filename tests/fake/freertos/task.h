@@ -18,3 +18,6 @@ typedef void *TaskHandle_t;
 
 // 最小宿主桩:返回固定余量(测试仅保证符号可链;真机由 ESP-IDF 实测)。
 UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t h);
+
+// 宿主桩:直接删除任务(仅 P2-6 回滚路径调用,测试无实际任务句柄)。
+void vTaskDelete(TaskHandle_t h);
