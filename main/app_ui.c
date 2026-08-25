@@ -96,7 +96,7 @@ static lv_obj_t *hint_label(lv_obj_t *parent, const char *text)
 // ---- 基底屏:天空 + 云 + 草地(复用 ui_pixel 视觉语言) ----
 static void build_background(void)
 {
-    lv_obj_t *scr = lv_screen_create();   // v9 规范 API(lv_obj_create(NULL) 亦可,语义不显式)
+    lv_obj_t *scr = lv_obj_create(NULL);  // LVGL 9.5: 创建顶层 screen(旧 lv_screen_create 已移除)
     s_bg = scr;
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(scr, lv_color_hex(UI_SKY), 0);
@@ -122,7 +122,7 @@ static void build_background(void)
 // ---- chrome:常驻顶栏 / 横幅 / Toast(顶层,所有页共用) ----
 static void build_chrome(void)
 {
-    s_chrome = lv_display_layer_top(lv_display_get_default());
+    s_chrome = lv_display_get_layer_top(lv_display_get_default());  // LVGL 9.5 改名
     lv_obj_remove_flag(s_chrome, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_pad_all(s_chrome, 0, 0);
 

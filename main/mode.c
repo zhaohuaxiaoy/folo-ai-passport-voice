@@ -19,7 +19,7 @@
 #include "ws_client.h"
 #include "esp_bt.h"
 #include "esp_log.h"
-#include "esp_restart.h"
+#include "esp_system.h"  // IDF >= 5.5: esp_restart 声明移入 esp_system.h
 
 static const char *TAG = "mode";
 
@@ -195,7 +195,7 @@ esp_err_t mode_switch(app_mode_t target)
         ws_client_stop();                 // 确保 WS 断开事件(与步骤 1 幂等)
         // USB 模式蓝牙保持开启(未 disable),重复 enable 会报 INVALID_STATE —— 按状态守卫
         if (esp_bt_controller_get_status() != ESP_BT_CONTROLLER_STATUS_ENABLED) {
-            e = esp_bt_controller_enable();   // re-sync → 广播自动恢复(真机必测)
+            e = esp_bt_controller_enable(ESP_BT_MODE_BLE);   // re-sync → 广播自动恢复(真机必测)
             if (e != ESP_OK) ESP_LOGE(TAG, "蓝牙控制器启动失败: %s", esp_err_to_name(e));
         }
     }

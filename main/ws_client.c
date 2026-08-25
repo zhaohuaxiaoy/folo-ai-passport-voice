@@ -110,7 +110,8 @@ esp_err_t ws_client_init(void) {
     char url[128];
     nvs_settings_get_ws_url(url, sizeof(url));
     ESP_LOGI(TAG, "WS 目标: %s", url);
-    s_client = esp_websocket_client_init(&default_config(url));
+    esp_websocket_client_config_t cfg = default_config(url);  // 临时对象不可取址
+    s_client = esp_websocket_client_init(&cfg);
     if (!s_client) {
         vSemaphoreDelete(s_tx_mutex);
         s_tx_mutex = NULL;
@@ -140,7 +141,8 @@ static esp_err_t rebuild_client(const char *url, bool persist) {
     s_connected = false;
     s_rx_len = 0;
     s_discard_line = false;
-    s_client = esp_websocket_client_init(&default_config(url));
+    esp_websocket_client_config_t cfg = default_config(url);
+    s_client = esp_websocket_client_init(&cfg);
     if (!s_client) {
         xSemaphoreGive(s_tx_mutex);
         return ESP_FAIL;

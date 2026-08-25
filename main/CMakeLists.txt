@@ -14,6 +14,7 @@ idf_component_register(
          "wifi_app.c"
          "ws_client.c"
          "mdns_resolver.c"
+         "time_sync.c"
          "mode.c"
          "usb_link.c"
          "usb_link_framing.c"
@@ -21,7 +22,7 @@ idf_component_register(
     REQUIRES bsp
              json
              nvs_flash
-             esp_console
+             console  # IDF >= 5.5: esp_console 组件已重命名为 console
              bt
              esp_wifi
              esp_netif

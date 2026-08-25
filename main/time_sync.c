@@ -6,6 +6,7 @@
 #include "nvs_settings.h"
 #include "esp_log.h"
 #include <time.h>
+#include <sys/time.h>  // settimeofday
 #include <stdio.h>
 
 static const char *TAG = "time_sync";

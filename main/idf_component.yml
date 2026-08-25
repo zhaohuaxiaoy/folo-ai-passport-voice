@@ -1,0 +1,5 @@
+# IDF >= 5.5: mdns / esp_websocket_client 已移入 Component Manager 注册表,
+# 需在此声明, 由 idf.py 自动下载到 managed_components/。
+dependencies:
+  espressif/mdns: "*"
+  espressif/esp_websocket_client: "*"

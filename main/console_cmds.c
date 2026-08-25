@@ -18,7 +18,7 @@
 #include "esp_console.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_restart.h"
+#include "esp_system.h"  // IDF >= 5.5: esp_restart 声明移入 esp_system.h
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"

@@ -42,9 +42,9 @@ static bool query_and_report(void)
     char url[APP_WS_URL_MAX];
     bool found = false;
     for (mdns_ip_addr_t *a = results->addr; a; a = a->next) {
-        if (a->ip.type == ESP_IPADDR_TYPE_V4) {
+        if (a->addr.type == ESP_IPADDR_TYPE_V4) {   // espressif/mdns 2.x: 字段 ip → addr
             snprintf(url, sizeof(url), "ws://" IPSTR ":%u",
-                     IP2STR(&a->ip.u_addr.ip4), results->port);
+                     IP2STR(&a->addr.u_addr.ip4), results->port);
             found = true;
             break;
         }
