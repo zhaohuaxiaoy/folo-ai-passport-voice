@@ -12,3 +12,7 @@ companion/config.local.json
 companion/.env
 companion/.venv/
 __pycache__/
+
+# 固件/向导发布产物(不入库)
+dist/
+.cache/

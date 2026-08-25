@@ -106,11 +106,12 @@ ble_audio_err_t ble_audio_event_chunks(ble_audio_chunk_t *chunks, size_t chunks_
 #include "host/ble_gatt.h"
 #include "host/ble_hs.h"
 #include "host/ble_hs_mbuf.h"
+#include "host/util/util.h"  // ble_hs_util_ensure_addr
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
-#include "store/config/store_config.h"
+#include "store/config/ble_store_config.h"  // IDF 5.5: store_config.h 改名
 
 static const char *TAG = "ble_audio";
 
@@ -157,6 +158,8 @@ static void drop_count_inc(volatile uint32_t *c)
 static SemaphoreHandle_t s_tx_done_sem;
 static SemaphoreHandle_t s_tx_mutex;
 static volatile uint16_t s_tx_status = 0;
+static uint8_t s_own_addr_type;                       // infer 的自身地址类型(adv_start 用)
+static struct ble_gap_event_listener s_gap_listener;  // 全局 GAP 监听(含 NOTIFY_TX 流控)
 
 // 事件下行队列:notify_event 只做非阻塞入队,event_worker 串行发送。
 // 动机:notify_one 单片最长 ~150ms(mutex 100ms + NOTIFY_TX 50ms),若在产生
@@ -209,14 +212,7 @@ static bool notify_one(uint16_t conn_handle, uint16_t val_handle,
 }
 
 // ---- GATT server 事件:NimBLE 完成一次 notify 传输后回调(host 任务上下文) ----
-static int gatts_event_cb(struct ble_gatts_event *event, void *arg) {
-    (void)arg;
-    if (event->type == BLE_GATTS_EVENT_NOTIFY_TX) {
-        s_tx_status = event->notify_tx.status;
-        xSemaphoreGive(s_tx_done_sem);
-    }
-    return 0;
-}
+// IDF 5.5: gatts 事件回调移除,NOTIFY_TX 归入 GAP 事件(见 gap_event_handler)。
 
 // ---- CTRL 写回调:长度/语法校验 + 投事件,零阻塞(不调任何慢路径) ----
 static int ctrl_write(uint16_t conn_handle, struct ble_gatt_access_ctxt *ctxt) {
@@ -248,11 +244,11 @@ static int gatt_access(uint16_t conn_handle, uint16_t attr_handle,
 
 static const struct ble_gatt_svc_def gatt_defs[] = {
     {
-        .type = BLE_GATT_SVC_DEF,
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,  // NimBLE 5.5: 宏 BLE_GATT_SVC_DEF 移除
         .uuid = &s_audio_svc_uuid.u,
         .characteristics = (struct ble_gatt_chr_def[]) {
             {
-                .uuid = &(ble_uuid16_t){ BLE_UUID16_INIT(CTRL_CHR_UUID) }.u,
+                .uuid = BLE_UUID16_DECLARE(CTRL_CHR_UUID),
                 .access_cb = gatt_access,
                 // WRITE_NO_RSP: Mac 端下行(response=False)免等 ATT 确认 RTT(~5-20ms),
                 // 转写预览/审批更快落屏。NimBLE 对 WRITE_REQ 与 WRITE_CMD 都调用同一
@@ -262,12 +258,12 @@ static const struct ble_gatt_svc_def gatt_defs[] = {
                 .val_handle = &s_ctrl_val_handle,
             },
             {
-                .uuid = &(ble_uuid16_t){ BLE_UUID16_INIT(EVENT_CHR_UUID) }.u,
+                .uuid = BLE_UUID16_DECLARE(EVENT_CHR_UUID),
                 .access_cb = gatt_access,
                 .flags = BLE_GATT_CHR_F_NOTIFY,
                 .val_handle = &s_event_val_handle,
                 .descriptors = (struct ble_gatt_dsc_def[]) {
-                    { .uuid = &(ble_uuid16_t){ BLE_UUID16_INIT(0x2902) }.u,
+                    { .uuid = BLE_UUID16_DECLARE(0x2902),
                       // WRITE_ENC: 订阅(写 CCCD)要求已加密连接。
                       // NimBLE 无 NOTIFY_ENC 特征 flag;在描述符上要求加密 →
                       // 未配对连接订阅被拒(0x0F), macOS 中央访问需加密属性时
@@ -279,12 +275,12 @@ static const struct ble_gatt_svc_def gatt_defs[] = {
                 },
             },
             {
-                .uuid = &(ble_uuid16_t){ BLE_UUID16_INIT(AUDIO_CHR_UUID) }.u,
+                .uuid = BLE_UUID16_DECLARE(AUDIO_CHR_UUID),
                 .access_cb = gatt_access,
                 .flags = BLE_GATT_CHR_F_NOTIFY,
                 .val_handle = &s_audio_val_handle,
                 .descriptors = (struct ble_gatt_dsc_def[]) {
-                    { .uuid = &(ble_uuid16_t){ BLE_UUID16_INIT(0x2902) }.u,
+                    { .uuid = BLE_UUID16_DECLARE(0x2902),
                       .att_flags = BLE_ATT_F_READ | BLE_ATT_F_WRITE
                                  | BLE_ATT_F_WRITE_ENC, },
                     { 0 },
@@ -300,13 +296,17 @@ static const struct ble_gatt_svc_def gatt_defs[] = {
 static int gap_event_handler(struct ble_gap_event *event, void *arg) {
     (void)arg;
     switch (event->type) {
+    case BLE_GAP_EVENT_NOTIFY_TX:      // NimBLE 5.5: NOTIFY_TX 归入 GAP 事件
+        s_tx_status = event->notify_tx.status;
+        xSemaphoreGive(s_tx_done_sem);
+        break;
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
             s_conn = event->connect.conn_handle;
             ESP_LOGI(TAG, "已连接 (handle %u)", s_conn);
             // 吞吐工程:2M PHY + 快连接间隔(15-30ms / latency 0);尽力而为,失败不致命
-            int rc = ble_gap_set_preferred_phy(s_conn, BLE_GAP_LE_PHY_2M,
-                                               BLE_GAP_LE_PHY_2M, 0);
+            int rc = ble_gap_set_prefered_le_phy(s_conn, BLE_GAP_LE_PHY_2M_MASK,
+                                                 BLE_GAP_LE_PHY_2M_MASK, 0);
             if (rc != 0) ESP_LOGW(TAG, "2M PHY 请求失败 %d", rc);
             const struct ble_gap_upd_params upd = {
                 .itvl_min = 12,          // 15ms(1.25ms 单位)
@@ -326,7 +326,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg) {
 
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, "断开 (reason %d)", event->disconnect.reason);
-        if (event->disconnect.conn_handle == s_conn) {
+        if (event->disconnect.conn.conn_handle == s_conn) {  // NimBLE 5.5: 句柄移入 conn 描述
             s_conn = 0xFFFF;
             s_audio_conn = 0xFFFF;
             s_event_subscribed = false;
@@ -379,14 +379,17 @@ static void start_advertising(void) {
     adv.name_len = strlen(DEVICE_NAME);
     adv.name_is_complete = 1;
     // 服务 UUID 一并广播,便于扫描端按 0xA2B0 过滤(bleak 可按 UUID 发现)
-    adv.svc_uuid128 = (ble_uuid128_t *)&s_audio_svc_uuid;
-    adv.num_svcs128 = 1;
+    adv.uuids128 = (ble_uuid128_t *)&s_audio_svc_uuid;   // NimBLE 5.5 字段改名
+    adv.num_uuids128 = 1;
     int rc = ble_gap_adv_set_fields(&adv);
     if (rc != 0) { ESP_LOGE(TAG, "adv set_fields 失败 %d", rc); return; }
 
     adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
     adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
-    rc = ble_gap_adv_start(gap_event_handler, &adv_params);
+    // NimBLE 5.5: 6 参(own_addr, direct_addr, duration, params, cb, arg)。
+    // cb 传 NULL 避免与全局 listener 双派发(事件会同时投给连接 cb 与 listener,
+    // NOTIFY_TX 信号量不能给两次);连接事件统一走 listener。
+    rc = ble_gap_adv_start(s_own_addr_type, NULL, 0, &adv_params, NULL, NULL);
     ESP_LOGI(TAG, "广播 %s (rc=%d)", DEVICE_NAME, rc);
 }
 
@@ -428,7 +431,8 @@ int ble_audio_init(void) {
     ble_hs_cfg.sync_cb = on_sync;
     // Just Works 无输入输出配对(macOS 主动发起);CONFIG_BT_NIMBLE_SM_SC=y 只允许 SC 配对
     ble_hs_cfg.sm_io_cap = BLE_HS_IO_NO_INPUT_OUTPUT;
-    ble_store_config_init();   // 配合 CONFIG_BT_NIMBLE_NVS_PERSIST=y 持久化配对(bond)
+    // 配对持久化:CONFIG_BT_NIMBLE_NVS_PERSIST=y 时 sysinit 自动注册 store 回调,
+    // 无需手动 ble_store_config_init(5.5 头文件不再导出该函数)。
     ble_svc_gap_init();
     ble_svc_gatt_init();
     ble_svc_gap_device_name_set(DEVICE_NAME);
@@ -437,14 +441,15 @@ int ble_audio_init(void) {
     if (rc != 0) { ESP_LOGE(TAG, "count_cfg 失败 %d", rc); return -1; }
     rc = ble_gatts_add_svcs(gatt_defs);
     if (rc != 0) { ESP_LOGE(TAG, "add_svcs 失败 %d", rc); return -1; }
-    rc = ble_gatts_set_event_cb(gatts_event_cb, NULL);   // NOTIFY_TX 流控事件
-    if (rc != 0) { ESP_LOGE(TAG, "set_event_cb 失败 %d", rc); return -1; }
+    rc = ble_gap_event_listener_register(&s_gap_listener, gap_event_handler, NULL);
+    if (rc != 0) { ESP_LOGE(TAG, "listener 注册失败 %d", rc); return -1; }
     rc = ble_gatts_start();
     if (rc != 0) { ESP_LOGE(TAG, "gatts_start 失败 %d", rc); return -1; }
 
     uint8_t addr_type;
     rc = ble_hs_id_infer_auto(0, &addr_type);
     if (rc != 0) { ESP_LOGE(TAG, "id_infer_auto 失败 %d", rc); return -1; }
+    s_own_addr_type = addr_type;
     rc = ble_hs_util_ensure_addr(0);
     if (rc != 0) { ESP_LOGE(TAG, "ensure_addr 失败 %d", rc); return -1; }
 
