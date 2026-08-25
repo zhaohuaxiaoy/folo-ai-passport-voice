@@ -283,6 +283,47 @@ class StreamingASR:
                 pass
 
 
+async def asr_test_connection(cfg=None, timeout=8.0):
+    """零音频握手验证 Key/端点(向导 ASR 配置页"测试连接"用)。
+
+    流程: 开 WS(与 StreamingASR 同鉴权头) → 发 full client request →
+    等首帧: result(含空 ack)→ 成功返回; error 帧 → RuntimeError(带 code);
+    超时/连接被关 → RuntimeError。任何路径都不回显密钥。
+    """
+    # 与 load_config 合并: 保证 resource_id/ws_url/model 缺省(向导传入的
+    # config.local.json 可能只含部分字段)
+    merged = {**load_config(), **(cfg or {})}
+    asr = StreamingASR(merged)
+    ws = None
+    try:
+        ws = await asr._open_ws()
+    except Exception as e:
+        raise RuntimeError(f"WebSocket 连接失败: {e}") from e
+    try:
+        req = frame(0x1, gzip.compress(
+            json.dumps(build_full_request(merged)).encode("utf-8")))
+        await ws.send(req)
+        raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+        kind, flags, data = parse_server(raw)
+        if kind == "error":
+            raise RuntimeError(
+                f"ASR 鉴权失败({data.get('code', '?')}): "
+                f"{data.get('message', '?')}")
+        return data  # 空 ack: {}; 罕见直接回文本: {"result": {...}}
+    except asyncio.TimeoutError as e:
+        raise RuntimeError(f"等待 ASR 响应超时({timeout:.0f}s)") from e
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise RuntimeError(f"ASR 连接异常: {e}") from e
+    finally:
+        if ws is not None:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+
+
 # ---- 文件模式(回归保留) ----
 
 async def transcribe(pcm, cfg, chunk_bytes=CHUNK_BYTES_100MS, on_partial=None):
