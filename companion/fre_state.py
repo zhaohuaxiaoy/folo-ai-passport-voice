@@ -87,6 +87,25 @@ def write_cfg(cfg):
     return merged
 
 
+def write_asr_cfg(key):
+    """写入火山 API Key(白名单合并: 只更新 volcano_api_key, 其余保留)。
+
+    与 write_cfg 的区别: key 属机密, 单字段专用入口(ASR 配置页); 密钥
+    只落 git-ignored 的 config.local.json, 绝不入日志/打印。空 key 抛
+    ValueError。
+    """
+    key = (key or "").strip()
+    if not key:
+        raise ValueError("火山 API Key 不能为空")
+    merged = load_or_default_cfg()
+    merged["volcano_api_key"] = key
+    p = config_path()
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(merged, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    return merged
+
+
 def mac_permission_status():
     """Mac 授权状态 → list[("accessibility"|"bluetooth", "ok"|"missing")]。
 

@@ -108,6 +108,54 @@ def test_state_machine():
     print(f"[{'PASS' if not FAILURES else 'FAIL'}] 状态机 {len(cases)} 例")
 
 
+def test_write_asr_cfg_keeps_others():
+    """ASR Key 写入只更新 volcano_api_key, 其他字段(含既有 key)不丢。"""
+    with tempfile.TemporaryDirectory() as td:
+        real = _patch_config_path(td)
+        try:
+            p = os.path.join(td, "config.local.json")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write('{"volcano_api_key": "OLD", "channel": "ble",'
+                        ' "inject_mode": "unicode"}')
+            merged = fre_state.write_asr_cfg("  NEW-KEY  ")
+            check("key 更新(去空格)", merged.get("volcano_api_key"), "NEW-KEY")
+            check("channel 保留", merged.get("channel"), "ble")
+            check("inject_mode 保留", merged.get("inject_mode"), "unicode")
+            with open(p, "r", encoding="utf-8") as f:
+                again = __import__("json").load(f)
+            check("落盘保留其他字段", again.get("channel"), "ble")
+        finally:
+            fre_state.config_path = real
+
+
+def test_write_asr_cfg_from_empty():
+    """无既有 config: 从空文件写入 key 可解析。"""
+    with tempfile.TemporaryDirectory() as td:
+        real = _patch_config_path(td)
+        try:
+            merged = fre_state.write_asr_cfg("K1")
+            check("空起步写入", merged.get("volcano_api_key"), "K1")
+        finally:
+            fre_state.config_path = real
+
+
+def test_write_asr_cfg_rejects_empty():
+    """空/空白 key 拒绝, 不落盘。"""
+    with tempfile.TemporaryDirectory() as td:
+        real = _patch_config_path(td)
+        try:
+            for bad in ("", "   ", None):
+                try:
+                    fre_state.write_asr_cfg(bad)
+                    check(f"空 key {bad!r} 拒绝", False, True)
+                except ValueError:
+                    check(f"空 key {bad!r} 拒绝", True, True)
+            check("拒绝后未落盘", os.path.exists(
+                os.path.join(td, "config.local.json")), False)
+        finally:
+            fre_state.config_path = real
+
+
 def test_permission_status_non_darwin():
     """非 darwin(如构建机 Linux/CI): 权限列表为空(无 TCC)。"""
     saved = sys.platform
@@ -134,6 +182,9 @@ def main():
     test_write_cfg_from_empty()
     test_validate_fields()
     test_state_machine()
+    test_write_asr_cfg_keeps_others()
+    test_write_asr_cfg_from_empty()
+    test_write_asr_cfg_rejects_empty()
     test_permission_status_non_darwin()
     test_open_settings_non_darwin()
     if FAILURES:
