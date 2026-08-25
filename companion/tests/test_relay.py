@@ -418,6 +418,24 @@ async def test_key_action_downlink():
     await wait_until(task.done, what="断开退出")
 
 
+async def test_on_phase_callback():
+    """on_phase 回调: 连接序列 scanning→connecting→connected, 断连触发
+    disconnected; 不传 on_phase 时无行为变化(既有测试已隐式覆盖)。"""
+    t = FakeTransport()
+    phases = []
+    relay = Relay(t,
+                  asr_factory=make_fake_asr_factory([], {}),
+                  inject_fn=FakeInjector(), timeout=5,
+                  on_phase=phases.append)
+    task = asyncio.create_task(relay.run())
+    await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
+    check("on_phase 连接序列", phases, ["scanning", "connecting", "connected"])
+
+    t.disconnect_cb()
+    await wait_until(task.done, what="断连退出")
+    check("on_phase 断连触发", "disconnected" in phases, True)
+
+
 def test_paste_mac_dry_run_modes():
     """Mac paste_text dry_run: unicode/clipboard 路径打印与 mode 校验。"""
     import io
@@ -979,6 +997,7 @@ async def main():
     await test_time_sync_downlink_ble()
     await test_time_sync_downlink_usb()
     await test_key_action_downlink()
+    await test_on_phase_callback()
     test_paste_mac_dry_run_modes()
     test_default_inject_fn_mode()
     test_key_action_mac_dry_run()

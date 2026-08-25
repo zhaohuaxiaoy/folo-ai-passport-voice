@@ -185,11 +185,15 @@ class Relay:
     """BLE 中转主逻辑。transport / asr_factory / inject_fn 均可注入(单测)。"""
 
     def __init__(self, transport=None, *, asr_factory=None, inject_fn=None,
-                 key_action_fn=None, timeout=60.0, do_inject=True,
+                 key_action_fn=None, on_phase=None, timeout=60.0, do_inject=True,
                  do_approval=True, dry_run=False, connect_timeout_s=5.0,
                  stdin_input=None):
         from asr_client import StreamingASR
         from inject import paste_text, key_action
+        # GUI 前端(FRE 向导)状态钩子: on_phase(phase) 在 relay 线程调用,
+        # phase ∈ scanning/connecting/connected/disconnected/
+        #       session_start/session_end; 默认 None 时零行为变化。
+        self._on_phase = on_phase
         self._transport = transport or BleakTransport()
         # USB 通道扩展探测:transport 带 send_syscmd(SerialTransport) →
         # 启用 stdin `!命令` 交互(USB 模式无控制台)与通道专属提示
@@ -223,6 +227,8 @@ class Relay:
 
     async def run(self, device_addr=None):
         t = self._transport
+        if self._on_phase:
+            self._on_phase("scanning")
         if not device_addr:
             addr = await t.scan_for_device(DEVICE_NAME, SCAN_TIMEOUT)
             if not addr:
@@ -234,9 +240,13 @@ class Relay:
                     f"未发现设备 {DEVICE_NAME}(设备开机并处于 BLE 广播状态?)")
             device_addr = addr
         print(f"[relay] 连接 {device_addr} ...")
+        if self._on_phase:
+            self._on_phase("connecting")
         try:
             await t.connect(device_addr, on_disconnect=self._on_disconnected)
             print("[relay] 已连接, 订阅 EVENT/AUDIO")
+            if self._on_phase:
+                self._on_phase("connected")
             await t.start_notify(EVENT_UUID, self._cb("event"))
             await t.start_notify(AUDIO_UUID, self._cb("audio"))
         except RelayError:
@@ -306,6 +316,8 @@ class Relay:
 
     def _on_disconnected(self, *_):
         print("[relay] 连接已断开", file=sys.stderr)
+        if self._on_phase:
+            self._on_phase("disconnected")
         self._stop.set()
         self._safe_put(self._audio_q, ("stop", b""))
         self._safe_put(self._event_q, ("stop", b""))
@@ -457,6 +469,8 @@ class Relay:
             self._session = None
             self._start_closing(s)         # 旧会话后台收尾 + 进收尾槽(不阻塞)
         print("[voice] start")
+        if self._on_phase:
+            self._on_phase("session_start")
         self._session = _VoiceSession(self, self._asr_factory())
         await self._session.begin()        # 立即返回(ASR 连接后台化)
 
@@ -484,6 +498,8 @@ class Relay:
             print(f"[audio] 帧投喂失败(会话已结束?): {e}", file=sys.stderr)
 
     async def _on_voice_end(self):
+        if self._on_phase:
+            self._on_phase("session_end")
         if self._session is None:
             print("[voice] 收到 voice.end 但无进行中会话, 忽略",
                   file=sys.stderr)
