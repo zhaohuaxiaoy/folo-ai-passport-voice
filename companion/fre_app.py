@@ -98,6 +98,8 @@ class FREApp:
         self.device_addr = None
         self.probe_result = None         # ("ble"|"wifi"|"usb", addr)
         self.last_error = ""
+        self._tray = None                # pystray Icon(连接成功后启动)
+        self._tray_state = {"connected": False, "device": "", "listening": False}
 
         self.cfg = fre_state.load_or_default_cfg()
         self.channel = self.cfg.get("channel", "ble")
@@ -451,6 +453,8 @@ class FREApp:
                     self._on_phase(payload)
                 elif kind == "syscmd_resp":
                     self._on_syscmd_resp(payload)
+                elif kind == "tray_action":
+                    self._on_tray_action(payload)
                 elif kind == "error":
                     self.last_error = payload
                 elif kind == "relay_done":
@@ -472,12 +476,76 @@ class FREApp:
                 self._row_vars["ASR"].set("未配置")
             self.show_page("status")
             self.set_status(f"已连接 {self.channel.upper()}, 按住 ● 讲话")
+            self._tray_phase("connected")
+        elif phase == "session_start":
+            self._tray_phase("listening")
+        elif phase == "session_end":
+            self._tray_phase("idle")
         elif phase == "disconnected":
+            self._tray_phase("disconnected")
             self.show_page("discover")
             self.set_status("连接已断开")
         elif phase == "failed":
+            self._tray_phase("disconnected")
             self.show_page("discover")
             self.set_status(self.last_error or "连接失败")
+
+    # ---------------- 托盘 ----------------
+
+    def _tray_phase(self, what):
+        """按 relay phase 更新托盘状态(无托盘/未启动时无操作)。"""
+        if self._tray is None:
+            return
+        st = self._tray_state
+        if what == "connected":
+            st.update(connected=True, listening=False,
+                      device=self.device_addr or "")
+            self._start_tray()
+        elif what == "listening":
+            st["listening"] = True
+        elif what == "idle":
+            st["listening"] = False
+        elif what == "disconnected":
+            st.update(connected=False, listening=False)
+        try:
+            from tray import update_menu
+            update_menu(self._tray, st)
+        except Exception as e:  # noqa: BLE001 托盘异常不阻塞主流程
+            print(f"[fre] 托盘菜单更新失败: {e}", file=sys.stderr)
+
+    def _start_tray(self):
+        """连接成功后启动托盘(非 dry-run 且未禁用)。回调只 queue.put 回主线程。"""
+        if self._tray is not None or self.no_tray or self.dry_run:
+            return
+        try:
+            from tray import create_tray
+        except Exception as e:  # noqa: BLE001
+            print(f"[fre] 托盘不可用: {e}", file=sys.stderr)
+            return
+        try:
+            self._tray = create_tray(
+                self._tray_state,
+                on_settings=lambda: self.phase_q.put(("tray_action",
+                                                      "settings")),
+                on_diagnostics=lambda: self.phase_q.put(("tray_action",
+                                                         "diagnostics")),
+                on_quit=lambda: self.phase_q.put(("tray_action", "quit")))
+            self._tray.run_detached()
+            self.set_status("已驻留托盘 (关闭窗口不退出, 托盘 Quit 退出)")
+        except Exception as e:  # noqa: BLE001
+            print(f"[fre] 托盘启动失败: {e}", file=sys.stderr)
+            self._tray = None
+
+    def _on_tray_action(self, action):
+        if action == "settings":
+            self.root.deiconify()
+            self.root.lift()
+        elif action == "diagnostics":
+            self.root.deiconify()
+            self.root.lift()
+            self.show_diagnostics()
+        elif action == "quit":
+            self._shutdown()
 
     def on_reset(self):
         if self._loop is not None and self.relay_task is not None:
@@ -543,11 +611,24 @@ class FREApp:
         self._diag_append(str(resp))
 
     def on_close(self):
-        """收束后台 relay(取消 task + 等线程退出), 无残留。"""
+        """关闭窗口: 托盘驻留时隐藏到托盘, 否则完整退出。"""
+        if self._tray is not None:
+            self.root.withdraw()
+            return
+        self._shutdown()
+
+    def _shutdown(self):
+        """完整退出: 收束后台 relay(取消 task + 等线程退出) + 停托盘。"""
         if self._loop is not None and self.relay_task is not None:
             self._loop.call_soon_threadsafe(self.relay_task.cancel)
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=5)
+        if self._tray is not None:
+            try:
+                self._tray.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self._tray = None
         self.root.destroy()
 
 
