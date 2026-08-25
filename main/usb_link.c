@@ -19,6 +19,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "driver/usb_serial_jtag.h"
 #include <stdarg.h>
@@ -36,25 +37,31 @@ static const char *TAG = "usb_link";
 #define USB_SYS_LINE_MAX      128     /* SYS 命令文本上限(帧协议契约) */
 #define USB_RESP_MAX          2048    /* SYS_RESP 载荷上限 */
 
-static bool s_session_up;                  /* 收到 ping → true */
+static volatile bool s_session_up;         /* 收到 ping → true;跨任务读写,单核无撕裂,volatile 显式化 */
 static bool s_connected;                   /* is_connected 上次采样 */
+static SemaphoreHandle_t s_tx_mux;         /* 发送互斥:串行化三发送方对 s_tx_buf 的组帧+写 */
 static usb_frame_ctx_t s_fr_ctx;           /* 帧解码状态机 */
 static uint8_t s_fr_payload[USB_FRAME_PAYLOAD_MAX];
 static uint8_t s_tx_buf[USB_FRAME_HEADER + USB_FRAME_PAYLOAD_MAX];
 static char s_sys_cmd[USB_SYS_LINE_MAX + 1];
 static char s_sys_resp[USB_RESP_MAX];
 
-/* 日志环(esp_log 重定向):覆盖写,满则覆盖最旧 */
+/* 日志环(esp_log 重定向):覆盖写,满则覆盖最旧。
+ * 任意任务(全局 esp_log 重定向)可并发写,console `log` 并发读 → 临界区保护。
+ * 临界区微秒级,不阻塞日志路径的任何任务。 */
 static char s_log_ring[USB_LOG_RING_CAP];
 static size_t s_log_w, s_log_n;
+static portMUX_TYPE s_log_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static void ring_write(const char *s, size_t n)
 {
+    portENTER_CRITICAL(&s_log_mux);
     for (size_t i = 0; i < n; i++) {
         s_log_ring[s_log_w] = s[i];
         s_log_w = (s_log_w + 1) % USB_LOG_RING_CAP;
         if (s_log_n < USB_LOG_RING_CAP) s_log_n++;
     }
+    portEXIT_CRITICAL(&s_log_mux);
 }
 
 static int usb_log_vprintf(const char *fmt, va_list args)
@@ -70,13 +77,19 @@ static int usb_log_vprintf(const char *fmt, va_list args)
 size_t usb_link_dump_log(char *buf, size_t cap)
 {
     if (buf == NULL || cap == 0) return 0;
-    if (s_log_n == 0) { buf[0] = '\0'; return 0; }
+    portENTER_CRITICAL(&s_log_mux);
+    if (s_log_n == 0) {
+        portEXIT_CRITICAL(&s_log_mux);
+        buf[0] = '\0';
+        return 0;
+    }
     size_t want = s_log_n < cap - 1 ? s_log_n : cap - 1;
     size_t start = (s_log_w + USB_LOG_RING_CAP - s_log_n) % USB_LOG_RING_CAP;
     size_t first = USB_LOG_RING_CAP - start;
     if (first > want) first = want;
     memcpy(buf, s_log_ring + start, first);
     if (want > first) memcpy(buf + first, s_log_ring, want - first);
+    portEXIT_CRITICAL(&s_log_mux);
     buf[want] = '\0';
     return want;
 }
@@ -99,12 +112,20 @@ static int usb_send_frame(uint8_t type, const uint8_t *payload, size_t len,
                           TickType_t timeout_ticks)
 {
     if (!usb_link_session_active()) return -1;
-    size_t n = usb_frame_build(type, payload, len, s_tx_buf, sizeof(s_tx_buf));
-    if (n == 0) return -1;
-    // 一次调用把整帧拷入 TX ring(4096 ≥ 3212B 音频帧;tx_mux 串行化);
+    // 发送互斥:app_task(EVENT)/ble_worker(AUDIO)/读任务(SYS_RESP)三上下文
+    // 共享 s_tx_buf,组帧+写必须持锁,否则阻塞写(20-100ms)期间另一任务
+    // 覆写缓冲 → 帧交错/校验失败。锁等待有界(200ms ≥ 写超时上限),拿不到
+    // → 丢帧(与 BLE 丢帧语义一致)。
+    if (xSemaphoreTake(s_tx_mux, pdMS_TO_TICKS(200)) != pdTRUE) return -1;
+    // 一次调用把整帧拷入 TX ring(4096 ≥ 3212B 音频帧);
     // 返回 ≠ 帧长 = 主机未及时读 → 部分写入,丢帧(与 BLE 语义一致)
-    int written = usb_serial_jtag_write_bytes(s_tx_buf, n, timeout_ticks);
-    return (written == (int)n) ? 0 : -1;
+    size_t n = usb_frame_build(type, payload, len, s_tx_buf, sizeof(s_tx_buf));
+    int written = 0;
+    if (n > 0) {
+        written = usb_serial_jtag_write_bytes(s_tx_buf, n, timeout_ticks);
+    }
+    xSemaphoreGive(s_tx_mux);
+    return (n == 0 || written != (int)n) ? -1 : 0;
 }
 
 int usb_link_send_event(const char *line, size_t len)
@@ -238,6 +259,11 @@ static void usb_read_task(void *arg)
 
 esp_err_t usb_link_init(void)
 {
+    s_tx_mux = xSemaphoreCreateMutex();
+    if (s_tx_mux == NULL) {
+        ESP_LOGE(TAG, "发送互斥锁创建失败");
+        return ESP_ERR_NO_MEM;
+    }
     usb_serial_jtag_driver_config_t cfg = {
         .tx_buffer_size = 4096,   // 一次 write_bytes 容整 3200B 音频帧
         .rx_buffer_size = 4096,
