@@ -199,6 +199,24 @@ def test_reassembly_audio():
     buf, frames = reassemble([bytearray(b"\x00" * 500), b""])
     check("AUDIO 空 chunk 无副作用", (len(frames), len(buf)), (0, 500))
 
+    # 整帧直通(USB 通道): bytes 整帧零复制, frames[0] 即 chunk 本体
+    chunk = b"\xee" * AUDIO_FRAME_BYTES
+    buf, frames = reassemble([chunk])
+    check("AUDIO 整帧直通", (len(frames), len(buf)), (1, 0))
+    check("AUDIO 直通零复制(内存标识)", frames[0] is chunk, True)
+
+    # 非 bytes(bytearray)整帧: 不走直通, 走原路径返回切片副本(类型契约保持:
+    # 从 bytearray 累积缓冲切片 → bytearray, 与既有实现逐字节一致)
+    ba = bytearray(b"\xdd" * AUDIO_FRAME_BYTES)
+    buf, frames = reassemble([ba])
+    check("AUDIO bytearray 仍出 1 帧", len(frames), 1)
+    check("AUDIO bytearray 副本非本体", frames[0] is not ba, True)
+    check("AUDIO bytearray 帧类型 bytearray(原路径)", type(frames[0]) is bytearray, True)
+
+    # buf 有残留时整帧 chunk 不得直通(残留必须并入)
+    buf, frames = reassemble([b"\xcd" * 100, b"\xee" * AUDIO_FRAME_BYTES])
+    check("AUDIO 残留+整帧走重组", (len(frames), len(buf)), (1, 100))
+
 
 def test_reassembly_event():
     line = b'{"event":"voice.start","workflow":"build"}'

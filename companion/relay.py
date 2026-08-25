@@ -78,6 +78,13 @@ def reassemble_audio(buf, chunk, max_buf=REASSEMBLE_AUDIO_MAX):
     重新对齐, 防内存无限增长。原地 extend/del: 避免每 chunk 整缓冲拷贝
     (buf + bytes 是 O(n) 重分配)。
     """
+    # 整帧直通: 累积缓冲为空且 chunk 恰为整帧 → 零复制直接作为帧(USB 通道
+    # SerialTransport 分帧后给整 3200B payload, extend+切片+del 全为冗余)。
+    # 仅 bytes(传输层真实输入类型): bytearray 输入走原路径(bytearray 切片),
+    # 类型行为与既有实现一致。feed 端 bytes(pcm_bytes) 通用, bytes 帧兼容。
+    # buf 有残留(跨界)时不得直通。
+    if not buf and isinstance(chunk, bytes) and len(chunk) == AUDIO_FRAME_BYTES:
+        return buf, [chunk]
     buf.extend(chunk)
     frames = []
     while len(buf) >= AUDIO_FRAME_BYTES:
