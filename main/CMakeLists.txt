@@ -15,6 +15,8 @@ idf_component_register(
          "ws_client.c"
          "mdns_resolver.c"
          "mode.c"
+         "usb_link.c"
+         "usb_link_framing.c"
     INCLUDE_DIRS "."
     REQUIRES bsp
              json
@@ -26,4 +28,5 @@ idf_component_register(
              esp_event
              mdns
              esp_websocket_client
+             esp_driver_usb_serial_jtag
 )

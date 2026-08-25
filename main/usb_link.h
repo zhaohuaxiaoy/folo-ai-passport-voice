@@ -38,6 +38,11 @@ void usb_link_reset_session(void);
 // 恢复 esp_log 输出到 USB 串口(离开 USB 模式时调用;驱动保持安装无冲突)。
 void usb_link_restore_log(void);
 
+// 导出日志环(console `log` 命令:USB 模式日志进 RAM 环,经此取回)。
+// 返回写入 buf 的字节数(≤ cap-1,保证 NUL 结尾)。REPL 模式下环为空。
+#define USB_LOG_RING_CAP 4096
+size_t usb_link_dump_log(char *buf, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif
