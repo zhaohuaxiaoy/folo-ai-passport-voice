@@ -414,6 +414,38 @@ async def test_disconnect_during_final():
     check("asr 已关闭", holder["asr"].closed, True)
 
 
+async def test_disconnect_overlapping_closing():
+    """P1: 重叠收尾(重复 voice.start + voice.end)断连 → 收尾槽内全部会话
+    abort,无 ASR 连接泄漏(单槽 _closing 只覆盖最新会话,旧会话泄漏)。
+    探针已复现修复前 asr.closed=False。"""
+    t = FakeTransport()
+    holder = {}
+    asrs = []
+    def factory():
+        a = FakeASR([])
+        asrs.append(a)
+        return a
+    relay = Relay(t, asr_factory=factory, inject_fn=FakeInjector(), timeout=5)
+    task = asyncio.create_task(relay.run())
+    await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
+
+    # s1 进行中; 重复 voice.start → s1 进收尾槽后台收尾, s2 成为当前会话
+    t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
+    t.notify_event(b'{"event":"voice.start","workflow":"build"}\n')
+    await wait_until(lambda: len(relay._closing) == 1, what="s1 进收尾槽")
+
+    # s2 voice.end → s2 也进收尾槽(槽内: s1 + s2 两个后台收尾会话)
+    t.notify_event(b'{"event":"voice.end"}\n')
+    await wait_until(lambda: len(relay._closing) == 2, what="s1+s2 均在收尾槽")
+
+    t.disconnect_cb()                  # 断开 → abort 槽内全部
+    await wait_until(task.done, what="断开退出")
+    check("槽内两会话 ASR 全部关闭(无泄漏)",
+          len(asrs) == 2 and all(a.closed for a in asrs), True)
+    check("收尾槽已清空", relay._closing, [])
+
+
 async def test_connect_timeout():
     """M1: ASR 连接悬挂 → 5s(测试注入 0.2s)超时走错误路径,不卡死排空。"""
     t = FakeTransport()
@@ -751,6 +783,7 @@ async def main():
     await test_ctrl_write_no_response()
     await test_disconnect_cleanup()
     await test_disconnect_during_final()
+    await test_disconnect_overlapping_closing()
     await test_connect_timeout()
     await test_results_queue_bounded()
     await test_disconnect_queue_full()

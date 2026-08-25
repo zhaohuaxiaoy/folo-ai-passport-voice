@@ -193,7 +193,7 @@ class Relay:
         self._dropped_audio = 0     # 音频队列满丢弃计数(累计,进程内)
         self._stop = asyncio.Event()
         self._session = None        # 当前 voice 会话(None=空闲)
-        self._closing = None        # 收尾中的会话(end 后台化后,断连时 abort 覆盖)
+        self._closing = []          # 收尾中的会话集合(end 后台化后,断连时逐个 abort)
         self._approval_waiter = None
         self._approval_task = None  # 审批演示后台任务
         self._device_drop = None    # 最近 status 帧的设备掉帧数
@@ -240,15 +240,17 @@ class Relay:
                     pass
                 self._approval_task = None
             # 断连/退出:收束会话——取消连接与结果任务、关 ASR WebSocket、
-            # 补统计占位。覆盖"进行中"与"end 收尾中"两种(_closing)。
+            # 补统计占位。覆盖"进行中"与"end 收尾中"的全部(_closing 多槽)。
             # 否则 _run/_results 任务与 ASR 连接泄漏到进程退出
             # (审查 P1: 合成测试已复现断开后 asr.closed=False、结果任务存活)。
             if self._session is not None:
                 await self._session.abort()
                 self._session = None
-            if self._closing is not None:
-                await self._closing.abort()
-                self._closing = None
+            # 逐个 abort:abort 幂等,对已完成会话无副作用(收尾完成已自行出槽,
+            # 清空是兜底;list 快照遍历避免 remove 竞态)。
+            for s in list(self._closing):
+                await s.abort()
+            self._closing.clear()
             await t.disconnect()
 
     def _safe_put(self, q, item):
@@ -394,14 +396,25 @@ class Relay:
 
     # -- voice 会话状态机 --
 
+    def _start_closing(self, s):
+        """会话进收尾槽(断连/退出时 abort 覆盖槽内全部)+ 后台收尾。
+
+        收尾完成(done_callback)即出槽,不长期占位;done_callback 与调用点
+        同在事件循环线程执行 → 列表移除无并发。abort() 幂等且竞态安全,
+        对已完成会话调用无副作用 → run() 收束时槽内 drain 安全。"""
+        self._closing.append(s)
+        task = asyncio.create_task(s.end())
+        task.add_done_callback(
+            lambda _t: self._closing.remove(s) if s in self._closing else None)
+        return task
+
     async def _on_voice_start(self, ev):
         if self._session is not None:
             print("[voice] 收到重复 voice.start, 先结束上一个会话",
                   file=sys.stderr)
             s = self._session
             self._session = None
-            self._closing = s              # 收尾中的会话:断连时 abort 也要覆盖它
-            asyncio.create_task(s.end())   # 旧会话后台收尾(不阻塞)
+            self._start_closing(s)         # 旧会话后台收尾 + 进收尾槽(不阻塞)
         print(f"[voice] start workflow={ev.get('workflow')}")
         self._session = _VoiceSession(self, self._asr_factory())
         await self._session.begin()        # 立即返回(ASR 连接后台化)
@@ -423,11 +436,10 @@ class Relay:
             return
         s = self._session
         self._session = None
-        self._closing = s              # 收尾中的会话:断连时 abort 也要覆盖它
         # 会压住 status 对账帧与后续事件(与 _demo_approval 同源问题)。
         # 会话统计先占位(session_stats 立即出现),status 帧挂到它——
         # 收尾完成时只补 final_text 并打印(见 _VoiceSession.end)。
-        asyncio.create_task(s.end())
+        self._start_closing(s)         # 后台收尾 + 进收尾槽(不阻塞)
         # 审批演示放后台任务: 不阻塞 drain, status/agent.action 等后续事件
         # 照常处理(否则 status 对账帧会被压在队列里等按键)
         if self.do_approval and self._approval_task is None:
