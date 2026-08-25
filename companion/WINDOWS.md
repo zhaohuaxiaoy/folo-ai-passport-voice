@@ -107,7 +107,8 @@ mode usb                        # 切 USB 模式 = 写 NVS + 重启(约 1-2s)
 ```
 !mode wifi                      # 切回 WiFi 模式(立即生效,控制台重启后恢复)
 !wifi set <你的SSID> <密码>     # 密码明文经本地 USB(与串口控制台一致), 不落盘
-!ws set auto                    # 自动发现本机 WS server
+!ws set auto                    # 配 WS 目标(切回 WiFi 模式后生效:自动发现本机 WS server;
+                                #   USB 模式 WS 通道门禁,数据走 USB)
 !log                            # 取回设备日志环(esp_log 已重定向 RAM 环)
 !st                             # 会话状态
 !reboot / !factory              # 重启 / 恢复出厂

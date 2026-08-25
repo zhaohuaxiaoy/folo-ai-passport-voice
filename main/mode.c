@@ -140,7 +140,12 @@ esp_err_t mode_switch(app_mode_t target)
 
     // 3. 射频切换:先彻底关旧射频,再启新射频
     if (target == APP_MODE_WIFI) {
-        if (s_mode == APP_MODE_USB) usb_link_reset_session();
+        if (s_mode == APP_MODE_USB) {
+            usb_link_reset_session();
+            // 与切 BLE 同语义:恢复 esp_log 直出串口。会话已 reset,`!log` 不可达,
+            // 不恢复则日志继续进 RAM 环静默丢弃,直到下次重启。
+            usb_link_restore_log();
+        }
         esp_bt_controller_disable();      // 省电:WiFi 模式下蓝牙完全关闭
         e = wifi_app_start();
         if (e != ESP_OK) ESP_LOGE(TAG, "WiFi 启动失败: %s", esp_err_to_name(e));
