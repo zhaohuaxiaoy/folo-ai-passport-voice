@@ -19,6 +19,10 @@
 static const char *TAG = "wifi_app";
 
 static bool s_started = false;        // esp_wifi_start 是否已生效(幂等 start 用)
+// 显式停止意图:stop 前置位,start 清除。esp_wifi_stop 期间/之后的残留
+// STA 事件(esp_wifi_stop 会触发 STA_DISCONNECTED)不得触发自动重连
+// (审查 P2-3:stop 后按 provisioned 无条件 esp_wifi_connect → 意外重连)。
+static bool s_stop_requested = false;
 static bool s_connected = false;
 static char s_ip[16] = "";
 static esp_netif_t *s_sta;
@@ -35,8 +39,9 @@ static void post_wifi_fail(uint16_t reason) {
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
     (void)arg; (void)base;
     if (id == WIFI_EVENT_STA_START) {
-        // 未配置凭据时不连接(否则每次 start 报错;配网后由 wifi_app_set_credentials 触发)
-        if (wifi_app_provisioned()) esp_wifi_connect();
+        // 未配置凭据时不连接(否则每次 start 报错;配网后由 wifi_app_set_credentials 触发);
+        // 显式 stop 后的残留事件不重连(s_stop_requested,审查 P2-3)
+        if (!s_stop_requested && wifi_app_provisioned()) esp_wifi_connect();
     } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
         s_connected = false;
         s_ip[0] = '\0';
@@ -44,7 +49,8 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         wifi_event_sta_disconnected_t *d = data;
         post_wifi_fail(d ? (uint16_t)d->reason : 0);
         ESP_LOGW(TAG, "Wi-Fi 断开 (reason %u),停止 WS", s_last_reason);
-        if (wifi_app_provisioned()) esp_wifi_connect();   // 自动重连
+        // 自动重连仅服务运行中状态:显式 stop 后不再重连(审查 P2-3)
+        if (!s_stop_requested && wifi_app_provisioned()) esp_wifi_connect();
     }
 }
 
@@ -90,6 +96,7 @@ esp_err_t wifi_app_init(void) {
 
 esp_err_t wifi_app_start(void) {
     if (s_started) return ESP_OK;   // 幂等:USB 模式已 start,切到 WiFi 模式不重复 esp_wifi_start
+    s_stop_requested = false;      // 新启动恢复自动连接(审查 P2-3)
     char ssid[64] = "", pass[64] = "";
     nvs_settings_get_wifi(ssid, sizeof(ssid), pass, sizeof(pass));   // 失败按空串处理
     if (ssid[0]) {
@@ -109,6 +116,7 @@ esp_err_t wifi_app_start(void) {
 }
 
 esp_err_t wifi_app_stop(void) {
+    s_stop_requested = true;       // 意图:本次 stop 的残留事件不得触发重连
     s_started = false;
     s_connected = false;
     s_ip[0] = '\0';
