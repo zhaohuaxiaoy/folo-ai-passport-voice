@@ -27,6 +27,11 @@ add_executable(test_ui_pixel_math test_ui_pixel_math.c ${MAIN_DIR}/ui_pixel_math
 target_include_directories(test_ui_pixel_math PRIVATE ${MAIN_DIR})
 add_test(NAME ui_pixel_math COMMAND test_ui_pixel_math)
 
+# --- USB 帧协议(纯 C 零依赖,两端同构:companion/serial_frame.py 共享测试意图) ---
+add_executable(test_usb_link test_usb_link.c ${MAIN_DIR}/usb_link_framing.c)
+target_include_directories(test_usb_link PRIVATE ${MAIN_DIR})
+add_test(NAME usb_link COMMAND test_usb_link)
+
 # --- 协议(内置 cJSON,无需 IDF_PATH;app_state.c 提供 APP_WORKFLOW_NAMES) ---
 add_executable(test_app_protocol test_app_protocol.c ${MAIN_DIR}/app_protocol.c
                ${MAIN_DIR}/app_state.c ${CJSON_DIR}/cJSON.c)
