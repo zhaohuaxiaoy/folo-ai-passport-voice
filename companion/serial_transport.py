@@ -262,12 +262,22 @@ class SerialTransport:
                 self._on_frame(self._dec.type, bytes(self._dec.payload))
 
     def _on_frame(self, ftype, payload):
-        """读线程上下文:按帧类型路由(全部 call_soon_threadsafe 进事件循环)。"""
+        """读线程上下文:按帧类型路由(全部 call_soon_threadsafe 进事件循环)。
+
+        EVENT/AUDIO 也统一投递:路由动作(pending 判定/append)只在事件循环
+        线程执行,与 start_notify 的交换清空同线程 —— 消除跨线程竞态
+        (审查 P2-1:读线程在交换后 append,帧滞留永不冲刷)。"""
         if ftype == FRAME_SYS_RESP:
             self._loop.call_soon_threadsafe(self._on_sys_resp, payload)
             return
+        self._loop.call_soon_threadsafe(self._route_frame, ftype, payload)
+
+    def _route_frame(self, ftype, payload):
+        """事件循环线程:handler 齐备 → 分发;未齐 → 订阅前缓冲(有界)。
+
+        _pending 只在本线程访问(与 start_notify 同线程),无竞态。"""
         if self._evt_handler is not None and self._aud_handler is not None:
-            self._loop.call_soon_threadsafe(self._dispatch_frame, ftype, payload)
+            self._dispatch_frame(ftype, payload)
         elif len(self._pending) < PENDING_MAX:
             self._pending.append((ftype, payload))
         else:
