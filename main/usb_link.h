@@ -33,10 +33,11 @@ int usb_link_send_event(const char *line, size_t len);
 int usb_link_send_audio(const uint8_t *frame, size_t len);
 
 // 离开 USB 模式(语义超集于会话复位):停读任务(自删,释放 2KB 栈)+ 会话 down,
-// 后续发送全部拒绝。静态缓冲保持,USB 重进必经重启(init 幂等)。
+// 后续发送全部拒绝。读任务确认退出后,USB 专用缓冲在 restore_log 中释放。
 void usb_link_shutdown(void);
 
-// 恢复 esp_log 输出到 USB 串口(离开 USB 模式时调用;驱动保持安装无冲突)。
+// 恢复 esp_log 输出到 USB 串口(离开 USB 模式时调用;驱动保持安装无冲突),
+// 并释放已确认不再使用的 USB 专用缓冲。
 void usb_link_restore_log(void);
 
 // 导出日志环(console `log` 命令:USB 模式日志进 RAM 环,经此取回)。

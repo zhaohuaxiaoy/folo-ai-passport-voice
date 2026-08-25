@@ -1,4 +1,4 @@
-// main/mode.h —— 射频模式与链路抽象(Windows 移植:BLE/WiFi 双栈常驻;按模式启停射频)。
+// main/mode.h —— 射频模式与链路抽象(Windows 移植:BLE/WiFi 按需建栈;按模式启停射频)。
 // 职责:
 //   1. 模式状态机:boot 按 NVS 启动对应射频;mode_switch 切换时按模式关闭另一射频
 //      (WiFi 模式 esp_bt_controller_disable 省电;BLE 模式 esp_wifi_stop;

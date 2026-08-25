@@ -1,6 +1,7 @@
 // main/mode.c —— 射频模式与链路抽象实现(见 mode.h)。
 // 设计要点:
-//   - 双栈常驻、单射频活:boot 两栈都初始化(WiFi 只建不 start),按 NVS 模式只启当前射频。
+//   - 按需建栈、单射频活:BLE 冷启动不建立 WiFi/mDNS/WS;WiFi/USB 模式或切入 WiFi
+//     时才创建无线栈,按 NVS 模式只启当前射频。
 //   - 切换原子性:NVS 写失败即中止(射频不动,下次 boot 仍按旧模式),不会出现
 //     磁盘模式与运行模式不一致。
 //   - 切换时序:断连事件先投(app_task 排空循环续跑时状态机收束),再动射频。
@@ -23,6 +24,15 @@
 static const char *TAG = "mode";
 
 static app_mode_t s_mode = APP_MODE_BLE;
+
+static esp_err_t prepare_wifi_stack(void)
+{
+    esp_err_t e = wifi_app_init();
+    if (e != ESP_OK) return e;
+    e = mdns_resolver_init();
+    if (e != ESP_OK) return e;
+    return ws_client_init();
+}
 
 const char *mode_name(app_mode_t m)
 {
@@ -87,14 +97,12 @@ esp_err_t mode_init(void)
     nvs_settings_get_mode(&m);            // 失败按 BLE 兜底(缺省)
     s_mode = (m == 2) ? APP_MODE_USB : ((m == 1) ? APP_MODE_WIFI : APP_MODE_BLE);
 
-    // WiFi/WS/mDNS 栈:双栈常驻、只建不 start(启动与否由模式决定);
-    // USB 模式同样初始化(从 USB 切走时 wifi_app_start 依赖已建栈)
-    esp_err_t e = wifi_app_init();
-    if (e != ESP_OK) ESP_LOGE(TAG, "wifi_app_init 失败: %s", esp_err_to_name(e));
-    e = mdns_resolver_init();             // 依赖 wifi_app_init 建的 netif;失败仅警告
-    if (e != ESP_OK) ESP_LOGW(TAG, "mdns_resolver_init 失败: %s", esp_err_to_name(e));
-    e = ws_client_init();
-    if (e != ESP_OK) ESP_LOGW(TAG, "ws_client_init 失败: %s", esp_err_to_name(e));
+    // WiFi/mDNS/WS 按需建栈:BLE 冷启动不占无线栈 RAM;USB 仍保持射频兼容语义。
+    esp_err_t e = ESP_OK;
+    if (s_mode != APP_MODE_BLE) {
+        e = prepare_wifi_stack();
+        if (e != ESP_OK) ESP_LOGE(TAG, "WiFi 栈初始化失败: %s", esp_err_to_name(e));
+    }
 
     // 按模式启动射频:WiFi 模式关蓝牙、BLE 模式不启 WiFi(省电);
     // USB 模式射频保持(USB 供电,无省电需求;数据走 USB 线,WS 门禁见 ws_client_start)。
@@ -143,7 +151,16 @@ esp_err_t mode_switch(app_mode_t target)
     }
 
     // 2. NVS 持久化:失败中止,射频不动(模式一致性优先)
-    esp_err_t e = nvs_settings_set_mode((uint8_t)target);
+    // 目标为 WiFi 时先建立按需栈;失败不写 NVS,保持当前模式可重试。
+    esp_err_t e = ESP_OK;
+    if (target == APP_MODE_WIFI) {
+        e = prepare_wifi_stack();
+        if (e != ESP_OK) {
+            ESP_LOGE(TAG, "WiFi 栈初始化失败,切换中止: %s", esp_err_to_name(e));
+            return e;
+        }
+    }
+    e = nvs_settings_set_mode((uint8_t)target);
     if (e != ESP_OK) {
         ESP_LOGE(TAG, "模式写入 NVS 失败(%s),切换中止", esp_err_to_name(e));
         return e;

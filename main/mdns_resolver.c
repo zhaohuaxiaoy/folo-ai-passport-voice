@@ -92,6 +92,7 @@ void mdns_resolver_request(void)
 
 esp_err_t mdns_resolver_init(void)
 {
+    if (s_request) return ESP_OK;   // 按需初始化 + 幂等(模式切换重试安全)
     esp_err_t e = mdns_init();
     if (e != ESP_OK) { ESP_LOGE(TAG, "mdns_init 失败: %s", esp_err_to_name(e)); return e; }
     e = mdns_hostname_set("ai-passport");

@@ -101,13 +101,18 @@ static esp_websocket_client_config_t default_config(const char *url) {
 }
 
 esp_err_t ws_client_init(void) {
+    if (s_client && s_tx_mutex) return ESP_OK;   // 按需初始化 + 幂等
     s_tx_mutex = xSemaphoreCreateMutex();
     if (!s_tx_mutex) return ESP_FAIL;
     char url[128];
     nvs_settings_get_ws_url(url, sizeof(url));
     ESP_LOGI(TAG, "WS 目标: %s", url);
     s_client = esp_websocket_client_init(&default_config(url));
-    if (!s_client) return ESP_FAIL;
+    if (!s_client) {
+        vSemaphoreDelete(s_tx_mutex);
+        s_tx_mutex = NULL;
+        return ESP_FAIL;
+    }
     esp_websocket_register_events(s_client, WEBSOCKET_EVENT_ANY, on_ws_event, NULL);
     return ESP_OK;
 }
@@ -116,6 +121,9 @@ esp_err_t ws_client_init(void) {
 static esp_err_t rebuild_client(const char *url, bool persist) {
     esp_err_t e = persist ? nvs_settings_set_ws_url(url) : ESP_OK;
     if (e != ESP_OK) return e;
+    // BLE 冷启动没有建立 WS 句柄:持久化配置仍可成功,运行时 retarget 则必须
+    // 拒绝,避免把未初始化的互斥量当作可用对象。
+    if (!s_client || !s_tx_mutex) return persist ? ESP_OK : ESP_ERR_INVALID_STATE;
     // 重建句柄必须与 ws_worker 的在飞发送互斥,否则 send_bin 可能撞上 destroy(use-after-free)
     if (xSemaphoreTake(s_tx_mutex, pdMS_TO_TICKS(500)) != pdTRUE) {
         ESP_LOGW(TAG, "等待发送互斥超时,放弃重建");
@@ -173,7 +181,7 @@ esp_err_t ws_client_stop(void) {
 bool ws_client_connected(void) { return s_connected; }
 
 void ws_client_send_text(const char *s, size_t len) {
-    if (!s || len == 0) return;
+    if (!s || len == 0 || !s_tx_mutex) return;
     if (xSemaphoreTake(s_tx_mutex, pdMS_TO_TICKS(500)) != pdTRUE) return;
     if (s_connected && s_client) {
         if (esp_websocket_client_send_text(s_client, s, len, 200) < 0) {
@@ -184,6 +192,7 @@ void ws_client_send_text(const char *s, size_t len) {
 }
 
 esp_err_t ws_client_send_bin_blocking(const uint8_t *data, size_t len) {
+    if (!s_tx_mutex) return ESP_ERR_INVALID_STATE;
     if (xSemaphoreTake(s_tx_mutex, pdMS_TO_TICKS(500)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }

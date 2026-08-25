@@ -1,4 +1,4 @@
-// main/wifi_app.c —— Wi-Fi STA 实现(双模式:init 只建栈,start/stop 由 mode 模块驱动)。
+// main/wifi_app.c —— Wi-Fi STA 实现(按需建栈,start/stop 由 mode 模块驱动)。
 // GOT_IP → WIFI_CONNECTED 事件 + mdns_resolver_request() + ws_client_start();
 // STA_DISCONNECTED → 按 reason 去重投 WIFI_CONNECT_FAIL + ws_client_stop() + 自动重连。
 #include "wifi_app.h"
@@ -18,6 +18,7 @@
 
 static const char *TAG = "wifi_app";
 
+static bool s_initialized = false;    // WiFi/netif/事件处理器已建立
 static bool s_started = false;        // esp_wifi_start 是否已生效(幂等 start 用)
 // 显式停止意图:stop 前置位,start 清除。esp_wifi_stop 期间/之后的残留
 // STA 事件(esp_wifi_stop 会触发 STA_DISCONNECTED)不得触发自动重连
@@ -74,6 +75,7 @@ static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data
 }
 
 esp_err_t wifi_app_init(void) {
+    if (s_initialized) return ESP_OK;
     // 与 main.c 的优雅降级一致:单步失败只记日志返回,不让 ESP_ERROR_CHECK 整机重启
     esp_err_t e = esp_netif_init();
     if (e != ESP_OK) { ESP_LOGE(TAG, "netif 初始化失败: %s", esp_err_to_name(e)); return e; }
@@ -91,10 +93,12 @@ esp_err_t wifi_app_init(void) {
     if (e != ESP_OK) { ESP_LOGE(TAG, "事件注册失败: %s", esp_err_to_name(e)); return e; }
     e = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_ip_event, NULL);
     if (e != ESP_OK) { ESP_LOGE(TAG, "IP 事件注册失败: %s", esp_err_to_name(e)); return e; }
+    s_initialized = true;
     return ESP_OK;
 }
 
 esp_err_t wifi_app_start(void) {
+    if (!s_initialized) return ESP_ERR_INVALID_STATE;
     if (s_started) return ESP_OK;   // 幂等:USB 模式已 start,切到 WiFi 模式不重复 esp_wifi_start
     s_stop_requested = false;      // 新启动恢复自动连接(审查 P2-3)
     char ssid[64] = "", pass[64] = "";
@@ -116,6 +120,7 @@ esp_err_t wifi_app_start(void) {
 }
 
 esp_err_t wifi_app_stop(void) {
+    if (!s_initialized) return ESP_OK;
     s_stop_requested = true;       // 意图:本次 stop 的残留事件不得触发重连
     s_started = false;
     s_connected = false;
@@ -129,6 +134,10 @@ esp_err_t wifi_app_set_credentials(const char *ssid, const char *pass) {
     s_last_reason = 0;   // 新凭据:旧失败不抑制新上报
     esp_err_t e = nvs_settings_set_wifi(ssid, pass);
     if (e != ESP_OK) return e;
+
+    // BLE 冷启动不建立 WiFi 栈:先保存凭据,切到 WiFi/USB 时由 start 应用。
+    // 控制台仍可在 BLE 模式完成配网,但不会因一次配置命令提前占用无线 RAM。
+    if (!s_initialized) return ESP_OK;
 
     wifi_config_t wc = { 0 };
     strlcpy((char *)wc.sta.ssid, ssid, sizeof(wc.sta.ssid));
