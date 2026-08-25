@@ -8,8 +8,9 @@
 - `"ble"`（缺省）：BLE 直连，macOS / 有蓝牙的 Windows 通用；
 - `"wifi"`：无蓝牙的 Windows 电脑走 WiFi 通道（PC 起 WS server + mDNS，
   设备 STA 主动连），WiFi 模式下设备蓝牙彻底关闭省电；
-- `"usb"`：USB 有线直连（设备 `mode usb` 后经 USB 线连电脑，蓝牙 + WiFi
-  全关省电）。USB 模式无设备控制台——relay 提供 stdin 交互 `!<命令>`
+- `"usb"`：USB 有线直连（设备 `mode usb` 后经 USB 线连电脑，蓝牙与 WiFi
+  保持开启——USB 供电无省电需求，数据传输走 USB 线）。USB 模式无设备控制台
+  ——relay 提供 stdin 交互 `!<命令>`
   （`!mode wifi` / `!wifi set` / `!ws set auto` / `!log` / `!st` 等）经
   SYS 命令面下行，替代控制台配网/查状态。
 

@@ -3,6 +3,7 @@
 #include "ws_client.h"
 #include "app_events.h"
 #include "app_protocol.h"
+#include "mode.h"
 #include "nvs_settings.h"
 #include "wifi_app.h"
 #include "esp_log.h"
@@ -141,6 +142,12 @@ esp_err_t ws_client_retarget(const char *url) { return rebuild_client(url, false
 
 esp_err_t ws_client_start(void) {
     if (!s_client) return ESP_FAIL;
+    if (mode_get() == APP_MODE_USB) {
+        // USB 模式射频保持但数据走 USB 线:WS 通道不建立(防链路状态误翻到
+        // WiFi / 双通道双注入;含 `ws set` 手动 reinit 路径,见 rebuild_client)。
+        // 切回 WiFi 模式后由 mode_switch 补触发或下次 GOT_IP 驱动。
+        return ESP_OK;
+    }
     ESP_LOGI(TAG, "WS 启动");
     return esp_websocket_client_start(s_client);
 }

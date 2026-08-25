@@ -86,8 +86,8 @@ PC 侧把 `channel` 改为 `"wifi"` 后运行 relay：本机起 WS server（端�
 
 ### 通道：USB（有线）
 
-任何电脑都能用 USB 线直连（ESP32-C3 原生 USB-Serial-JTAG 口）。USB 供电
-不耗电池，此模式下**蓝牙与 WiFi 全部关闭**（省电）。
+任何电脑都能用 USB 线直连（ESP32-C3 原生 USB-Serial-JTAG 口）。USB 供电，
+此模式下**蓝牙与 WiFi 保持开启**（配网则 WiFi 自动连接），数据传输走 USB 线。
 
 首次启用（设备侧，任意模式的控制台或经 USB 的 relay `!mode usb`）：
 
@@ -105,7 +105,7 @@ mode usb                        # 切 USB 模式 = 写 NVS + 重启(约 1-2s)
 同一批命令）：
 
 ```
-!mode wifi                      # 切回 WiFi 模式(重启生效)
+!mode wifi                      # 切回 WiFi 模式(立即生效,控制台重启后恢复)
 !wifi set <你的SSID> <密码>     # 密码明文经本地 USB(与串口控制台一致), 不落盘
 !ws set auto                    # 自动发现本机 WS server
 !log                            # 取回设备日志环(esp_log 已重定向 RAM 环)
@@ -114,8 +114,9 @@ mode usb                        # 切 USB 模式 = 写 NVS + 重启(约 1-2s)
 ```
 
 > 注意：`mode usb` 切换 = 设备重启（运行时摘除 REPL 阻塞读不安全，设计上
-> 杜绝）；从 USB 切走（`!mode ble/wifi`）同样重启生效。USB 模式下设备日志
-> 不再实时上屏，进 4KB RAM 环，经 `!log` 取回。
+> 杜绝）；从 USB 切走（`!mode ble/wifi`）**立即生效无需重启**（REPL 控制台
+> 仍缺席，重启后恢复）。USB 模式下设备日志不再实时上屏，进 4KB RAM 环，
+> 经 `!log` 取回。
 > `wifi set` 密码经本地 USB 明文传输——与既有串口控制台一致，本地线缆可接受。
 
 ## 注入焦点提示（Windows）
@@ -145,7 +146,7 @@ companion\.venv\Scripts\python companion\inject_win.py "你好" --dry-run
 - [ ] **无蓝牙电脑**：WiFi 通道可用；`st` 显示 mode: WiFi、ws: connected
 - [ ] **USB 通道**：`mode usb`（重启）→ relay 自动扫描端口 → 握手 → 全流程；`!mode` / `!log` / `!st` 往返；拔线 → relay 报断连收束
 - [ ] **USB 串口枚举**：Windows COM 自动识别（VID/PID 匹配）；多设备时 `usb_port` 指定生效；端口被占用给可理解报错
-- [ ] **USB 省电**：USB 模式蓝牙 + WiFi 均关闭（`st` 无射频迹象 / 电流实测）
+- [ ] **USB 射频保持**：USB 模式蓝牙广播保持、WiFi 可用（配网则连上）；数据仍走 USB（`st` 链路 = USB / 无 WS 连接迹象）
 - [ ] **USB 音频流**：32KB/s 持续流 100ms 写超时不异常掉帧（瓶颈在主机读侧）
 - [ ] **省电**：WiFi 模式蓝牙彻底关闭（`st` 无 BLE 广播迹象 / 电流实测）；BLE 模式 WiFi 未启动
 - [ ] **模式切换**：`mode wifi` ↔ `mode ble` ↔ `mode usb` 往返，NimBLE controller re-sync 后广播自动恢复（固件唯一硬依赖）

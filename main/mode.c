@@ -4,7 +4,8 @@
 //   - 切换原子性:NVS 写失败即中止(射频不动,下次 boot 仍按旧模式),不会出现
 //     磁盘模式与运行模式不一致。
 //   - 切换时序:断连事件先投(app_task 排空循环续跑时状态机收束),再动射频。
-//   - 省电:WiFi 模式 esp_bt_controller_disable() 彻底关蓝牙;BLE 模式 esp_wifi_stop()。
+//   - 省电:WiFi 模式 esp_bt_controller_disable() 彻底关蓝牙;BLE 模式 esp_wifi_stop();
+//     USB 模式射频保持(USB 供电),数据走 USB 线(WS 通道门禁见 ws_client_start)。
 #include "mode.h"
 #include "app_events.h"
 #include "app_types.h"
@@ -95,7 +96,8 @@ esp_err_t mode_init(void)
     e = ws_client_init();
     if (e != ESP_OK) ESP_LOGW(TAG, "ws_client_init 失败: %s", esp_err_to_name(e));
 
-    // 按模式只启动当前射频;其余射频彻底关闭(省电)。USB 模式:蓝牙+WiFi 全关。
+    // 按模式启动射频:WiFi 模式关蓝牙、BLE 模式不启 WiFi(省电);
+    // USB 模式射频保持(USB 供电,无省电需求;数据走 USB 线,WS 门禁见 ws_client_start)。
     if (s_mode == APP_MODE_WIFI) {
         e = wifi_app_start();
         if (e != ESP_OK) ESP_LOGE(TAG, "WiFi 启动失败: %s", esp_err_to_name(e));
@@ -104,11 +106,13 @@ esp_err_t mode_init(void)
         esp_bt_controller_disable();
         ESP_LOGI(TAG, "模式: WiFi(蓝牙已关闭)");
     } else if (s_mode == APP_MODE_USB) {
-        // 射频全关(USB 供电不耗电池):蓝牙 controller 禁用 + WiFi 不 start
-        esp_bt_controller_disable();
+        // 射频保持:蓝牙 controller 已由 ble_audio_init 启动(不 disable),
+        // WiFi 同 WiFi 模式启动(配网则连上;WS 通道被门禁,数据仍走 USB 线)。
+        e = wifi_app_start();
+        if (e != ESP_OK) ESP_LOGE(TAG, "WiFi 启动失败: %s", esp_err_to_name(e));
         e = usb_link_init();              // 驱动 + 读任务 + 日志重定向(console 门禁跳过 REPL)
         if (e != ESP_OK) ESP_LOGE(TAG, "USB 链路初始化失败: %s", esp_err_to_name(e));
-        ESP_LOGI(TAG, "模式: USB(蓝牙与 WiFi 已关闭)");
+        ESP_LOGI(TAG, "模式: USB(射频保持,数据走 USB)");
     } else {
         // BLE:controller 由 ble_audio_init 正常启动,WiFi 不 start(不耗射频)
         ESP_LOGI(TAG, "模式: BLE(WiFi 未启动)");
@@ -156,11 +160,19 @@ esp_err_t mode_switch(app_mode_t target)
         }
         wifi_app_stop();
         ws_client_stop();                 // 确保 WS 断开事件(与步骤 1 幂等)
-        e = esp_bt_controller_enable();   // re-sync → 广播自动恢复(真机必测)
-        if (e != ESP_OK) ESP_LOGE(TAG, "蓝牙控制器启动失败: %s", esp_err_to_name(e));
+        // USB 模式蓝牙保持开启(未 disable),重复 enable 会报 INVALID_STATE —— 按状态守卫
+        if (esp_bt_controller_get_status() != ESP_BT_CONTROLLER_STATUS_ENABLED) {
+            e = esp_bt_controller_enable();   // re-sync → 广播自动恢复(真机必测)
+            if (e != ESP_OK) ESP_LOGE(TAG, "蓝牙控制器启动失败: %s", esp_err_to_name(e));
+        }
     }
 
     s_mode = target;
+    if (target == APP_MODE_WIFI && wifi_app_connected()) {
+        // USB→WiFi 现场切换:WiFi 在 USB 模式已连上,GOT_IP 不会重来,WS 也就没人
+        // 触发启动 —— 补一次(ws_client_start 门禁按 s_mode=WIFI 已放行)。
+        ws_client_start();
+    }
     register_audio_sender();
     ESP_LOGI(TAG, "模式切换完成: %s", mode_name(s_mode));
     return ESP_OK;

@@ -1,7 +1,8 @@
-// main/mode.h —— 射频模式与链路抽象(Windows 移植:BLE/WiFi 双栈常驻、单射频活)。
+// main/mode.h —— 射频模式与链路抽象(Windows 移植:BLE/WiFi 双栈常驻;按模式启停射频)。
 // 职责:
-//   1. 模式状态机:boot 按 NVS 只启动当前射频;mode_switch 切换时彻底关闭另一射频
-//      (WiFi 模式 esp_bt_controller_disable 省电;BLE 模式 esp_wifi_stop)。
+//   1. 模式状态机:boot 按 NVS 启动对应射频;mode_switch 切换时按模式关闭另一射频
+//      (WiFi 模式 esp_bt_controller_disable 省电;BLE 模式 esp_wifi_stop;
+//      USB 模式双射频保持,数据走 USB 线)。
 //   2. 链路抽象:link_up / send_event_line / send_audio —— main.c 执行器、audio_streamer、
 //      UI 不再感知模式(音频帧发送经 audio_streamer_set_sender 按模式注册)。
 //   3. NimBLE host 常驻 + controller 启停:enable 后 on_sync 触发 → 广播自动恢复。
@@ -19,7 +20,7 @@ extern "C" {
 typedef enum {
     APP_MODE_BLE = 0,   // 缺省:BLE 直连(macOS/Windows 蓝牙)
     APP_MODE_WIFI,      // WiFi 通道(无蓝牙 Windows 电脑)
-    APP_MODE_USB,       // USB 有线通道(USB-Serial-JTAG;射频全关,省电)
+    APP_MODE_USB,       // USB 有线通道(USB-Serial-JTAG;射频保持:蓝牙+WiFi 开启,数据走 USB)
     APP_MODE_COUNT,
 } app_mode_t;
 

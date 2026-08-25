@@ -5,6 +5,7 @@
 #include "app_events.h"
 #include "app_types.h"
 #include "mdns_resolver.h"
+#include "mode.h"
 #include "nvs_settings.h"
 #include "ws_client.h"
 #include "esp_event.h"
@@ -17,6 +18,7 @@
 
 static const char *TAG = "wifi_app";
 
+static bool s_started = false;        // esp_wifi_start 是否已生效(幂等 start 用)
 static bool s_connected = false;
 static char s_ip[16] = "";
 static esp_netif_t *s_sta;
@@ -56,8 +58,12 @@ static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data
         ESP_LOGI(TAG, "已获取 IP: %s", s_ip);
         app_event_t ev = { .type = APP_EV_WIFI_CONNECTED };
         app_event_post(&ev);
-        mdns_resolver_request();             // 有网 → mDNS 发现 Companion(auto 模式)
-        ws_client_start();                   // 有网才起 WS(先按 NVS URL,发现后 retarget)
+        // 仅 WiFi 模式做 WiFi 通道的事(发现 + 连 WS):USB 模式射频保持但数据走
+        // USB 线,不连 WS(防链路状态误翻到 WiFi / 双通道双注入)。
+        if (mode_get() == APP_MODE_WIFI) {
+            mdns_resolver_request();         // 有网 → mDNS 发现 Companion(auto 模式)
+            ws_client_start();               // 有网才起 WS(先按 NVS URL,发现后 retarget)
+        }
     }
 }
 
@@ -83,6 +89,7 @@ esp_err_t wifi_app_init(void) {
 }
 
 esp_err_t wifi_app_start(void) {
+    if (s_started) return ESP_OK;   // 幂等:USB 模式已 start,切到 WiFi 模式不重复 esp_wifi_start
     char ssid[64] = "", pass[64] = "";
     nvs_settings_get_wifi(ssid, sizeof(ssid), pass, sizeof(pass));   // 失败按空串处理
     if (ssid[0]) {
@@ -97,10 +104,12 @@ esp_err_t wifi_app_start(void) {
     }
     esp_err_t e = esp_wifi_start();
     if (e != ESP_OK) { ESP_LOGE(TAG, "Wi-Fi 启动失败: %s", esp_err_to_name(e)); return e; }
+    s_started = true;
     return ESP_OK;
 }
 
 esp_err_t wifi_app_stop(void) {
+    s_started = false;
     s_connected = false;
     s_ip[0] = '\0';
     esp_err_t e = esp_wifi_stop();

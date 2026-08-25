@@ -311,9 +311,9 @@ void app_main(void)
     // 7. BLE 音频服务(NimBLE 外设 + GATT 0xA2B0,host sync 后自动开广播)
     if (ble_audio_init() != 0) ESP_LOGW(TAG, "BLE 音频服务初始化失败");
 
-    // 8. 双模式(Windows 移植):WiFi/WS/mDNS 栈常驻(不 start),按 NVS 模式只启动
-    //    当前射频;WiFi 模式下蓝牙 controller 彻底关闭(省电)。射频切换会短暂阻塞
-    //    (≤ 数百 ms),boot 期无并发,安全。
+    // 8. 多模式(Windows 移植):WiFi/WS/mDNS 栈常驻(不 start),按 NVS 模式启动射频;
+    //    WiFi 模式关蓝牙、BLE 模式不启 WiFi(省电),USB 模式射频保持(数据走 USB 线)。
+    //    射频切换会短暂阻塞(≤ 数百 ms),boot 期无并发,安全。
     if (mode_init() != ESP_OK) ESP_LOGW(TAG, "模式初始化失败(按 NVS 兜底)");
 
     // 9. 控制台与 app 任务(栈 5120:快照 ~250B + 动作 ~544B + TX 512B + LVGL 调用深度;
