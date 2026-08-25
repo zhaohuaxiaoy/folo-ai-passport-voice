@@ -125,14 +125,21 @@ esp_err_t mode_switch(app_mode_t target)
 {
     if (target >= APP_MODE_COUNT || target == s_mode) return ESP_OK;   // 幂等
 
+    // 0. 切换前同步收束音频管线(停采集+排空残留):不依赖断连事件被 app_task
+    //    消费的时序 —— sender 切换前音频已停,杜绝"旧会话帧经新 sender 流出"
+    //    (审查 P2-2 时序窗口);cancel 幂等,状态机事件收束为双保险。
+    audio_streamer_cancel();
+
     // 1. 先投当前通道断连事件:排空循环续跑时状态机幂等收束(停流/回 READY/审批保持)。
     //    重要投递:队列满等 app_task 消费(≤500ms)而非丢弃 —— 断连事件丢失则
-    //    状态机不收束,录音/审批悬挂(审查 P2-2);超时兜底日志,切换继续。
+    //    状态机不收束,录音/审批悬挂。超时 = 事件队列持续满(消费停滞,异常态):
+    //    中止切换(此时 NVS 未写、射频未动,状态一致),用户可重试(审查 P2-2)。
     app_event_t d = { .type = (s_mode == APP_MODE_WIFI)  ? APP_EV_WS_DISCONNECTED
                              : (s_mode == APP_MODE_USB)  ? APP_EV_USB_DISCONNECTED
                              : APP_EV_BLE_DISCONNECTED };
     if (app_event_post_important(&d, 500) != ESP_OK) {
-        ESP_LOGW(TAG, "断连事件投递超时(队列满),切换继续");
+        ESP_LOGE(TAG, "断连事件投递超时(队列满),切换中止");
+        return ESP_ERR_TIMEOUT;
     }
 
     // 2. NVS 持久化:失败中止,射频不动(模式一致性优先)

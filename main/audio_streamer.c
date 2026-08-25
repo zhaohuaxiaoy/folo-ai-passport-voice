@@ -127,10 +127,17 @@ esp_err_t audio_streamer_init(void) {
     // 驱动调用栈约 1-1.5KB,余量充足);ble 保留 4096(NimBLE notify 调用链最深,
     // 不盲砍——stop() 的 uxTaskGetStackHighWaterMark 日志实测后再缩)。
     // 创建失败检查:内存不足时静默失败会让 start 后无人消费(信号量空给、管线假活)。
-    // 失败时指针保持 NULL(stop 空指针保护已有),显式报错由调用方处理(审查 P2-6)。
-    if (xTaskCreate(audio_worker, "audio_worker", 3072, NULL, 6, &s_audio_task) != pdPASS ||
-        xTaskCreate(ble_worker, "ble_worker", 4096, NULL, 5, &s_ble_task) != pdPASS) {
-        ESP_LOGE(TAG, "worker 任务创建失败(内存不足?)");
+    // 全或无语义:任一失败即回滚已建任务 —— 绝不允许"采集任务在跑、发送任务缺失"
+    // 的偏置状态(环缓冲持续堆积,审查 P2-6)。失败时指针保持 NULL/已删,stop 空
+    // 指针保护已有;显式报错由调用方优雅降级处理。
+    if (xTaskCreate(audio_worker, "audio_worker", 3072, NULL, 6, &s_audio_task) != pdPASS) {
+        ESP_LOGE(TAG, "audio worker 创建失败(内存不足?)");
+        return ESP_FAIL;
+    }
+    if (xTaskCreate(ble_worker, "ble_worker", 4096, NULL, 5, &s_ble_task) != pdPASS) {
+        ESP_LOGE(TAG, "ble worker 创建失败,回滚 audio worker");
+        vTaskDelete(s_audio_task);     // audio worker 阻塞等待中,删除安全(无持有资源)
+        s_audio_task = NULL;
         return ESP_FAIL;
     }
     ESP_LOGI(TAG, "流式管线就绪(静态环 %d B,块 %d B)", RING_BYTES, CHUNK_BYTES);
