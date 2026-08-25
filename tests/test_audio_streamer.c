@@ -22,6 +22,8 @@ extern int g_notify_block_ms;    // 发送桩阻塞毫秒(模拟在途)
 extern int g_fake_audio_fail;    // 非 0 → bsp_audio_read 报错
 extern int g_fake_ring_fail;     // 非 0 → xRingbufferCreateStatic 失败(init 失败注入)
 extern int g_fake_sem_fail;      // 非 0 → xSemaphoreCreateBinary 失败(init 失败注入)
+extern int g_fake_task_fail_at;  // N>0 → 第 N 次 xTaskCreate 失败(1=audio, 2=ble 回滚)
+extern int g_sem_live;           // 存活信号量计数(断言 init 失败路径零泄漏)
 extern app_event_t g_events[];
 extern int g_event_count;
 extern void fake_reset(void);
@@ -166,8 +168,8 @@ static void test_drop_accounting(void) {
 // 6) 采集硬件错误:停流 + AUDIO_ERROR 事件;随后取消幂等
 // 6) init 失败后公开 API 空转保护(审查 P2):环创建失败 / 信号量创建失败 →
 //    init 返回失败,主流程继续;此后 start/cancel/drain 必须空转不崩溃
-//    (不访问 NULL ring/sem),且不投递任何事件。重复 init 泄漏旧句柄——
-//    宿主进程级回收,测试内可接受。
+//    (不访问 NULL ring/sem),且不投递任何事件。复核 R1 后:失败路径释放
+//    已创建信号量(g_sem_live 归零,零泄漏)。
 static void test_init_failure_api_noop(void) {
     fake_reset();
     g_fake_ring_fail = 1;                     // 第一个失败点:环创建
@@ -178,6 +180,7 @@ static void test_init_failure_api_noop(void) {
     audio_streamer_drain(50);                 // 空转:同上
     assert(!audio_streamer_active());
     assert(g_event_count == 0);
+    assert(g_sem_live == 0);                  // R1:无信号量泄漏
 
     fake_reset();
     g_fake_sem_fail = 1;                      // 环已建,信号量失败
@@ -187,6 +190,58 @@ static void test_init_failure_api_noop(void) {
     audio_streamer_cancel();
     assert(!audio_streamer_active());
     assert(g_event_count == 0);
+    assert(g_sem_live == 0);                  // R1:无信号量泄漏
+}
+
+// 7) worker 创建失败(复核 R1):audio_worker 失败 / ble_worker 失败(回滚路径)
+//    → init 返回失败,已建信号量全部释放(g_sem_live 归零),API 空转;
+//    随后重试成功:管线从干净状态重建,start 正常工作。
+//    泄漏的 audio_worker 线程(回滚 vTaskDelete 宿主桩为空实现)永久阻塞在
+//    旧信号量 cond wait,无唤醒者,不碰全局状态 —— 宿主进程级回收,可接受。
+static void test_worker_fail_cleanup(void) {
+    fake_reset();
+    g_fake_task_fail_at = 1;                  // 第 1 次创建(audio_worker)失败
+    assert(audio_streamer_init() != ESP_OK);
+    g_fake_task_fail_at = 0;
+    audio_streamer_start();
+    audio_streamer_cancel();
+    assert(!audio_streamer_active());
+    assert(g_event_count == 0);
+    assert(g_sem_live == 0);                  // R1:信号量零泄漏
+
+    fake_reset();
+    g_fake_task_fail_at = 2;                  // 第 2 次创建(ble_worker)失败 → 回滚 audio
+    assert(audio_streamer_init() != ESP_OK);
+    g_fake_task_fail_at = 0;
+    audio_streamer_start();
+    audio_streamer_cancel();
+    audio_streamer_drain(50);
+    assert(!audio_streamer_active());
+    assert(g_event_count == 0);
+    assert(g_sem_live == 0);                  // R1:回滚路径信号量零泄漏
+
+    fake_reset();
+    assert(audio_streamer_init() == ESP_OK);  // 失败后重试:干净重建,管线恢复
+    audio_streamer_set_sender(link_send_audio);
+    audio_streamer_start();
+    usleep(50 * 1000);
+    assert(g_notify_count >= 1);              // 音频流正常工作
+    audio_streamer_stop();
+    audio_streamer_cancel();                  // 收尾:排空在途尾帧(下个用例零残留)
+}
+
+// 8) 重复 init 幂等(复核 R1):成功态重入直接返回 ESP_OK,不重建 —— 句柄
+//    不换、worker 不换(旧 worker 仍读同一全局句柄),管线行为与初始会话一致。
+static void test_reinit_idempotent(void) {
+    fake_reset();
+    assert(audio_streamer_init() == ESP_OK);  // 首次成功
+    assert(audio_streamer_init() == ESP_OK);  // 重入:幂等(不覆盖句柄)
+    audio_streamer_set_sender(link_send_audio);
+    audio_streamer_start();
+    usleep(50 * 1000);
+    assert(g_notify_count >= 1);              // 行为一致:worker 仍工作
+    audio_streamer_stop();
+    audio_streamer_cancel();
 }
 
 static void test_audio_error_event(void) {
@@ -203,15 +258,19 @@ static void test_audio_error_event(void) {
 }
 
 int main(void) {
+    // init 失败/重试/幂等用例放最前:s_ready 初始 false 时失败注入才真正
+    // 触发 init 的创建路径(成功 init 后幂等检查直接返回,注入不再生效)。
+    // 这些用例不泄漏消费型 worker(audio_worker 泄漏仅永久阻塞于旧信号量,
+    // 无唤醒者)——先于依赖单消费者(ble_worker)的正常用例执行安全。
+    test_init_failure_api_noop();
+    test_worker_fail_cleanup();
+    test_reinit_idempotent();
     test_cancel_drops_remaining();
     test_cancel_idempotent();
     test_cancel_timeout_keeps_dropping();
     test_start_rejected_until_drained();
     test_drop_accounting();
     test_audio_error_event();
-    // init 失败用例放最后:重复 init 会泄漏旧 worker 线程(宿主进程级回收),
-    // 泄漏的 ble_worker 会并发消费新 ring —— 不得影响依赖单消费者的用例。
-    test_init_failure_api_noop();
     printf("test_audio_streamer: all assertions passed\n");
     return 0;
 }

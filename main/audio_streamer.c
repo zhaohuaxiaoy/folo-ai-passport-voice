@@ -116,19 +116,33 @@ static void audio_worker(void *arg);
 static void ble_worker(void *arg);
 
 esp_err_t audio_streamer_init(void) {
+    // 幂等:成功态重入直接返回(复核 R1)——重建会覆盖全局句柄,旧 worker
+    // (读全局 s_ring/s_sem 指针)转读新资源 → 双 worker 并发/资源错乱。
+    // 失败态重试:全或无保证失败时无存活 worker、全局句柄未被覆盖(初始
+    // NULL 或上次有效残留),重试从干净状态重建。
+    if (s_ready) return ESP_OK;
     s_ready = false;   // 先重置:失败路径保持 false,公开 API 空转(审查 P2)
     // 全或无:资源全部创建成功才落全局句柄 —— 失败路径绝不覆盖旧句柄
     // (重复 init 时并发读者/遗留线程仍见有效句柄,不因部分失败暴露 NULL;
     // 真实固件首次 init 失败时全局句柄保持初始 NULL,由 s_ready 空转保护)。
+    // 失败路径同时释放已创建的堆信号量(复核 R1:任一失败点不得泄漏;
+    // ring 为静态存储,无需释放)。
     RingbufHandle_t ring = xRingbufferCreateStatic(RING_BYTES, RINGBUF_TYPE_BYTEBUF,
                                                    s_ring_storage, &s_ring_struct);
     if (!ring) return ESP_FAIL;
     SemaphoreHandle_t sem = xSemaphoreCreateBinary();
     if (!sem) return ESP_FAIL;
     SemaphoreHandle_t exit_sem = xSemaphoreCreateBinary();
-    if (!exit_sem) return ESP_FAIL;
+    if (!exit_sem) {
+        vSemaphoreDelete(sem);
+        return ESP_FAIL;
+    }
     SemaphoreHandle_t empty_sem = xSemaphoreCreateBinary();
-    if (!empty_sem) return ESP_FAIL;
+    if (!empty_sem) {
+        vSemaphoreDelete(sem);
+        vSemaphoreDelete(exit_sem);
+        return ESP_FAIL;
+    }
     s_ring = ring;
     s_sem = sem;
     s_worker_exit_sem = exit_sem;
@@ -142,14 +156,21 @@ esp_err_t audio_streamer_init(void) {
     // 全或无语义:任一失败即回滚已建任务 —— 绝不允许"采集任务在跑、发送任务缺失"
     // 的偏置状态(环缓冲持续堆积,审查 P2-6)。失败时指针保持 NULL/已删,stop 空
     // 指针保护已有;显式报错由调用方优雅降级处理。
+    // 任务创建失败同样释放已建信号量(复核 R1):worker 未建/已删,无任务引用它们。
     if (xTaskCreate(audio_worker, "audio_worker", 3072, NULL, 6, &s_audio_task) != pdPASS) {
         ESP_LOGE(TAG, "audio worker 创建失败(内存不足?)");
+        vSemaphoreDelete(sem);
+        vSemaphoreDelete(exit_sem);
+        vSemaphoreDelete(empty_sem);
         return ESP_FAIL;
     }
     if (xTaskCreate(ble_worker, "ble_worker", 4096, NULL, 5, &s_ble_task) != pdPASS) {
         ESP_LOGE(TAG, "ble worker 创建失败,回滚 audio worker");
         vTaskDelete(s_audio_task);     // audio worker 阻塞等待中,删除安全(无持有资源)
         s_audio_task = NULL;
+        vSemaphoreDelete(sem);
+        vSemaphoreDelete(exit_sem);
+        vSemaphoreDelete(empty_sem);
         return ESP_FAIL;
     }
     s_ready = true;   // 全部资源就绪:此后公开 API 才可访问 ring/sem/worker

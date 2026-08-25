@@ -23,6 +23,8 @@
 /* init 失败注入钩子(定义于下方"外围替身与可控钩子"节,stub 引用前置声明) */
 extern int g_fake_ring_fail;
 extern int g_fake_sem_fail;
+extern int g_fake_task_fail_at;
+extern int g_sem_live;
 
 // ==================== 信号量(pthread cond,ticks 按毫秒) ====================
 typedef struct {
@@ -36,6 +38,7 @@ SemaphoreHandle_t xSemaphoreCreateBinary(void) {
     FakeSem *s = calloc(1, sizeof(*s));
     pthread_mutex_init(&s->m, NULL);
     pthread_cond_init(&s->c, NULL);
+    g_sem_live++;                       // 存活计数(vSemaphoreDelete 递减)
     return s;
 }
 
@@ -81,6 +84,19 @@ BaseType_t xSemaphoreGive(SemaphoreHandle_t h) {
     pthread_cond_signal(&s->c);
     pthread_mutex_unlock(&s->m);
     return pdTRUE;
+}
+
+// vSemaphoreDelete 宿主实现:init 失败清理路径调用(复核 R1)。信号量存活
+// 计数 g_sem_live 供测试断言"失败路径零泄漏"。有等待者时 macOS pthread
+// destroy 返回 EBUSY 不销毁 —— 泄漏的 worker 线程(回滚路径 vTaskDelete
+// 空实现)永久阻塞在旧 cond wait,无唤醒者,不碰全局状态,测试内可接受。
+void vSemaphoreDelete(SemaphoreHandle_t h) {
+    FakeSem *s = h;
+    if (!s) return;
+    g_sem_live--;
+    pthread_mutex_destroy(&s->m);
+    pthread_cond_destroy(&s->c);
+    free(s);
 }
 
 // ==================== 字节环(BYTEBUF:取走=在途,归还才恢复) ====================
@@ -198,6 +214,13 @@ static void *thread_main(void *p) {
 BaseType_t xTaskCreate(TaskFunction_t fn, const char *name, uint32_t stack_depth,
                        void *arg, UBaseType_t priority, void *handle) {
     (void)name; (void)stack_depth; (void)priority; (void)handle;
+    // 失败注入钩子:g_fake_task_fail_at = N → 第 N 次调用失败(计数递减),
+    // 0 = 从不失败。测 worker 创建失败:1 = audio_worker 失败,2 = ble_worker
+    // 失败(回滚路径)(复核 R1)。
+    if (g_fake_task_fail_at > 0) {
+        g_fake_task_fail_at--;
+        if (g_fake_task_fail_at == 0) return pdFAIL;
+    }
     pthread_t tid;
     TaskCtx *c = malloc(sizeof(*c));
     c->fn = fn; c->arg = arg;
@@ -216,10 +239,13 @@ const char *esp_err_to_name(esp_err_t code) { return code == 0 ? "ESP_OK" : "ESP
 int g_fake_audio_fail = 0;   // 非 0 → 返回 ESP_FAIL(测 AUDIO_ERROR 事件)
 static unsigned g_audio_seq = 0;
 
-// --- init 失败注入:xRingbufferCreateStatic / xSemaphoreCreateBinary 返回 NULL
-// (测 init 部分失败后公开 API 空转保护:start/cancel/drain 不访问 NULL) ---
+// --- init 失败注入:xRingbufferCreateStatic / xSemaphoreCreateBinary 返回 NULL,
+// xTaskCreate 第 N 次调用失败(测 init 部分失败后公开 API 空转保护:
+// start/cancel/drain 不访问 NULL;复核 R1 的失败清理/幂等) ---
 int g_fake_ring_fail = 0;    // 非 0 → 环创建失败
 int g_fake_sem_fail = 0;     // 非 0 → 信号量创建失败
+int g_fake_task_fail_at = 0; // N>0 → 第 N 次 xTaskCreate 失败(0 = 从不)
+int g_sem_live = 0;          // 存活信号量计数(断言 init 失败路径零泄漏)
 
 esp_err_t bsp_audio_read(void *pcm, size_t bytes) {
     if (g_fake_audio_fail) return ESP_FAIL;
@@ -252,6 +278,7 @@ int link_send_audio(const uint8_t *frame, size_t len) {
 
 void fake_reset(void) {
     g_fake_audio_fail = 0;
+    g_fake_task_fail_at = 0;   // 注入钩子复位(测试显式设置/清零的风格保持)
     g_notify_rc = 0;
     g_notify_block_ms = 0;
     g_notify_count = 0;

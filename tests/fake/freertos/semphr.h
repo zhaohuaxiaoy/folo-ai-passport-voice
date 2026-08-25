@@ -10,3 +10,4 @@ SemaphoreHandle_t xSemaphoreCreateBinary(void);
 // ticks 按毫秒解释(见 FreeRTOS.h 的 pdMS_TO_TICKS);0 = 非阻塞尝试。
 BaseType_t xSemaphoreTake(SemaphoreHandle_t sem, TickType_t ticks);
 BaseType_t xSemaphoreGive(SemaphoreHandle_t sem);
+void vSemaphoreDelete(SemaphoreHandle_t sem);   // init 失败清理路径(复核 R1)
