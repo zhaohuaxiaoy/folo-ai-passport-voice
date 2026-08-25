@@ -75,6 +75,174 @@ def test_non_str_rejected():
         check("非 str 抛 InjectError", "str" in str(e), True)
 
 
+def test_invalid_mode_rejected():
+    """未知 mode 在平台检查之前拒绝(任何平台可测)。"""
+    try:
+        inject_win.paste_text("hi", mode="bogus")
+        check("未知 mode 拒绝", False, True)
+    except inject_win.InjectError as e:
+        check("未知 mode 拒绝", "auto|unicode|clipboard" in str(e), True)
+
+
+class _FakeWin32:
+    """成功路径 fake win32: 记录调用, 护栏放行, SendInput 可按需抛错。"""
+    def __init__(self, sendinput_boom=False):
+        self.calls = []
+        self.sendinput_boom = sendinput_boom
+
+    def GetForegroundWindow(self):
+        return 123
+
+    def GetWindowText(self, _hwnd):
+        return "Visual Studio Code"
+
+    def SendInput(self, *inputs):
+        if self.sendinput_boom:
+            raise RuntimeError("模拟 SendInput 失败")
+        self.calls.append(("SendInput", inputs))
+        return len(inputs)
+
+    def keybd_event(self, *args):
+        self.calls.append(("keybd_event", args))
+
+
+class _FakeClipboard:
+    """记录调用; text=None 表示当前剪贴板非文本。"""
+    def __init__(self, text=None):
+        self.calls = []
+        self.text = text
+
+    def OpenClipboard(self):
+        self.calls.append("Open")
+
+    def CloseClipboard(self):
+        self.calls.append("Close")
+
+    def EmptyClipboard(self):
+        self.calls.append("Empty")
+
+    def SetClipboardText(self, t, _fmt):
+        self.calls.append(("Set", t))
+        self.text = t
+
+    def GetClipboardData(self, _fmt):
+        return self.text
+
+    def IsClipboardFormatAvailable(self, _fmt):
+        return self.text is not None
+
+
+class _FakeCon:
+    KEYEVENTF_UNICODE = 0x4
+    KEYEVENTF_KEYUP = 0x2
+    CF_UNICODETEXT = 13
+    VK_RETURN = 0x0D
+    VK_HOME = 0x24
+    VK_END = 0x23
+    VK_DELETE = 0x2E
+    VK_SHIFT = 0x10
+    VK_CONTROL = 0x11
+
+
+def _install_fakes(api, clip, con):
+    import sys as _sys
+    saved = {}
+    for m, mod in (("win32api", api), ("win32clipboard", clip),
+                   ("win32con", con), ("win32gui", api)):
+        saved[m] = _sys.modules.get(m)
+        _sys.modules[m] = mod
+    return saved
+
+
+def _restore_fakes(saved):
+    import sys as _sys
+    for m, mod in saved.items():
+        if mod is None:
+            _sys.modules.pop(m, None)
+        else:
+            _sys.modules[m] = mod
+
+
+def test_unicode_path_no_clipboard():
+    """mode=unicode: SendInput KEYEVENTF_UNICODE 逐字符, 完全不碰剪贴板。"""
+    saved_platform = sys.platform
+    sys.platform = "win32"
+    saved = None
+    try:
+        api, clip, con = _FakeWin32(), _FakeClipboard(text="旧内容"), _FakeCon()
+        saved = _install_fakes(api, clip, con)
+        inject_win.paste_text("你好", focus_delay=0, mode="unicode")
+        sends = [c for c in api.calls if c[0] == "SendInput"]
+        check("unicode 逐字符两次 SendInput", len(sends) == 2, True)
+        check("每字符 DOWN+UP 成对",
+              all(len(s[1]) == 2 for s in sends), True)
+        check("不触碰剪贴板(含快照)", len(clip.calls) == 0, True)
+    finally:
+        sys.platform = saved_platform
+        if saved:
+            _restore_fakes(saved)
+
+
+def test_unicode_surrogate_pair():
+    """emoji(U+1F600) 拆 UTF-16 代理对 0xD83D/0xDE00 发送。"""
+    saved_platform = sys.platform
+    sys.platform = "win32"
+    saved = None
+    try:
+        api, clip, con = _FakeWin32(), _FakeClipboard(), _FakeCon()
+        saved = _install_fakes(api, clip, con)
+        inject_win.paste_text("😀", focus_delay=0, mode="unicode")
+        sends = [c for c in api.calls if c[0] == "SendInput"]
+        codes = [s[1][0][2] for s in sends]     # 每个 SendInput 首个 input 的 wScan
+        check("代理对 0xD83D/0xDE00", codes == [0xD83D, 0xDE00], True)
+    finally:
+        sys.platform = saved_platform
+        if saved:
+            _restore_fakes(saved)
+
+
+def test_auto_fallback_to_clipboard():
+    """auto: SendInput 失败 → 回退剪贴板(写入 + 粘贴 + 恢复旧文本)。"""
+    saved_platform = sys.platform
+    sys.platform = "win32"
+    saved = None
+    try:
+        api = _FakeWin32(sendinput_boom=True)
+        clip = _FakeClipboard(text="旧内容")
+        con = _FakeCon()
+        saved = _install_fakes(api, clip, con)
+        inject_win.paste_text("你好", focus_delay=0)     # mode 默认 auto
+        sets = [c for c in clip.calls if c[0] == "Set"]
+        check("回退写入转写文本", len(sets) >= 1 and sets[0][1] == "你好", True)
+        check("旧文本最后恢复", sets[-1][1] == "旧内容", True)
+    finally:
+        sys.platform = saved_platform
+        if saved:
+            _restore_fakes(saved)
+
+
+def test_unicode_forced_raises_on_failure():
+    """mode=unicode 强制: SendInput 失败直接抛 InjectError, 不回退。"""
+    saved_platform = sys.platform
+    sys.platform = "win32"
+    saved = None
+    try:
+        api = _FakeWin32(sendinput_boom=True)
+        clip = _FakeClipboard()
+        con = _FakeCon()
+        saved = _install_fakes(api, clip, con)
+        try:
+            inject_win.paste_text("你好", focus_delay=0, mode="unicode")
+            check("unicode 强制失败抛 InjectError", False, True)
+        except inject_win.InjectError as e:
+            check("unicode 强制失败抛 InjectError", "SendInput" in str(e), True)
+            check("强制模式不碰剪贴板", len(clip.calls) == 0, True)
+    finally:
+        sys.platform = saved_platform
+        if saved:
+            _restore_fakes(saved)
+
+
 def test_non_win32_rejected():
     """Mac 上真实注入 → 平台指引错误(不执行任何 win32 调用)。"""
     try:
@@ -166,10 +334,15 @@ def main():
     test_dry_run_any_platform()
     test_key_action_dry_run()
     test_non_str_rejected()
+    test_invalid_mode_rejected()
     test_non_win32_rejected()
     test_win32_without_pywin32()
     test_console_title_guard()
     test_win32_api_failure_wrapped()
+    test_unicode_path_no_clipboard()
+    test_unicode_surrogate_pair()
+    test_auto_fallback_to_clipboard()
+    test_unicode_forced_raises_on_failure()
     if FAILURES:
         print(f"\n{len(FAILURES)} 项失败:")
         for f in FAILURES:

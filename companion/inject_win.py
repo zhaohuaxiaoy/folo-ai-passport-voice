@@ -1,24 +1,26 @@
 #!/usr/bin/env python3
-"""Windows 输入注入: 剪贴板(CF_UNICODETEXT) + SendInput Ctrl+V 粘贴。
+"""Windows 输入注入: 优先 unicode 键盘事件, 剪贴板+粘贴兜底。
 
-与 macOS 的 companion/inject.py 同思路: 文本先写入系统剪贴板
-(win32clipboard, CF_UNICODETEXT = UTF-16, 中文/emoji 无忧), 再 SendInput
-模拟 Ctrl+V 粘贴到当前聚焦窗口。不逐字键入 —— 避免 CJK 输入法兼容问题,
-粘贴语义与 macOS 一致(插入而非叠加)。Win10 与 Win11 共用同一套 Win32 API。
+两条注入路径(见 paste_text 的 mode 参数):
+  - unicode: SendInput KEYEVENTF_UNICODE 逐字符键盘事件, 完全不碰系统
+    剪贴板 → 剪贴板历史管理工具零污染; 中文/emoji 经 UTF-16 码点直达;
+  - clipboard: win32clipboard 写入(CF_UNICODETEXT = UTF-16) + SendInput
+    模拟 Ctrl+V 粘贴, 注入后恢复旧剪贴板内容(仅文本; 历史工具仍留记录)。
 
 焦点护栏(Win10/11 前台差异统一处理): 注入前 GetForegroundWindow +
 GetWindowText, 前台窗口标题含 python/cmd/PowerShell/conhost(即 relay
 自己的控制台) → 抛 InjectError 并附 GUIDE, 不注入。不自动置顶
 (Windows 前台锁定使 SetForegroundWindow 不可靠)。注入前先检查一次
 (快速失败), 再等 focus_delay 秒给用户点击目标窗口的时间, 之后复查一次
-(用户没切窗口则中止)。
+(用户没切窗口则中止)。护栏对所有注入路径生效(unicode 同样防注入控制台)。
 
-契约与 inject.py 一致: paste_text(text, dry_run=False) / InjectError / GUIDE。
-pywin32 懒加载(dry_run 与单测不触碰 win32, Mac 可跑)。
+契约与 inject.py 一致: paste_text(text, dry_run=False, mode="auto") /
+InjectError / GUIDE。pywin32 懒加载(dry_run 与单测不触碰 win32, Mac 可跑)。
 
 用法:
   python3 companion/inject_win.py "要注入的文本"
   python3 companion/inject_win.py "文本" --dry-run     # 只打印将执行的步骤
+  python3 companion/inject_win.py "文本" --mode clipboard   # 强制剪贴板路径
 """
 import argparse
 import re
@@ -63,6 +65,30 @@ def _send_keys(win32api, win32con, combos):
         win32api.keybd_event(key, 0, win32con.KEYEVENTF_KEYUP, 0)
         if mod:
             win32api.keybd_event(mod, 0, win32con.KEYEVENTF_KEYUP, 0)
+
+
+def _type_unicode(win32api, win32con, text):
+    """SendInput KEYEVENTF_UNICODE 逐字符注入(不碰剪贴板)。
+
+    每个字符: DOWN(KEYEVENTF_UNICODE) + UP(KEYEVENTF_UNICODE|KEYEVENTF_KEYUP);
+    非 BMP 字符(emoji)按 UTF-16 代理对发送。应用视角等同键盘输入,
+    终端(Windows Terminal/ConHost)正常接受; xterm.js 类终端(如 VS Code
+    集成终端)可能不消费 —— 那正是 mode="auto" 回退剪贴板的场景。
+    """
+    for ch in text:
+        code = ord(ch)
+        if code > 0xFFFF:
+            code -= 0x10000
+            pair = (0xD800 + (code >> 10), 0xDC00 + (code & 0x3FF))
+        else:
+            pair = (code,)
+        for c in pair:
+            try:
+                win32api.SendInput(
+                    (0, 0, c, win32con.KEYEVENTF_UNICODE),
+                    (0, 0, c, win32con.KEYEVENTF_UNICODE | win32con.KEYEVENTF_KEYUP))
+            except Exception as e:
+                raise InjectError(f"SendInput unicode 注入失败: {e}") from e
 
 
 def key_action(action, dry_run=False, focus_delay=2.0):
@@ -120,9 +146,25 @@ def _send_ctrl_v(win32api, win32con):
     win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
 
 
-def paste_text(text, dry_run=False, focus_delay=2.0):
-    """把 text 写入剪贴板并模拟 Ctrl+V 粘贴到当前聚焦窗口。
+def _clipboard_snapshot(win32clipboard, win32con):
+    """读取当前剪贴板 → (has_text, text)。非文本(图片/文件)返回 (False, None)。"""
+    win32clipboard.OpenClipboard()
+    try:
+        if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
+            return True, win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+    finally:
+        win32clipboard.CloseClipboard()
+    return False, None
 
+
+def paste_text(text, dry_run=False, focus_delay=2.0, mode="auto"):
+    """把 text 注入当前聚焦窗口。
+
+    mode:
+      "unicode"    SendInput KEYEVENTF_UNICODE 逐字符注入, 不碰剪贴板;
+      "clipboard"  剪贴板 + Ctrl+V 粘贴, 注入后恢复旧剪贴板文本;
+      "auto"(缺省) 优先 unicode, 基础设施不可用时回退剪贴板。
+    注意: 剪贴板路径即使恢复了旧内容, 剪贴板历史管理工具仍会留下记录。
     dry_run=True 只打印将执行的步骤(单测与无权限验证用), 不实际执行。
     focus_delay: 注入前等待用户切换到目标窗口的秒数(config.local.json
     的 inject_focus_delay; 护栏先快查一次, 等待后再复查)。
@@ -130,11 +172,18 @@ def paste_text(text, dry_run=False, focus_delay=2.0):
     """
     if not isinstance(text, str):
         raise InjectError("text 必须是 str")
+    if mode not in ("auto", "unicode", "clipboard"):
+        raise InjectError(f"未知注入模式 {mode!r} (auto|unicode|clipboard)")
     if dry_run:
         print(f"# 注入文本 {len(text)} 字符: {text!r}")
         print(f"# 等 {focus_delay}s 供用户切换到目标窗口")
-        print("# [win32clipboard] 写入剪贴板(CF_UNICODETEXT)")
-        print("# [SendInput] Ctrl+V 粘贴到前台窗口")
+        if mode in ("auto", "unicode"):
+            print("# [SendInput] KEYEVENTF_UNICODE 逐字符注入(不碰剪贴板)")
+            if mode == "auto":
+                print("# (auto: 基础设施不可用时回退剪贴板路径, 见下)")
+        if mode in ("auto", "clipboard"):
+            print("# [win32clipboard] 写入剪贴板(CF_UNICODETEXT) + Ctrl+V 粘贴, "
+                  "注入后恢复旧剪贴板文本")
         return
     if sys.platform != "win32":
         raise InjectError(
@@ -176,8 +225,19 @@ def paste_text(text, dry_run=False, focus_delay=2.0):
     if _is_console_title(title):
         raise InjectError(f"前台仍是 relay 控制台窗口({title!r}), 拒绝注入。{GUIDE}")
 
-    # 4. 剪贴板写入(CF_UNICODETEXT: UTF-16, 中文无忧; OpenClipboard 可能被
-    #    其他进程持有而失败 —— 明确报错而非裸 traceback)
+    # 4. 注入(unicode 优先; 护栏对两条路径同样生效)
+    if mode in ("auto", "unicode"):
+        try:
+            _type_unicode(win32api, win32con, text)
+            return
+        except InjectError as e:
+            if mode == "unicode":
+                raise
+            print(f"[inject] unicode 注入不可用, 回退剪贴板: {e}",
+                  file=sys.stderr)
+
+    # 5. clipboard: 快照 → 写入 → Ctrl+V → 恢复旧文本(非文本内容无法恢复)
+    old_ok, old = _clipboard_snapshot(win32clipboard, win32con)
     try:
         win32clipboard.OpenClipboard()
         try:
@@ -188,25 +248,40 @@ def paste_text(text, dry_run=False, focus_delay=2.0):
     except Exception as e:
         raise _win32_err(f"剪贴板写入失败: {e}") from e
 
-    # 5. Ctrl+V 粘贴(不抢焦点: 只向当前前台窗口发键; keybd_event 是
-    #    SendInput 的 pywin32 简化封装, Win10/11 均有效)
     try:
         _send_ctrl_v(win32api, win32con)
     except Exception as e:
         raise _win32_err(f"按键注入失败: {e}") from e
 
+    if old_ok:
+        time.sleep(0.3)   # 给目标应用消费粘贴内容的时间, 再恢复旧剪贴板
+        try:
+            win32clipboard.OpenClipboard()
+            try:
+                win32clipboard.EmptyClipboard()
+                win32clipboard.SetClipboardText(old, win32con.CF_UNICODETEXT)
+            finally:
+                win32clipboard.CloseClipboard()
+        except Exception as e:
+            raise _win32_err(f"剪贴板恢复失败: {e}") from e
+    else:
+        print("[inject] 剪贴板原本非文本/为空, 旧内容无法恢复"
+              "(当前剪贴板已被替换)", file=sys.stderr)
+
 
 def _main():
-    ap = argparse.ArgumentParser(description="Windows 剪贴板粘贴注入")
+    ap = argparse.ArgumentParser(description="Windows 文本注入(unicode 优先, 剪贴板兜底)")
     ap.add_argument("text", help="要注入的文本")
     ap.add_argument("--dry-run", action="store_true",
                     help="只打印将执行的步骤")
     ap.add_argument("--focus-delay", type=float, default=2.0,
                     help="注入前等待用户切换到目标窗口的秒数")
+    ap.add_argument("--mode", default="auto", choices=("auto", "unicode", "clipboard"),
+                    help="注入路径: auto(默认, unicode 优先) / unicode / clipboard")
     args = ap.parse_args()
     try:
         paste_text(args.text, dry_run=args.dry_run,
-                   focus_delay=args.focus_delay)
+                   focus_delay=args.focus_delay, mode=args.mode)
     except InjectError as e:
         print(f"[inject] 错误: {e}", file=sys.stderr)
         print(f"[inject] 指引: {GUIDE}", file=sys.stderr)

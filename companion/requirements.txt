@@ -5,6 +5,9 @@ bleak==3.0.2; platform_system == "Darwin"      # macOS 11+ 单后端 BLE 客户�
 bleak[winrt]==3.0.2; platform_system == "Windows"   # Windows BLE(winrt 后端)
 websockets==17.0.1    # 火山 ASR 双向流式 + WiFi 通道 WS server(WsTransport)
 zeroconf==0.150.0     # WiFi 通道: mDNS 发布 _ai-passport._tcp(设备自动发现)
-pywin32>=306; platform_system == "Windows"     # Windows 注入(剪贴板+SendInput)
+pywin32>=306; platform_system == "Windows"     # Windows 注入(unicode SendInput / 剪贴板)
+# macOS unicode 注入(CGEvent 逐字符键盘事件, 不碰剪贴板); 缺失时 auto 模式
+# 回退剪贴板路径(见 inject.py paste_text mode 说明)
+pyobjc-framework-Quartz>=10.0; platform_system == "Darwin"
 # pyserial: USB 有线通道数据收发(全平台) + Windows 串口配网(纯 Python 无副作用)
 pyserial>=3.5

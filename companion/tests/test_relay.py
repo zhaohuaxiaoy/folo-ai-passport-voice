@@ -418,6 +418,43 @@ async def test_key_action_downlink():
     await wait_until(task.done, what="断开退出")
 
 
+def test_paste_mac_dry_run_modes():
+    """Mac paste_text dry_run: unicode/clipboard 路径打印与 mode 校验。"""
+    import io
+    from contextlib import redirect_stdout
+    from inject import paste_text
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        paste_text("你好", dry_run=True, mode="unicode")
+    out = buf.getvalue()
+    check("unicode dry_run 打印", "CGEvent" in out and "pbcopy" not in out, True)
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        paste_text("你好", dry_run=True, mode="clipboard")
+    out = buf.getvalue()
+    check("clipboard dry_run 打印", "pbcopy" in out and "Cmd+V" in out, True)
+
+    try:
+        paste_text("hi", mode="bogus")
+        check("未知 mode 拒绝", False, True)
+    except Exception as e:
+        check("未知 mode 拒绝", "auto|unicode|clipboard" in str(e), True)
+
+
+def test_default_inject_fn_mode():
+    """config inject_mode 透传: 非法值拒绝, auto 为缺省。"""
+    from relay import _default_inject_fn
+    try:
+        _default_inject_fn({"inject_mode": "bogus"})
+        check("inject_mode 非法拒绝", False, True)
+    except RelayError as e:
+        check("inject_mode 非法拒绝", "inject_mode" in str(e), True)
+    fn = _default_inject_fn({})
+    check("inject_mode 缺省 auto 可构造", callable(fn), True)
+
+
 def test_key_action_mac_dry_run():
     """Mac key_action dry_run: enter/clear 的 osascript 命令序列。"""
     import io
@@ -942,6 +979,8 @@ async def main():
     await test_time_sync_downlink_ble()
     await test_time_sync_downlink_usb()
     await test_key_action_downlink()
+    test_paste_mac_dry_run_modes()
+    test_default_inject_fn_mode()
     test_key_action_mac_dry_run()
     await test_approval_flow()
     await test_ctrl_write_no_response()

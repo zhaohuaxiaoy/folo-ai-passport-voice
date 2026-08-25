@@ -36,6 +36,12 @@ voice 窗口掉帧统计(理论帧数 vs 实收帧数, 与设备 status 帧 drop
                  自动扫描或 config usb_port 指定);注入 = 平台默认后端。
                   USB 模式无控制台, 经 relay stdin `!<命令>` 下行 SYS
                   命令面配网/查状态(mode/wifi set/ws set/log/st 等)。
+
+注入路径由 config.local.json 的 inject_mode 决定(缺省 "auto"):
+  "unicode"   键盘事件逐字符注入(SendInput/CGEvent), 不碰系统剪贴板
+              → 剪贴板历史管理工具(Paste/Maccy 等)零污染;
+  "clipboard" 剪贴板+粘贴(注入后恢复旧剪贴板文本);
+  "auto"      优先 unicode, 基础设施不可用(缺 Quartz)时回退剪贴板。
 """
 import argparse
 import asyncio
@@ -816,16 +822,25 @@ def _build_transport(cfg):
 def _default_inject_fn(cfg):
     """按平台选注入后端(契约一致: 单参 text):
 
-    Windows → inject_win(剪贴板 CF_UNICODETEXT + SendInput Ctrl+V), 带入
-    inject_focus_delay(注入前等用户切到目标窗口的秒数);
-    其余(macOS) → inject(pbcopy + osascript Cmd+V)。
+    inject_mode(config.local.json, 缺省 "auto"):
+      "unicode"   键盘事件逐字符注入(SendInput/CGEvent), 不碰剪贴板
+                  → 剪贴板历史管理工具零污染;
+      "clipboard" 剪贴板+粘贴(注入后恢复旧文本);
+      "auto"(缺省) 优先 unicode, 基础设施不可用(缺 Quartz 等)时回退剪贴板。
+    Windows → inject_win, 带入 inject_focus_delay(注入前等用户切到目标
+    窗口的秒数); 其余(macOS) → inject。
     """
+    mode = cfg.get("inject_mode", "auto")
+    if mode not in ("auto", "unicode", "clipboard"):
+        raise RelayError(
+            f"config.local.json 的 inject_mode 值无效: {mode!r}"
+            f"(应为 \"auto\"、\"unicode\" 或 \"clipboard\")")
     if sys.platform == "win32":
         from inject_win import paste_text
         delay = float(cfg.get("inject_focus_delay", 2.0))
-        return lambda text: paste_text(text, focus_delay=delay)
+        return lambda text: paste_text(text, focus_delay=delay, mode=mode)
     from inject import paste_text
-    return paste_text
+    return lambda text: paste_text(text, mode=mode)
 
 
 def _default_key_action_fn(cfg):
