@@ -126,8 +126,13 @@ esp_err_t audio_streamer_init(void) {
     // 栈:audio 3072 单元(≈12KB;深路径为 bsp_audio_read→esp_codec_dev_read,
     // 驱动调用栈约 1-1.5KB,余量充足);ble 保留 4096(NimBLE notify 调用链最深,
     // 不盲砍——stop() 的 uxTaskGetStackHighWaterMark 日志实测后再缩)。
-    xTaskCreate(audio_worker, "audio_worker", 3072, NULL, 6, &s_audio_task);
-    xTaskCreate(ble_worker, "ble_worker", 4096, NULL, 5, &s_ble_task);
+    // 创建失败检查:内存不足时静默失败会让 start 后无人消费(信号量空给、管线假活)。
+    // 失败时指针保持 NULL(stop 空指针保护已有),显式报错由调用方处理(审查 P2-6)。
+    if (xTaskCreate(audio_worker, "audio_worker", 3072, NULL, 6, &s_audio_task) != pdPASS ||
+        xTaskCreate(ble_worker, "ble_worker", 4096, NULL, 5, &s_ble_task) != pdPASS) {
+        ESP_LOGE(TAG, "worker 任务创建失败(内存不足?)");
+        return ESP_FAIL;
+    }
     ESP_LOGI(TAG, "流式管线就绪(静态环 %d B,块 %d B)", RING_BYTES, CHUNK_BYTES);
     return ESP_OK;
 }
