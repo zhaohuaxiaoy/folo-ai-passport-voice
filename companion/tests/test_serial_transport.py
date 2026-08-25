@@ -302,11 +302,41 @@ def test_concurrent_write_serialized():
         close_pair(master, slave)
 
 
+def test_disconnect_does_not_block_loop():
+    # 复核 R2:disconnect() 不得阻塞事件循环。同步 join(timeout=2) 在事件
+    # 循环线程会卡住 ticker —— 异步轮询下 ticker 在 disconnect 挂起期间
+    # 及时执行(≈0.15s),disconnect 总耗时远小于 join 上限 2s。
+    master, slave, port = make_pair()
+
+    async def scenario():
+        t = await connect_handshake(master, port)
+        ticked = []
+
+        async def ticker():
+            await asyncio.sleep(0.15)
+            ticked.append(time.monotonic())
+
+        t0 = time.monotonic()
+        d = asyncio.ensure_future(t.disconnect())
+        await ticker()                     # disconnect 挂起期间必须及时执行
+        await d
+        dt = time.monotonic() - t0
+        assert ticked, "ticker 未执行(事件循环被阻塞)"
+        assert dt < 1.0, f"disconnect 阻塞事件循环 {dt:.2f}s"
+        assert t._reader is None or not t._reader.is_alive()
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        close_pair(master, slave)
+
+
 def main():
     tests = [test_handshake, test_connect_timeout, test_pending_buffer,
              test_dispatch_event_audio, test_ctrl_arrival,
              test_syscmd_roundtrip, test_master_close_triggers_disconnect,
-             test_fixed_port_scan, test_concurrent_write_serialized]
+             test_fixed_port_scan, test_concurrent_write_serialized,
+             test_disconnect_does_not_block_loop]
     for t in tests:
         t()
         print(f"  {t.__name__} ok")

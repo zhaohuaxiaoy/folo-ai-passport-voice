@@ -26,6 +26,7 @@ import os
 import select
 import sys
 import threading
+import time
 
 import serial
 from serial.tools import list_ports
@@ -167,7 +168,12 @@ class SerialTransport:
                 self._dispatch_frame(ftype, payload)
 
     async def disconnect(self):
-        """关闭串口并收束读线程(relay 收束退出时调用,不触发 on_disconnect)。"""
+        """关闭串口并收束读线程(relay 收束退出时调用,不触发 on_disconnect)。
+
+        等读线程退出不阻塞事件循环(复核 R2):同步 join 在事件循环线程会
+        卡住最多 2s —— 改异步轮询(is_alive + 短 sleep,2s 截止)。读线程在
+        _stop 置位 + close 后,select 抛异常或 0.5s 超时必然退出。
+        """
         self._stop = True
         if self._ser is not None:
             try:
@@ -176,7 +182,9 @@ class SerialTransport:
                 pass
             self._ser = None
         if self._reader is not None:
-            self._reader.join(timeout=2.0)
+            deadline = time.monotonic() + 2.0
+            while self._reader.is_alive() and time.monotonic() < deadline:
+                await asyncio.sleep(0.02)
             self._reader = None
 
     # -- 扩展: SYS 命令面 --
