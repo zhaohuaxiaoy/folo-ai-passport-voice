@@ -40,6 +40,7 @@ def test_anchor():
 
 def test_floating_window_show_hide():
     try:
+        import time  # noqa: F401
         import ttkbootstrap as ttk
         from floating import FloatingCandidate
         root = ttk.Window(themename="darkly")
@@ -54,8 +55,9 @@ def test_floating_window_show_hide():
     assert f._label.cget("text") == "你好世界", "候选文本应更新"
     assert f._win.attributes("-topmost"), "窗口应置顶"
     assert f._win.overrideredirect(), "窗口应无边框"
-    # show 幂等: 第二次 show 更新文本不重建窗口
+    # show 幂等: 第二次 show 更新文本不重建窗口(等过合并窗口, 模拟真实帧间隔)
     win = f._win
+    time.sleep(0.15)
     f.show("第二段候选")
     root.update()
     assert f._win is win, "show 不应重建窗口"
@@ -76,6 +78,7 @@ def test_floating_show_same_text_noop():
     """重复 partial 文本 show() 应短路(零 configure/geometry); hide 重置后
     同文本不得被吞(新会话首帧)。"""
     try:
+        import time  # noqa: F401
         import ttkbootstrap as ttk
         from floating import FloatingCandidate
         root = ttk.Window(themename="darkly")
@@ -86,6 +89,7 @@ def test_floating_show_same_text_noop():
     f = FloatingCandidate(root)
     f.show("你好世界")
     root.update()
+    time.sleep(0.15)            # 过合并窗口: 后续 show 均立即渲染
 
     configured, moved = [], []
     orig_cfg = f._label.configure
@@ -122,9 +126,37 @@ def test_floating_show_same_text_noop():
     print("[PASS] show 同文本幂等短路 + hide 重置")
 
 
+def test_floating_high_frequency_merge():
+    """高频 partial 帧合并: 首帧立即渲染, 合并窗口内只刷最新帧。"""
+    try:
+        import time  # noqa: F401
+        import ttkbootstrap as ttk
+        from floating import FloatingCandidate
+        root = ttk.Window(themename="darkly")
+    except Exception as e:  # noqa: BLE001 无显示环境(TclError)等
+        print(f"SKIP: 无法创建窗口({e}); 跳过")
+        return
+    root.withdraw()
+    f = FloatingCandidate(root)
+    f.show("第一帧")
+    root.update()
+    assert f._label.cget("text") == "第一帧", "首帧应立即渲染"
+    f.show("第二帧")
+    f.show("第三帧")
+    root.update()
+    assert f._label.cget("text") == "第一帧", "合并期内不应逐帧渲染"
+    time.sleep(0.25)          # > _FLUSH_MS(120ms), 合并窗口已过
+    root.update()
+    assert f._label.cget("text") == "第三帧", "合并期后应刷新为最新帧"
+    f.destroy()
+    root.destroy()
+    print("[PASS] 高频 partial 帧合并")
+
+
 if __name__ == "__main__":
     test_pick_family()
     test_anchor()
     test_floating_window_show_hide()
     test_floating_show_same_text_noop()
+    test_floating_high_frequency_merge()
     print("全部通过")

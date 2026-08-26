@@ -16,6 +16,7 @@
 模块顶层不创建任何 tk 对象, 无显示环境可安全 import。
 """
 import sys
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 
@@ -30,6 +31,7 @@ _WRAP = 320                # 文本换行宽度(留出加大后的左右间距)
 _PAD_X = 20
 _PAD_Y = 18
 _FONT_SIZE = 14
+_FLUSH_MS = 120               # 高频 partial 帧合并窗口(首帧立即渲染)
 
 
 def _pick_family(available, candidates):
@@ -68,17 +70,44 @@ class FloatingCandidate:
         self._font = None
         self._last_text = None      # show() 幂等短路: 重复 partial 零 Tcl 往返
         self._sw = self._sh = None  # 屏幕尺寸缓存(会话内恒定, 省每帧往返)
+        self._pending = None        # 高频帧合并: 待刷文本
+        self._flush_after = None    # 合并定时器 id
+        self._last_flush_at = 0.0   # 上次渲染时间戳(合并窗口判定)
+        self._geo_cache = None      # 上次 geometry: 尺寸未变不重设
 
     # ---- 显示/隐藏 ----
 
     def show(self, text):
-        """显示候选文本。首次调用懒创建窗口。"""
+        """显示候选文本。首次调用懒创建窗口。
+
+        高频 partial 帧合并: 首帧立即渲染(窗口不延迟出现), 之后
+        _FLUSH_MS 窗口内的帧只保留最新 —— macOS 上窗口 resize + 透明
+        合成开销不低, 逐帧更新会让 UI 线程卡顿(用户实测)。
+        """
         if self._win is None:
             self._build()
-        # 幂等短路: ASR partial 常在同一段文本反复发帧(静音段/重发),
-        # 已显示同文本时零 Tcl 往返。
         if text == self._last_text and self._win.winfo_ismapped():
             return
+        # 距上次渲染已过合并窗口 → 立即渲染; 否则挂 pending 等定时器刷最新
+        # (monotonic 是秒, _FLUSH_MS 是毫秒, 比较前换算)
+        if self._flush_after is None \
+                and time.monotonic() - self._last_flush_at >= _FLUSH_MS / 1000:
+            self._flush(text)
+            return
+        self._pending = text        # 高频帧合并: 定时器只刷最新
+        if self._flush_after is None:
+            self._flush_after = self._root.after(_FLUSH_MS, self._flush_pending)
+
+    def _flush_pending(self):
+        self._flush_after = None
+        text = self._pending
+        self._pending = None
+        if text is not None:
+            self._flush(text)
+
+    def _flush(self, text):
+        """渲染一帧(文本 + 定位)。"""
+        self._last_flush_at = time.monotonic()
         self._last_text = text
         self._label.configure(text=text)
         if not self._win.winfo_ismapped():
@@ -89,21 +118,32 @@ class FloatingCandidate:
         # 设置不生效, 且重发防系统/合成器漂移
         self._win.attributes("-topmost", True)
         self._win.update_idletasks()
+        w, h = self._win.winfo_width(), self._win.winfo_height()
         x, y = _anchor(self._sw if self._sw is not None
                        else self._win.winfo_screenwidth(),
                        self._sh if self._sh is not None
-                       else self._win.winfo_screenheight(),
-                       self._win.winfo_width(), self._win.winfo_height())
-        self._win.geometry(f"+{x}+{y}")
+                       else self._win.winfo_screenheight(), w, h)
+        if (x, y, w, h) != self._geo_cache:
+            self._win.geometry(f"+{x}+{y}")
+            self._geo_cache = (x, y, w, h)
 
     def hide(self):
         if self._win is not None:
+            if self._flush_after is not None:
+                self._root.after_cancel(self._flush_after)
+                self._flush_after = None
+            self._pending = None
             self._win.withdraw()
-            # 清幂等缓存: 新会话首帧若与上会话末帧同文, 不得被短路吞
+            # 清幂等缓存 + 重置合并窗口: 新会话首帧立即渲染,
+            # 且若与上会话末帧同文也不得被短路吞
             self._last_text = None
+            self._last_flush_at = 0.0
 
     def destroy(self):
         if self._win is not None:
+            if self._flush_after is not None:
+                self._root.after_cancel(self._flush_after)
+                self._flush_after = None
             self._win.destroy()
             self._win = None
             self._label = None
@@ -139,6 +179,7 @@ class FloatingCandidate:
         x, y = _anchor(self._sw, self._sh,
                        win.winfo_reqwidth(), win.winfo_reqheight())
         win.geometry(f"+{x}+{y}")
+        self._geo_cache = (x, y, win.winfo_reqwidth(), win.winfo_reqheight())
 
     def _pick_font(self):
         if self._font is None:
