@@ -99,6 +99,7 @@ class FREApp:
         self.probe_result = None         # ("ble"|"wifi"|"usb", addr)
         self.last_error = ""
         self._tray = None                # pystray Icon(连接成功后启动)
+        self._shutdown_deadline = 0.0    # 分片退出轮询的强收期限
         self._tray_state = {"connected": False, "device": "", "listening": False}
 
         self.cfg = fre_state.load_or_default_cfg()
@@ -382,6 +383,11 @@ class FREApp:
 
     def connect(self):
         self.last_error = ""
+        # P2-2: 重复调用拒绝 —— 前一 relay 线程仍存活(连接中/收束中)时再
+        # 叠线程会产出两套 relay 争抢设备(重连无互斥,审查 P2-2)。
+        if self._thread is not None and self._thread.is_alive():
+            self.last_error = "已有连接任务在运行,请稍候"
+            return
         # Mac 授权检查: 有缺失项 → 先进授权页
         missing = [name for name, st in fre_state.mac_permission_status()
                    if st == "missing"]
@@ -460,6 +466,24 @@ class FREApp:
                 except Exception:  # noqa: BLE001
                     pass
             self.phase_q.put(("relay_done", None))
+            # P2-3: 收束事件循环 —— 取消残留协程(诊断页 run_syscmd 桥等,
+            # 不复位会跨线程泄漏)再 close。顺序: zc 已关, 再收 loop。
+            try:
+                pending = [t for t in asyncio.all_tasks(loop)
+                           if not t.done() and t is not self.relay_task]
+                for t in pending:
+                    t.cancel()
+                if pending:
+                    loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True))
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                loop.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._loop = None
+            self.relay_task = None
 
     def poll(self):
         """UI 线程轮询后台事件(每 100ms)。"""
@@ -571,7 +595,11 @@ class FREApp:
             self._shutdown()
 
     def on_reset(self):
-        if self._loop is not None and self.relay_task is not None:
+        """重试入口: 仅在 relay 实际运行(线程存活且 task 未完成)时取消,
+        避免对已收束的 loop/task 调用 call_soon_threadsafe(审查 P2-3)。"""
+        if (self._thread is not None and self._thread.is_alive()
+                and self._loop is not None and self.relay_task is not None
+                and not self.relay_task.done()):
             self._loop.call_soon_threadsafe(self.relay_task.cancel)
         self.set_status("")
         self.start_discover()
@@ -641,11 +669,21 @@ class FREApp:
         self._shutdown()
 
     def _shutdown(self):
-        """完整退出: 收束后台 relay(取消 task + 等线程退出) + 停托盘。"""
-        if self._loop is not None and self.relay_task is not None:
+        """完整退出: 取消后台 relay 后分片轮询等线程退出(不冻结 UI,
+        审查 P2-3: 原 join(5s) 在主线程同步阻塞可冻结界面 5 秒)。"""
+        if (self._loop is not None and self.relay_task is not None
+                and self.relay_task.done() is False):
             self._loop.call_soon_threadsafe(self.relay_task.cancel)
-        if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=5)
+        self._shutdown_deadline = time.monotonic() + 5.0
+        self._shutdown_poll()
+
+    def _shutdown_poll(self):
+        """分片等待: 每 100ms 检查 relay 线程, 退出后停托盘并销毁窗口;
+        超强收期限(5s)直接收尾(守护线程不阻进程退出)。"""
+        if (self._thread is not None and self._thread.is_alive()
+                and time.monotonic() < self._shutdown_deadline):
+            self.root.after(100, self._shutdown_poll)
+            return
         if self._tray is not None:
             try:
                 self._tray.stop()

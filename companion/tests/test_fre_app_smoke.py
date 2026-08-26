@@ -68,3 +68,59 @@ def run_smoke():
 
 if __name__ == "__main__":
     sys.exit(run_smoke())
+
+
+# ---- 单元: 通道切换 cfg 同步(审查 P1-1) ----
+# _relay_worker 的 _build_transport 读 self.cfg: 只写盘不同步内存 cfg,
+# 切换不生效。断言 on_channel_change / on_discover_next 后 cfg 同步。
+def test_channel_cfg_sync():
+    try:
+        import ttkbootstrap as ttk  # noqa: F811
+        from fre_app import FREApp, THEME  # noqa: F811
+        root = ttk.Window(themename=THEME)
+    except Exception as e:  # noqa: BLE001 无显示环境(TclError)等
+        print(f"SKIP: 无法创建窗口({e}); 跳过")
+        return
+    root.withdraw()
+    app = FREApp(root, dry_run=True, no_tray=True)
+    assert app.cfg.get("channel", "ble") == app.channel
+    app._channel_var.set("wifi")
+    app.on_channel_change()
+    assert app.cfg["channel"] == "wifi", "on_channel_change 未同步内存 cfg"
+    app._channel_var.set("usb")
+    app.on_discover_next()
+    assert app.cfg["channel"] == "usb", "on_discover_next 未同步内存 cfg"
+    root.destroy()
+    print("[PASS] 通道切换 cfg 同步")
+
+
+# ---- 单元: 重复 connect 拒绝(审查 P2-2) ----
+# 前一 relay 线程存活时再点连接: 不得叠线程, 记 last_error 并留在原页。
+def test_connect_duplicate_rejected():
+    try:
+        import threading
+        import time  # noqa: F401
+        import ttkbootstrap as ttk  # noqa: F811
+        from fre_app import FREApp, THEME  # noqa: F811
+        root = ttk.Window(themename=THEME)
+    except Exception as e:  # noqa: BLE001 无显示环境(TclError)等
+        print(f"SKIP: 无法创建窗口({e}); 跳过")
+        return
+    root.withdraw()
+    app = FREApp(root, dry_run=True, no_tray=True)
+    gate = threading.Event()
+
+    def fake_worker():
+        gate.wait(30)   # 模拟仍在跑的 relay 线程
+
+    t = threading.Thread(target=fake_worker, daemon=True)
+    t.start()
+    app._thread = t
+    app.connect()
+    assert app.last_error, "重复 connect 应记录错误"
+    assert app.current_page == "welcome", \
+        f"重复 connect 不应离开当前页(实际 {app.current_page})"
+    gate.set()
+    t.join(timeout=2)
+    root.destroy()
+    print("[PASS] 重复 connect 被拒绝")
