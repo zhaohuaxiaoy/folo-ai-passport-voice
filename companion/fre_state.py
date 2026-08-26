@@ -34,10 +34,30 @@ VALID_TRANSITIONS = {
 }
 
 
+def config_dir():
+    """config.local.json 所在目录。
+
+    源码运行: 与模块同目录(与 relay/asr_client 共享)。PyInstaller frozen
+    (审查 P1-6): __file__ 指向解包临时目录 _MEIPASS, 每次启动路径变化且
+    进程退出即删除 → 写 config 必然丢失。frozen 改到用户数据目录
+    (可写、持久): macOS ~/Library/Application Support/AI Passport/,
+    其他平台 %APPDATA%/AI Passport/。目录不存在则创建。
+    """
+    if getattr(sys, "frozen", False):
+        if sys.platform == "darwin":
+            base = os.path.expanduser("~/Library/Application Support")
+        else:
+            base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        d = os.path.join(base, "AI Passport")
+    else:
+        d = os.path.dirname(os.path.abspath(__file__))
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 def config_path():
-    """config.local.json 绝对路径(与 relay/asr_client 同目录)。"""
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "config.local.json")
+    """config.local.json 绝对路径(frozen 分叉见 config_dir)。"""
+    return os.path.join(config_dir(), "config.local.json")
 
 
 def load_or_default_cfg():

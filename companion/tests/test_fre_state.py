@@ -197,3 +197,59 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def test_config_path_frozen_split():
+    """审查 P1-6: frozen 打包时 config 落在用户数据目录(可写持久), 非
+    frozen 保持模块目录(既有行为回归)。"""
+    import sys as _sys
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        # frozen + macOS → ~/Library/Application Support(monkeypatch HOME)
+        old_frozen = getattr(_sys, "frozen", None)
+        old_platform = fre_state.sys.platform
+        old_home = os.environ.get("HOME")
+        os.environ["HOME"] = td
+        _sys.frozen = True
+        fre_state.sys.platform = "darwin"
+        try:
+            d = fre_state.config_dir()
+            assert os.path.exists(d), "目录应自动创建"
+            assert d == os.path.join(td, "Library", "Application Support",
+                                     "AI Passport"), d
+        finally:
+            if old_frozen is None:
+                delattr(_sys, "frozen")
+            else:
+                _sys.frozen = old_frozen
+            fre_state.sys.platform = old_platform
+            if old_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = old_home
+
+        # frozen + Windows → %APPDATA%/AI Passport
+        _sys.frozen = True
+        old_platform2 = fre_state.sys.platform
+        fre_state.sys.platform = "win32"
+        old_appdata = os.environ.get("APPDATA")
+        os.environ["APPDATA"] = os.path.join(td, "appdata")
+        try:
+            d = fre_state.config_dir()
+            assert d == os.path.join(td, "appdata", "AI Passport"), d
+        finally:
+            if old_frozen is None:
+                delattr(_sys, "frozen")
+            else:
+                _sys.frozen = old_frozen
+            fre_state.sys.platform = old_platform2
+            if old_appdata is None:
+                os.environ.pop("APPDATA", None)
+            else:
+                os.environ["APPDATA"] = old_appdata
+
+    # 非 frozen: 保持模块目录(既有行为)
+    assert os.path.dirname(fre_state.config_path()) == os.path.dirname(
+        os.path.abspath(fre_state.__file__))
+    print("[PASS] config 路径 frozen 分叉")

@@ -104,9 +104,11 @@ def build_full_request(cfg=None):
 # ---- 配置 ----
 
 def load_config():
+    # 审查 P1-6: 与 fre_state 同源(frozen 打包时 config 落在用户数据目录,
+    # 与模块同目录的旧逻辑在 _MEIPASS 临时目录写入必丢)。
+    from fre_state import config_path
     cfg = {}
-    here = os.path.dirname(os.path.abspath(__file__))
-    p = os.path.join(here, "config.local.json")
+    p = config_path()
     if os.path.exists(p):
         with open(p, "r", encoding="utf-8") as f:
             cfg = json.load(f)
