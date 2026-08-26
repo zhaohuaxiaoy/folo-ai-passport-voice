@@ -16,6 +16,12 @@ extern "C" {
 // 解析 Mac→设备 的 JSON 行。成功填 ev 并返回 true;未知 type / 畸形 / 非法字段 → false。
 bool app_protocol_parse(const char *json, size_t len, app_event_t *ev);
 
+// 协议事件投递(通道统一的唯一投递点):APPROVAL_REQUEST 走重要通道
+// (队列满等 100ms 不丢 —— 安全审批丢失 = 设备无界面可操作),其余事件
+// 零阻塞可丢(见 app_events.h 事件队列语义)。审查 P2-1:修复审批请求
+// 在按键风暴期被队列满丢弃。
+void app_protocol_dispatch_event(const app_event_t *ev);
+
 // 设备→Mac 序列化。返回写入字节数(不含 NUL);失败返回 0。
 size_t app_protocol_device_hello(char *buf, size_t cap, int proto);
 size_t app_protocol_voice_start(char *buf, size_t cap);

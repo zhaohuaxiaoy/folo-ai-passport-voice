@@ -1,14 +1,18 @@
 // main/app_protocol.c —— 协议实现。
 // 字段契约见 prd.md 协议小节;任何解析失败只返回 false,绝不崩溃。
 #include "app_protocol.h"
+#include "app_events.h"
 #include "cJSON.h"
 #include <stdlib.h>
 #include <string.h>
 
-// JSON 嵌套深度上限:解析在 NimBLE host task(默认栈 4KB)上下文执行,cJSON 的
-// 递归解析没有深度限制——2KB 载荷内的深层嵌套(如 [[[[...]]]])可爆栈崩溃。
+// JSON 嵌套深度上限:解析在 NimBLE host task(默认栈 4KB,审查起算 2048B 栈
+// 路径也在用)上下文执行,cJSON 的递归解析没有深度限制——2KB 载荷内的深层
+// 嵌套(如 [[[[...]]]])可爆栈崩溃。审查 P1:32 层 × 每层 cJSON 递归帧
+// (~150B)≈ 4.8KB,已超 4KB 栈余量;12 层 ≈ 1.8KB,任何解析上下文都安全。
+// 协议实际载荷最深 ~5 层(type → payload → list → item → field),12 层富余。
 // 预检只扫结构字符({ [ 计数配对),跳过字符串(含转义),O(len) 微秒级早退。
-#define APP_PROTO_JSON_DEPTH_MAX 32
+#define APP_PROTO_JSON_DEPTH_MAX 12
 
 static bool json_depth_ok(const char *json, size_t len) {
     int depth = 0;

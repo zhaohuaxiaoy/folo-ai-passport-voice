@@ -144,7 +144,36 @@ static void test_parse_deep_nesting_rejected(void) {
     deep_arr[n] = '\0';
     assert(!app_protocol_parse(deep_arr, n, &ev));
 
-    // 32 层内:正常解析不误伤(最深 2 层)
+    // 深度上限边界(现为 12):type 行外层对象占 1 层,数组 11 层 = 总深 12 接受;
+    // 数组 12 层 = 总深 13 拒绝(多余字段被解析器忽略,正常返回 true 的路径)
+    {
+        char ok[200];
+        size_t n = 0;
+        const char *head = "{\"type\":\"transcript\",\"text\":\"x\",\"x\":";
+        memcpy(ok, head, strlen(head));
+        n = strlen(head);
+        for (int i = 0; i < 11; i++) ok[n++] = '[';
+        ok[n++] = '1';
+        for (int i = 0; i < 11; i++) ok[n++] = ']';
+        ok[n++] = '}';
+        ok[n] = '\0';
+        assert(app_protocol_parse(ok, n, &ev));
+    }
+    {
+        char too_deep[200];
+        size_t n = 0;
+        const char *head = "{\"type\":\"transcript\",\"text\":\"x\",\"x\":";
+        memcpy(too_deep, head, strlen(head));
+        n = strlen(head);
+        for (int i = 0; i < 12; i++) too_deep[n++] = '[';
+        too_deep[n++] = '1';
+        for (int i = 0; i < 12; i++) too_deep[n++] = ']';
+        too_deep[n++] = '}';
+        too_deep[n] = '\0';
+        assert(!app_protocol_parse(too_deep, n, &ev));
+    }
+
+    // 正常协议行不误伤(最深 ~5 层)
     const char *ok = "{\"type\":\"agent.status\",\"state\":\"running\","
                      "\"message\":\"{\\\"nested\\\":[1,2,{\\\"a\\\":3}]}\"}";
     assert(app_protocol_parse(ok, strlen(ok), &ev));
