@@ -1,8 +1,10 @@
-# FoloToy AI Passport · Voice Input
+# FoloToy AI Passport · Voice Input & AI Control Surface
 
 [简体中文](README.md) | [English](README.en.md)
 
-A voice input solution for the **FoloToy AI Passport** (ESP32-C3): hold the device button to talk — recognized candidates appear **live in a floating window on your Mac/Windows desktop**; release to have the final text **injected into the focused input box automatically**. WeChat-style voice input for the desktop.
+**FoloToy AI Passport** is an AI companion device (ESP32-C3) — but not just "another keyboard". Hold the device button to talk: recognized candidates appear **live in a floating window on your Mac/Windows desktop**, and when you release, the final text is **injected into the focused input box automatically** (WeChat-style voice input). At the same time, the agent's thinking, execution and approval flow are all visualized on the device screen, and critical actions require your **physical button confirmation**.
+
+In one sentence: it moves AI from the browser to your desktop input box, and puts the AI's **ears** (voice input), **eyes** (state visualization) and **handbrake** (physical approval) into a device you hold.
 
 ```text
 Hold OK to talk ──► device records ──► desktop relay ──► Volcano streaming ASR
@@ -16,18 +18,39 @@ Hold OK to talk ──► device records ──► desktop relay ──► Volca
 
 > The repository contains both the **firmware** (ESP-IDF, device side) and the **desktop companion** (`companion/`, macOS/Windows relay), which work together over three channels: BLE / WiFi / USB.
 
+## Architecture
+
+| Layer | Component | Responsibility |
+| --- | --- | --- |
+| Device | ESP32-C3 firmware (ESP-IDF 5.5 + LVGL 9.5) | State machine, buttons/recording, UI rendering, three-channel transport, power management |
+| Desktop | companion (macOS / Windows) | Three-channel access, Volcano streaming ASR forwarding, floating window, clipboard injection, wizard, tray |
+| Cloud | Volcano Engine large-model streaming ASR | Audio → text (partial full-accumulation / final) |
+
+Data flow: the device captures 16 kHz audio → streams 100 ms frames up over **BLE / WiFi+WS / USB** (any channel) → the desktop relay feeds them into Volcano ASR in streaming mode → partial results echo live to the floating window and the device screen → on release the final text is injected once and the window closes. The reverse channel carries agent status, approval requests and button verdicts.
+
+## Highlights
+
+- **Three-channel redundant transport**: one audio/event protocol runs over three physical channels — BLE (direct to Mac, GATT service `0xA2B0`), WiFi+WebSocket+mDNS (Bluetooth-less PCs, auto-discovery and auto-reconnect), USB-Serial-JTAG (wired debugging + full console command surface). Any channel failure converges the session back to READY and keeps approvals pending for reconnect — a broken link never bricks the device.
+- **State-machine driven + snapshot rendering**: the core state machine is a pure-C reducer (`state + event → action`) with zero ESP-IDF dependencies; 7 host test suites run directly on a PC. UI rendering is driven by snapshot diffs, fully decoupling logic from hardware — testable and portable.
+- **Low-resource streaming audio pipeline**: on an ESP32-C3 with only **400 KB SRAM**, audio streams up in 3200-byte/100 ms frames — static ring buffers (no dynamic allocation), source-side frame dropping (never buffers a full utterance), drop reconciliation against silent loss; long sentences never stall.
+- **Physical security approval**: agent permission requests (modify files, run commands) are not push notifications — they are an approval page on the device screen. **OK approve / UP reject** — a real physical press counts; the approval state never sleeps.
+- **Two-level power management**: 20 s idle → backlight off (rendering skipped, panel frozen on the last frame); 60 s idle → panel SLPIN sleep at μA level; any key wakes instantly with zero repaint (ST7789 DRAM survives sleep).
+- **Polished desktop experience**: the floating window **never steals focus** (Windows `WS_EX_NOACTIVATE` + macOS zero WindowServer sync on the hot path — no spinning beachball while talking), 120 ms frame merging renders only the latest frame, a 5-step wizard verifies the ASR key with a zero-audio handshake, tray residency, and dual-platform injection (CJK goes through the clipboard channel).
+
 ## Features
 
 ### Device firmware
 
 - **Push-to-talk**: hold OK in READY state to record (start beep), release to send — no cancel window, no timeout residue
 - **LISTENING page**: microphone icon + elapsed timer while recording (replaces the classic REC dot / level bar)
+- **Agent workflow visualization**: THINKING / RUNNING / DONE states, task echo, offline banner — see what the AI is doing
+- **Physical approval**: agent approval requests show on-device — OK approve / UP reject / DOWN view diff (disabled in the GUI by default)
 - **Three-button interaction**: OK hold-to-talk, DOWN = Enter, OK double-click clears the input box (global)
 - **Full state machine**: HOME → READY → LISTENING → TRANSCRIBING → AGENT_RUNNING → APPROVAL → DONE
-- **Physical approval**: agent approval requests are shown on-device — OK approve / UP reject / DOWN view diff (disabled in the GUI by default)
 - **Tones**: start / send / approval / success / reject / error
-- **Three transport channels**: BLE (direct to Mac, GATT service `0xA2B0`) / WiFi+WebSocket+mDNS (Windows PCs without Bluetooth) / USB (USB-Serial-JTAG wired, full console command surface)
-- **Low-memory audio pipeline**: 3200-byte/100 ms frames, static ring buffers, source-side frame dropping (never buffers a full utterance), drop reconciliation
+- **Three transport channels**: BLE / WiFi+WS+mDNS / USB-Serial-JTAG (full console command surface)
+- **Low-memory audio pipeline**: 3200-byte/100 ms frames, static ring buffers, source-side frame dropping, drop reconciliation
+- **Two-level screen-off**: 20 s idle → backlight off; 60 s idle → panel SLPIN power-off; any key wakes; approval state stays on
 - **Console commands**: `st` (heap/stack watermarks, link state, drop stats), `mode`, `wifi set` (password never echoed), `ws`, `mdns`, `logs`, `system`, `factory reset`, `reboot`
 
 ### Desktop companion (macOS + Windows)
@@ -105,8 +128,18 @@ partitions.csv           Custom partition table (factory 4 MB)
 2. The desktop relay streams frames into the Volcano Engine ASR (`bigmodel_async`; every result packet carries the **full accumulated text**)
 3. Partial results → the floating window updates live (120 ms frame merging; with the GUI attached, the device no longer previews candidates)
 4. Release OK → `voice.end` → final result → **injected into the focused input box once** (clipboard + Cmd+V) → window closes
+5. The final text also echoes back on the device screen; agent status (THINKING / RUNNING / DONE) and approval requests stream down
+6. An approval request → the device enters the approval page → OK/UP physical press decides → the verdict streams up → the agent continues
 
 The injection target is whatever window the user is focused on — the floating window never steals focus. Preview failures are logged only and never block injection.
+
+## Design decisions
+
+- **Why three channels**: BLE only covers Macs with Bluetooth; Windows PCs without Bluetooth use WiFi+WS (mDNS auto-discovery); USB is both the debugger and the last-resort wired link — any single link can fail and the others keep working. Disconnect events converge the session uniformly, leaving no half-open sessions.
+- **Why a pure-C reducer state machine**: the `state + event → action` pattern keeps all transition logic **hardware-free**; 7 ctest suites cover state transitions, protocol codec, audio framing and UI pixel math. UI renders from snapshot diffs — adding a page adds no state coupling.
+- **Why a static ring-buffer audio pipeline**: the ESP32-C3 has only 400 KB SRAM — dynamic allocation plus buffering a full utterance would blow the heap. 3200-byte/100 ms frames, source-side frame dropping and drop reconciliation are what let an entry-level MCU act as an AI input device.
+- **Why physical approval**: AI auto-modifying files or running commands is risky — approvals don't live in a notification banner, they live on the device screen. A real button press counts, and the approval state never sleeps.
+- **Why two-level screen-off**: 20 s kills the backlight (saving the backlight LED's mA); 60 s puts the panel into SLPIN (saving the internal oscillator and driver, μA) — different goals, same wake experience: any key lights up instantly with zero repaint (ST7789 DRAM survives sleep).
 
 ## Development
 
@@ -128,7 +161,11 @@ companion/.venv/bin/python -m pytest companion/tests/ -q -o asyncio_mode=auto
 
 ### On-device acceptance status
 
-The full checklist for when hardware arrives is in [`docs/ON_DEVICE.md`](docs/ON_DEVICE.md). Current status: **Build PASS, host tests PASS, device tests NOT RUN (awaiting hardware)**. Key items: real floating-window sessions (hold PTT → live candidates → single injection on release), Windows focus behavior, no dropped words over ~15 s of continuous speech (if drops occur, raise `AUDIO_Q_MAX` from 20 to 30–40 in `companion/relay.py`), BLE throughput/drop rate, USB unplug recovery, battery readings.
+The full checklist for when hardware arrives is in [`docs/ON_DEVICE.md`](docs/ON_DEVICE.md). Current status: **Build PASS, host tests PASS, device tests NOT RUN (awaiting hardware)**. Key items: real floating-window sessions (hold PTT → live candidates → single injection on release), Windows focus behavior, no dropped words over ~15 s of continuous speech (if drops occur, raise `AUDIO_Q_MAX` from 20 to 30–40 in `companion/relay.py`), BLE throughput/drop rate, USB unplug recovery, battery readings, two-level screen-off timing and wake content restoration.
+
+## Extensibility
+
+Voice input is the **first application** on this pipeline: the same audio stream + event protocol (shared by all three channels) can naturally carry more — transcription, translation, agent commands, remote control. Both the firmware and the desktop side are open under MIT; reskinning, adding pages and integrating new services all start from clean architectural boundaries.
 
 ## License
 
