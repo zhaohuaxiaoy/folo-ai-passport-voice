@@ -52,16 +52,21 @@ Hold OK to talk ──► device records ──► BLE / WiFi / USB ──► de
 
 ### Desktop companion (Mac / Windows)
 
-1. Install dependencies (a venv is recommended): `pip install -r companion/requirements.txt`
-2. Configure the key (**never committed**): `cp companion/config.example.json companion/config.local.json` and fill in your Volcano Engine API key; or use the `VOLCANO_API_KEY` environment variable
-3. Run the wizard (GUI):
-   ```bash
-   companion/.venv/bin/python companion/fre_app.py
-   ```
-   Or use the CLI relay (auto-scans and connects to "AI Passport" over BLE):
-   ```bash
-   companion/.venv/bin/python companion/relay.py
-   ```
+**Use the packaged client (recommended — no terminal needed for end users)**:
+
+- **macOS**: `companion/dist/AI Passport.app` (built with `companion/build/pack.py`, or use a release build) — double-click to launch
+- **Windows**: run `python3 companion/build/pack.py` on a Windows build machine to produce `dist/AI Passport.exe` (or use a release build)
+
+On first launch the 5-step wizard opens: welcome → auto-discover the device (BLE → WiFi → USB) → Volcano ASR key config → system permission guide (macOS) → status page; the app then stays in the system tray. First run writes `companion/config.local.json` (Volcano API key, **never committed**).
+
+**Run from source (development)**:
+
+```bash
+pip install -r companion/requirements.txt
+cp companion/config.example.json companion/config.local.json   # fill in the Volcano API key
+companion/.venv/bin/python companion/fre_app.py                 # wizard GUI (--dry-run walks the flow with a fake link)
+companion/.venv/bin/python companion/relay.py                   # CLI relay (auto-scans "AI Passport" over BLE)
+```
 
 On macOS, grant **Accessibility** permission (required for clipboard + Cmd+V injection) and Bluetooth permission on first use. Windows instructions: [`companion/WINDOWS.md`](companion/WINDOWS.md).
 

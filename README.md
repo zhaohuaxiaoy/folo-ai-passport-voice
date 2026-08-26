@@ -52,16 +52,21 @@
 
 ### 桌面端（Mac / Windows）
 
-1. 安装依赖（建议 venv）：`pip install -r companion/requirements.txt`
-2. 配置密钥（**不入 git**）：`cp companion/config.example.json companion/config.local.json`，填入火山引擎 API Key；或设环境变量 `VOLCANO_API_KEY`
-3. 运行向导（图形界面）：
-   ```bash
-   companion/.venv/bin/python companion/fre_app.py
-   ```
-   或用 CLI 中转（BLE 自动扫描 "AI Passport" 连接）：
-   ```bash
-   companion/.venv/bin/python companion/relay.py
-   ```
+**直接使用打包好的客户端（推荐，非开发者无需碰终端）**：
+
+- **macOS**：`companion/dist/AI Passport.app`（`companion/build/pack.py` 构建，或使用发布产物），双击启动
+- **Windows**：需在 Windows 构建机上运行 `python3 companion/build/pack.py` 生成 `dist/AI Passport.exe`（或使用发布产物）
+
+首次启动进入 5 步向导：欢迎 → 自动发现设备（BLE → WiFi → USB）→ 火山 ASR Key 配置 → 系统授权引导（macOS）→ 状态页；连接后驻留系统托盘。首次运行自动生成 `companion/config.local.json`（火山 API Key，**不入 git**）。
+
+**从源码运行（开发）**：
+
+```bash
+pip install -r companion/requirements.txt
+cp companion/config.example.json companion/config.local.json   # 填入火山 API Key
+companion/.venv/bin/python companion/fre_app.py                 # 向导 GUI（--dry-run 假链路演练）
+companion/.venv/bin/python companion/relay.py                   # CLI 中转（BLE 自动扫描 "AI Passport"）
+```
 
 macOS 首次使用需授予**辅助功能**权限（注入剪贴板+Cmd+V 必需）与蓝牙权限。Windows 使用说明见 [`companion/WINDOWS.md`](companion/WINDOWS.md)。
 
