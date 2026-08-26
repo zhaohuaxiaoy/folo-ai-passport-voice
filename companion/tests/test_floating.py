@@ -95,6 +95,9 @@ class _FakeWin:
     def lift(self):
         self.lifted += 1
 
+    def attributes(self, *a):
+        return None
+
 
 def test_win32_apply_noactivate_sets_bits():
     u = _FakeUser32(styles={42: 0x8})
@@ -164,7 +167,7 @@ def test_present_window_darwin_no_lift():
         win = _FakeWin()
         _present_window(win)
         assert win.deiconified == 1
-        assert win.lifted == 0, "macOS 不得 lift"
+        assert win.lifted == 0, "macOS 不得每帧 lift"
     finally:
         floating.sys.platform = orig_plat
     print("[PASS] _present_window macOS 不 lift")
@@ -202,8 +205,7 @@ def test_floating_window_show_hide():
     assert f._win is not None and f._visible, "show 后窗口应可见"
     assert f._label.cget("text") == "你好世界", "候选文本应更新"
     assert f._win.attributes("-topmost"), "窗口应置顶"
-    if sys.platform != "darwin":
-        assert f._win.overrideredirect(), "窗口应无边框"
+    assert f._win.overrideredirect(), "窗口应无边框(无关闭/最小化/最大化)"
     # show 幂等: 第二次 show 更新文本不重建窗口(等过合并窗口, 模拟真实帧间隔)
     win = f._win
     time.sleep(0.15)

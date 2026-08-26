@@ -8,10 +8,10 @@
   (macOS 无 -transparentcolor; Windows 的 -transparentcolor 在部分
   合成器下有重影风险) → 统一方形面板。
 - 焦点: 悬浮窗绝不调用 focus/focus_force —— 注入目标是用户当前
-  焦点窗口, 悬浮窗不得抢焦点。
-  macOS: MacWindowStyle plain/noActivates 代替 overrideredirect;
-  不每帧 -topmost/lift/update_idletasks(Aqua 上这三项会打满
-  WindowServer, 全桌面转圈)。
+  焦点窗口, 悬浮窗不得抢焦点。全平台 overrideredirect(无标题栏、
+  无关闭/最小化/最大化)。macOS 热路径不每帧 -topmost/lift/
+  update_idletasks, 也不设 -alpha(那才是 WindowServer 转圈的原因,
+  不是无边框本身)。
   Windows: deiconify/lift/-topmost 会抢前台, 改走 WS_EX_NOACTIVATE
   + SetWindowPos(SWP_NOACTIVATE)(REVIEW P2-D)。真机抢焦点 NOT RUN。
 - 线程: 本模块全部方法只允许在 tk 主线程调用(fre_app 经 poll()
@@ -132,21 +132,6 @@ def _win32_apply_noactivate(hwnd, user32=None):
         return False
 
 
-def _macos_style_overlay(win):
-    """macOS 用 Aqua overlay 代替 overrideredirect。
-
-    overrideredirect + -alpha + 每帧 lift/-topmost 会让 WindowServer
-    合成器打满, 表现为全桌面转圈。plain/noActivates: 无标题栏、不激活。
-    失败返回 False, 调用方回退 overrideredirect。
-    """
-    try:
-        win.tk.call("::tk::unsupported::MacWindowStyle", "style",
-                    win._w, "plain", "noActivates")
-        return True
-    except tk.TclError:
-        return False
-
-
 def _present_window(win):
     """把已 withdraw 的 Toplevel 映出来, 不抢前台焦点。
 
@@ -162,8 +147,11 @@ def _present_window(win):
             win.lift()
         return
     win.deiconify()
-    if sys.platform != "darwin":
-        win.lift()
+    if sys.platform == "darwin":
+        # overrideredirect 在 withdraw 时设 -topmost 不生效, 映出后设一次
+        win.attributes("-topmost", True)
+        return
+    win.lift()
 
 
 class FloatingCandidate:
@@ -269,19 +257,13 @@ class FloatingCandidate:
     def _build(self):
         win = tk.Toplevel(self._root)
         win.withdraw()                      # 立刻藏: 默认映射会抢焦, 且空窗会闪
+        win.overrideredirect(True)          # 无标题栏、无关闭/最小化/最大化
         win.resizable(False, False)
         if sys.platform == "win32":
-            win.overrideredirect(True)
             win.update_idletasks()
             _win32_apply_noactivate(_win32_toplevel_hwnd(win))
-        elif sys.platform == "darwin":
-            # 不用 overrideredirect/-alpha: Aqua 合成器会转圈
-            if not _macos_style_overlay(win):
-                win.overrideredirect(True)
-            win.attributes("-topmost", True)    # 只设一次, 热路径不再碰
         else:
-            win.overrideredirect(True)
-            win.attributes("-topmost", True)
+            win.attributes("-topmost", True)    # 只设一次, 热路径不再碰
         # 绝不 focus/focus_force: 注入目标是用户焦点窗口(见模块 docstring)
 
         panel = tk.Frame(win, bg=_PANEL_BG,
