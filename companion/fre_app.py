@@ -360,6 +360,10 @@ class FREApp:
 
     def on_discover_next(self):
         self.channel = self._channel_var.get()
+        # 同步内存 cfg(审查 P1-1): _relay_worker 的 _build_transport 读
+        # self.cfg —— 只写盘不同步则 BLE→WiFi 切换仍按旧 channel 建传输层,
+        # 向导里切换通道不生效(连接必然超时)。
+        self.cfg = {**self.cfg, "channel": self.channel}
         if not self.dry_run:
             fre_state.write_cfg({"channel": self.channel})
         self.show_page("asr_config")
@@ -372,6 +376,7 @@ class FREApp:
 
     def on_channel_change(self):
         self.channel = self._channel_var.get()
+        self.cfg = {**self.cfg, "channel": self.channel}   # 见 on_discover_next 注释
 
     # ---------------- 连接 ----------------
 
