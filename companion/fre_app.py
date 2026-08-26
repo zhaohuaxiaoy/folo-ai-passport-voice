@@ -34,7 +34,8 @@ import fre_state
 
 THEME = "litera"
 
-# 后台 → UI 队列有界(PERF P2-1): ASR partial 洪泛时丢最老, 重要事件腾位。
+# 后台 → UI 队列有界(PERF P2-1): candidate 满则丢当前这条(预览可丢);
+# 重要事件(phase/error/…)挤掉队列最老一条再入。
 PHASE_Q_MAX = 64
 POLL_ACTIVE_MS = 100
 POLL_IDLE_MS = 400
