@@ -25,11 +25,10 @@ _MAC_FONTS = ("PingFang SC", "Hiragino Sans GB", "STHeiti", "Helvetica Neue")
 
 _PANEL_BG = "#202124"      # 深色面板
 _PANEL_FG = "#FFFFFF"      # 白字
-_REC_DOT = "#EA4335"       # 顶部小红点(装饰)
 _WIDTH = 360               # 面板宽度上限
-_WRAP = 340                # 文本换行宽度
-_PAD_X = 14
-_PAD_Y = 12
+_WRAP = 320                # 文本换行宽度(留出加大后的左右间距)
+_PAD_X = 20
+_PAD_Y = 18
 _FONT_SIZE = 14
 
 
@@ -110,10 +109,7 @@ class FloatingCandidate:
                          padx=_PAD_X, pady=_PAD_Y)
         panel.pack(fill="both", expand=True)
 
-        dot = tk.Label(panel, text="●", fg=_REC_DOT, bg=_PANEL_BG,
-                       font=("TkDefaultFont", 10))
-        dot.pack(anchor="w")
-
+        # 极简单块: 深色面板 + 白字候选文本, 无任何装饰
         self._label = tk.Label(panel, text="", bg=_PANEL_BG, fg=_PANEL_FG,
                                font=self._pick_font(), wraplength=_WRAP,
                                justify="left", anchor="w")
