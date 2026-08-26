@@ -126,11 +126,34 @@ def test_timeout():
                  lambda: asyncio.run(serve("silent", path)), "超时")
 
 
+def test_parse_server_gunzip_cap():
+    """gzip 输出超 GZIP_MAX → unknown/too_large, 不解出巨型对象(PERF P2-5)。"""
+    import gzip
+    from asr_client import GZIP_MAX, parse_server
+    blob = gzip.compress(b"a" * (GZIP_MAX + 1))
+    raw = (b"\x11\x90\x11\x00" + struct.pack(">I", 0)
+           + struct.pack(">I", len(blob)) + blob)
+    kind, _flags, data = parse_server(raw)
+    check("超限 gunzip 不返回巨型 result", kind, "unknown")
+    check("超限标记 too_large", "too_large" in data, True)
+
+
+def test_parse_server_size_cap():
+    from asr_client import WS_MAX_SIZE, parse_server
+    raw = (b"\x11\x90\x11\x00" + struct.pack(">I", 0)
+           + struct.pack(">I", WS_MAX_SIZE + 1) + b"x")
+    kind, _flags, data = parse_server(raw)
+    check("超大 size 字段拒绝", kind, "unknown")
+    check("超大 size 标记", data.get("too_large"), WS_MAX_SIZE + 1)
+
+
 def main():
     test_ack()
     test_error_frame()
     test_server_close()
     test_timeout()
+    test_parse_server_gunzip_cap()
+    test_parse_server_size_cap()
     if FAILURES:
         print(f"\n{len(FAILURES)} 个失败:")
         for f in FAILURES:

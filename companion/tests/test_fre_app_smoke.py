@@ -220,3 +220,80 @@ def test_asr_key_syncs_cfg():
         "on_asr_next 应同步内存 cfg(覆盖为新值)"
     root.destroy()
     print("[PASS] 向导 API Key 同步内存 cfg")
+
+
+def test_qput_bounds():
+    """phase_q 满: candidate 丢自己, 重要事件挤掉最老(PERF P2-1)。"""
+    try:
+        import queue as queue_mod
+        import ttkbootstrap as ttk  # noqa: F811
+        from fre_app import FREApp, PHASE_Q_MAX, THEME  # noqa: F811
+        root = ttk.Window(themename=THEME)
+    except Exception as e:  # noqa: BLE001
+        print(f"SKIP: 无法创建窗口({e}); 跳过")
+        return
+    root.withdraw()
+    app = FREApp(root, dry_run=True, no_tray=True)
+    for i in range(PHASE_Q_MAX):
+        app._qput(("candidate", (str(i), False)))
+    assert app.phase_q.qsize() == PHASE_Q_MAX
+    app._qput(("candidate", ("overflow", False)))
+    assert app.phase_q.qsize() == PHASE_Q_MAX, "满时 candidate 应丢自己"
+    app._qput(("phase", "disconnected"))
+    assert app.phase_q.qsize() == PHASE_Q_MAX
+    kinds = []
+    while True:
+        try:
+            kinds.append(app.phase_q.get_nowait()[0])
+        except queue_mod.Empty:
+            break
+    assert "phase" in kinds, "重要事件应挤进队列"
+    root.destroy()
+    print("[PASS] phase_q 有界投递")
+
+
+def test_probe_duplicate_skipped():
+    """探测线程存活时 start_discover 不得叠第二个(PERF P2-2)。"""
+    try:
+        import threading
+        import ttkbootstrap as ttk  # noqa: F811
+        from fre_app import FREApp, THEME  # noqa: F811
+        root = ttk.Window(themename=THEME)
+    except Exception as e:  # noqa: BLE001
+        print(f"SKIP: 无法创建窗口({e}); 跳过")
+        return
+    root.withdraw()
+    app = FREApp(root, dry_run=True, no_tray=True)
+    gate = threading.Event()
+
+    def fake():
+        gate.wait(30)
+
+    t = threading.Thread(target=fake, daemon=True)
+    t.start()
+    app._probe_thread = t
+    app.start_discover()
+    assert app._probe_thread is t, "不得替换仍在跑的探测线程"
+    gate.set()
+    t.join(timeout=2)
+    root.destroy()
+    print("[PASS] 探测互斥")
+
+
+def test_diag_append_truncates():
+    """诊断 Text 超 DIAG_MAX_LINES 截断头部(PERF P2-6)。"""
+    try:
+        import ttkbootstrap as ttk  # noqa: F811
+        from fre_app import DIAG_MAX_LINES, FREApp, THEME  # noqa: F811
+        root = ttk.Window(themename=THEME)
+    except Exception as e:  # noqa: BLE001
+        print(f"SKIP: 无法创建窗口({e}); 跳过")
+        return
+    root.withdraw()
+    app = FREApp(root, dry_run=True, no_tray=True)
+    for i in range(DIAG_MAX_LINES + 30):
+        app._diag_append(f"L{i}")
+    last = int(float(app._diag_out.index("end-1c")))
+    assert last <= DIAG_MAX_LINES + 1, f"诊断行数未截断: {last}"
+    root.destroy()
+    print("[PASS] 诊断页截断")

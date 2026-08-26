@@ -28,6 +28,7 @@ VOLCANO_API_KEY。勿打印/勿提交密钥。
 import argparse
 import asyncio
 import gzip
+import io
 import json
 import os
 import struct
@@ -42,6 +43,9 @@ CHUNK_BYTES_100MS = 3200  # 100ms @ 16kHz/16bit/单声道(与固件音频块一�
 DEFAULT_WS_URL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
 DEFAULT_MODEL = "bigmodel_async"
 DEFAULT_NONSTREAM = True
+# 服务端帧上限(PERF P2-5): 语音 JSON 通常 <10KB; 无上限时畸形 gzip 可 OOM。
+WS_MAX_SIZE = 256 * 1024
+GZIP_MAX = 64 * 1024
 
 
 # ---- 二进制帧 ----
@@ -51,6 +55,22 @@ def frame(msg_type, payload, flags=0, compression=1, serialization=1):
     header = bytes([0x11, (msg_type << 4) | flags,
                     (serialization << 4) | compression, 0x00])
     return header + struct.pack(">I", len(payload)) + payload
+
+
+def _safe_gunzip(payload, max_length=GZIP_MAX):
+    """gzip 解压, 输出超过 max_length 则失败(防 zip bomb)。"""
+    with gzip.GzipFile(fileobj=io.BytesIO(payload)) as f:
+        chunks = []
+        n = 0
+        while True:
+            b = f.read(8192)
+            if not b:
+                break
+            n += len(b)
+            if n > max_length:
+                raise ValueError("gunzip exceeds max_length")
+            chunks.append(b)
+        return b"".join(chunks)
 
 
 def parse_server(raw):
@@ -68,17 +88,29 @@ def parse_server(raw):
     comp = hdr[2] & 0x0F
     if mtype == 0x9:  # full server response
         size = struct.unpack(">I", raw[8:12])[0]
+        if size > WS_MAX_SIZE:
+            return ("unknown", flags, {"too_large": size})
         payload = raw[12:12 + size]
         if not payload:  # 空应答(如配置帧的 ack, 尚无结果)
             return ("result", flags, {})
-        data = gzip.decompress(payload) if comp == 0x1 else payload
         try:
+            data = _safe_gunzip(payload) if comp == 0x1 else payload
+            if not isinstance(data, (bytes, bytearray)):
+                return ("result", flags, {})
+            if len(data) > GZIP_MAX:
+                return ("unknown", flags, {"too_large": len(data)})
             return ("result", flags, json.loads(data.decode("utf-8", "replace")))
-        except (json.JSONDecodeError, gzip.BadGzipFile, EOFError):
+        except json.JSONDecodeError:
+            return ("result", flags, {})
+        except ValueError:
+            return ("unknown", flags, {"too_large": True})
+        except (gzip.BadGzipFile, EOFError, OSError):
             return ("result", flags, {})
     if mtype == 0xF:  # error
         code = struct.unpack(">I", raw[4:8])[0]
         msize = struct.unpack(">I", raw[8:12])[0]
+        if msize > GZIP_MAX:
+            return ("error", flags, {"code": code, "message": "too_large"})
         msg = raw[12:12 + msize].decode("utf-8", "replace")
         return ("error", flags, {"code": code, "message": msg})
     return ("unknown", flags, {"mtype": mtype})
@@ -150,7 +182,7 @@ def load_pcm(path):
 
 # ---- 流式会话(relay 用) ----
 
-RESULTS_Q_MAX = 256  # 结果队列有界: 下行变慢时丢中间结果, 定稿/错误保底不丢
+RESULTS_Q_MAX = 32  # 结果队列有界: 下行变慢时丢中间结果, 定稿/错误保底不丢
 
 class StreamingASR:
     """双向流式 ASR 会话: 边收音频边发, 边收结果边取。
@@ -170,7 +202,7 @@ class StreamingASR:
     """
 
     def __init__(self, cfg=None, chunk_bytes=CHUNK_BYTES_100MS):
-        self.cfg = cfg or load_config()
+        self.cfg = load_config() if cfg is None else cfg
         self.chunk_bytes = chunk_bytes
         self._ws = None
         self._recv_task = None
@@ -192,7 +224,8 @@ class StreamingASR:
         # websockets 15+ 参数名是 additional_headers(旧版 extra_headers 会把
         # 未知 kwarg 透传到 create_connection 才报错, 本仓库锁 17.0.1)。
         return websockets.connect(self.cfg["volcano_ws_url"],
-                                  additional_headers=headers, max_size=None)
+                                  additional_headers=headers,
+                                  max_size=WS_MAX_SIZE)
 
     async def connect(self):
         if not self.cfg.get("volcano_api_key"):

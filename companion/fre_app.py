@@ -34,6 +34,12 @@ import fre_state
 
 THEME = "litera"
 
+# 后台 → UI 队列有界(PERF P2-1): ASR partial 洪泛时丢最老, 重要事件腾位。
+PHASE_Q_MAX = 64
+POLL_ACTIVE_MS = 100
+POLL_IDLE_MS = 400
+DIAG_MAX_LINES = 500          # 诊断 Text 截断(PERF P2-6)
+
 CHANNEL_LABELS = (("ble", "蓝牙 BLE"), ("wifi", "WiFi"), ("usb", "USB 有线"))
 INJECT_LABELS = {"unicode": "Unicode 键盘注入", "clipboard": "剪贴板",
                  "auto": "Auto (unicode 优先)"}
@@ -95,10 +101,11 @@ class FREApp:
         self.root = root
         self.dry_run = dry_run
         self.no_tray = no_tray
-        self.phase_q = queue.Queue()     # 后台线程 → UI 的事件
+        self.phase_q = queue.Queue(maxsize=PHASE_Q_MAX)
         self.relay_task = None           # 后台 relay task
         self._loop = None                # 后台 asyncio 事件循环
         self._thread = None              # 后台 asyncio 线程
+        self._probe_thread = None        # 通道探测线程(互斥, PERF P2-2)
         self.device_addr = None
         self.probe_result = None         # ("ble"|"wifi"|"usb", addr)
         self.last_error = ""
@@ -116,7 +123,7 @@ class FREApp:
         self._build_ui()
         self.show_page("welcome")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.root.after(100, self.poll)
+        self.root.after(POLL_IDLE_MS, self.poll)
 
     # ---------------- UI 构建 ----------------
 
@@ -299,7 +306,13 @@ class FREApp:
         self._probe_var.set("正在探测…")
         self._device_var.set("尚未探测")
         self.probe_result = None
-        threading.Thread(target=self._probe_worker, daemon=True).start()
+        # PERF P2-2: 探测中再点「重新设置」不得叠第二个 asyncio.run / 抢 8765
+        if self._probe_thread is not None and self._probe_thread.is_alive():
+            self._probe_var.set("正在探测…(已在进行)")
+            return
+        self._probe_thread = threading.Thread(target=self._probe_worker,
+                                              daemon=True)
+        self._probe_thread.start()
 
     def _probe_worker(self):
         """后台线程执行通道探测(BLE→WiFi→USB), 结果经队列回 UI。"""
@@ -311,11 +324,11 @@ class FREApp:
                 from probe import probe_channels
                 result = asyncio.run(probe_channels(
                     self.cfg,
-                    on_status=lambda m: self.phase_q.put(("probe_progress", m))))
+                    on_status=lambda m: self._qput(("probe_progress", m))))
             except Exception as e:  # noqa: BLE001
                 result = (None, None)
-                self.phase_q.put(("probe_progress", f"探测异常: {e}"))
-        self.phase_q.put(("probe_result", result))
+                self._qput(("probe_progress", f"探测异常: {e}"))
+        self._qput(("probe_result", result))
 
     def _on_probe_result(self, result):
         channel, addr = result
@@ -356,7 +369,7 @@ class FREApp:
                 result = ("ok", "连接成功, Key 有效")
             except Exception as e:  # noqa: BLE001
                 result = ("fail", str(e))
-        self.phase_q.put(("asr_test", result))
+        self._qput(("asr_test", result))
 
     def _on_asr_test(self, result):
         ok, msg = result
@@ -455,11 +468,12 @@ class FREApp:
 
             relay = Relay(transport,
                           inject_fn=inject_fn, key_action_fn=key_action_fn,
-                          on_phase=lambda ph: self.phase_q.put(("phase", ph)),
+                          do_approval=False,   # GUI 不跑假审批(PERF P2-3)
+                          on_phase=lambda ph: self._qput(("phase", ph)),
                           # 候选字经 phase_q 回 UI 悬浮窗; 挂接后 relay
                           # 停发设备预览下行(悬浮窗取代设备屏幕预览)
                           on_candidate=lambda text, is_final:
-                              self.phase_q.put(("candidate", (text, is_final))))
+                              self._qput(("candidate", (text, is_final))))
             self._relay = relay                      # 诊断页命令桥用
             self.syscmd_available = getattr(relay, "_syscmd", None) is not None
             # BLE 直接连已发现地址; WiFi/USB 由 relay 内部扫描/等待
@@ -470,15 +484,15 @@ class FREApp:
         except asyncio.CancelledError:
             pass   # 向导关闭/重新设置时的正常收束
         except Exception as e:
-            self.phase_q.put(("error", str(e)))
-            self.phase_q.put(("phase", "failed"))
+            self._qput(("error", str(e)))
+            self._qput(("phase", "failed"))
         finally:
             if mdns is not None:
                 try:
                     mdns[0].close()   # Zeroconf 收束: mDNS 服务下线
                 except Exception:  # noqa: BLE001
                     pass
-            self.phase_q.put(("relay_done", None))
+            self._qput(("relay_done", None))
             # P2-3: 收束事件循环 —— 取消残留协程(诊断页 run_syscmd 桥等,
             # 不复位会跨线程泄漏)再 close。顺序: zc 已关, 再收 loop。
             try:
@@ -498,11 +512,32 @@ class FREApp:
             self._loop = None
             self.relay_task = None
 
+    def _qput(self, item):
+        """有界投递(线程安全)。candidate 满则丢自己; 重要事件挤掉最老一条。"""
+        kind = item[0]
+        try:
+            self.phase_q.put_nowait(item)
+            return
+        except queue.Full:
+            pass
+        if kind == "candidate":
+            return
+        try:
+            self.phase_q.get_nowait()
+        except queue.Empty:
+            return
+        try:
+            self.phase_q.put_nowait(item)
+        except queue.Full:
+            pass
+
     def poll(self):
-        """UI 线程轮询后台事件(每 100ms)。"""
+        """UI 线程轮询后台事件。有活事件 100ms, 空闲 400ms(PERF P2-1)。"""
+        n = 0
         try:
             while True:
                 kind, payload = self.phase_q.get_nowait()
+                n += 1
                 if kind == "probe_progress":
                     self._probe_var.set(payload)
                 elif kind == "probe_result":
@@ -525,7 +560,10 @@ class FREApp:
                     self._floating_hide()   # 兜底: relay 结束不留窗
         except queue.Empty:
             pass
-        self.root.after(100, self.poll)
+        floating_on = (self._floating is not None and self._floating is not False
+                       and getattr(self._floating, "_visible", False))
+        delay = POLL_ACTIVE_MS if (n or floating_on) else POLL_IDLE_MS
+        self.root.after(delay, self.poll)
 
     def _on_phase(self, phase):
         if phase == "connected":
@@ -629,11 +667,10 @@ class FREApp:
         try:
             self._tray = create_tray(
                 self._tray_state,
-                on_settings=lambda: self.phase_q.put(("tray_action",
-                                                      "settings")),
-                on_diagnostics=lambda: self.phase_q.put(("tray_action",
-                                                         "diagnostics")),
-                on_quit=lambda: self.phase_q.put(("tray_action", "quit")))
+                on_settings=lambda: self._qput(("tray_action", "settings")),
+                on_diagnostics=lambda: self._qput(("tray_action",
+                                                   "diagnostics")),
+                on_quit=lambda: self._qput(("tray_action", "quit")))
             self._tray.run_detached()
             self.set_status("已驻留托盘 (关闭窗口不退出, 托盘 Quit 退出)")
         except Exception as e:  # noqa: BLE001
@@ -678,6 +715,10 @@ class FREApp:
     def _diag_append(self, text):
         self._diag_out.configure(state="normal")
         self._diag_out.insert("end", text.rstrip("\n") + "\n")
+        last = int(float(self._diag_out.index("end-1c")))
+        extra = last - DIAG_MAX_LINES
+        if extra > 0:
+            self._diag_out.delete("1.0", f"{extra + 1}.0")
         self._diag_out.see("end")
         self._diag_out.configure(state="disabled")
 
@@ -709,9 +750,9 @@ class FREApp:
         def on_done(f):
             try:
                 resp = f.result()
-                self.phase_q.put(("syscmd_resp", resp))
+                self._qput(("syscmd_resp", resp))
             except Exception as e:  # noqa: BLE001
-                self.phase_q.put(("syscmd_resp", f"! {e}"))
+                self._qput(("syscmd_resp", f"! {e}"))
 
         fut.add_done_callback(on_done)
 
