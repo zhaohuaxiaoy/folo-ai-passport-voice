@@ -1084,3 +1084,38 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+async def test_key_action_slow_inject_does_not_freeze_drain():
+    """审查 P1-3: 慢 key 注入(阻塞 ~1.5s)不得冻结事件循环 —— 期间音频帧
+    照常处理(_on_audio_frame 计数), 注入完成后 drain 继续。"""
+    t = FakeTransport()
+    injected = []
+    fired = {"n": 0}
+
+    def slow_key_action(action):
+        time.sleep(1.5)          # 模拟 Windows SendInput 逐键序列化(~2s/键)
+        injected.append(action)
+
+    relay = Relay(t,
+                  asr_factory=make_fake_asr_factory([], {}),
+                  inject_fn=FakeInjector(), key_action_fn=slow_key_action,
+                  timeout=5, do_approval=False)
+    task = asyncio.create_task(relay.run())
+    await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
+
+    t.notify_event(b'{"event":"key.action","action":"enter"}\n')
+    await asyncio.sleep(0.3)     # 注入进行中(线程池里睡 1.5s)
+
+    async def on_audio(frame):
+        fired["n"] += 1
+    relay._on_audio_frame = on_audio
+    t.notify_event(b'\x00' * 3200)   # 音频帧: 若事件循环被注入冻结则收不到
+    await asyncio.sleep(0.3)
+    check("注入期间音频帧未被冻结", fired["n"], 1)
+
+    await wait_until(lambda: injected == ["enter"], what="注入完成")
+    check("慢注入最终完成", injected, ["enter"])
+
+    t.disconnect_cb()
+    await wait_until(task.done, what="断开退出")

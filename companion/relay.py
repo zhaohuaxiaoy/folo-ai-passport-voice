@@ -497,7 +497,11 @@ class Relay:
             print(f"[key] 未知按键动作 {action!r}, 忽略", file=sys.stderr)
             return
         try:
-            self._key_action_fn(action)
+            # 审查 P1-3: key 注入是阻塞同步调用(Windows SendInput 逐键
+            # 序列化, 实测每键可达 ~2s), 直接跑在事件循环里会冻结
+            # _drain_events(音频帧/事件全部积压, 语音交互假死)。
+            # asyncio.to_thread 移到线程池, drain 不被注入拖住。
+            await asyncio.to_thread(self._key_action_fn, action)
         except Exception as e:
             print(f"[key] 注入失败({action}): {e}", file=sys.stderr)
 
