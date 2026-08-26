@@ -1119,3 +1119,82 @@ async def test_key_action_slow_inject_does_not_freeze_drain():
 
     t.disconnect_cb()
     await wait_until(task.done, what="断开退出")
+
+
+def test_type_unicode_auth_gate():
+    """审查 P1-5: 辅助功能未授权时 CGEvent 路径抛 InjectError(不再静默
+    假成功); 授权后正常执行。"""
+    import sys as _sys
+    import types as _types
+    import inject
+
+    fake_quartz = _types.ModuleType("Quartz")
+    fake_quartz.CGEventCreateKeyboardEvent = lambda *a: None
+    fake_quartz.CGEventKeyboardSetUnicodeString = lambda *a: None
+    fake_quartz.CGEventPost = lambda *a: None
+    fake_quartz.kCGHIDEventTap = 0
+    fake_as = _types.ModuleType("ApplicationServices")
+    fake_as.AXIsProcessTrusted = lambda: False
+
+    old_quartz = _sys.modules.get("Quartz")
+    old_as = _sys.modules.get("ApplicationServices")
+    _sys.modules["Quartz"] = fake_quartz
+    _sys.modules["ApplicationServices"] = fake_as
+    try:
+        try:
+            inject._type_unicode("hi")
+            check("未授权应抛 InjectError", False, True)
+        except inject.InjectError as e:
+            check("未授权抛 InjectError", "辅助功能未授权" in str(e), True)
+        fake_as.AXIsProcessTrusted = lambda: True
+        inject._type_unicode("hi")       # 已授权: 不抛
+        check("已授权正常注入", True, True)
+    finally:
+        if old_quartz is None:
+            _sys.modules.pop("Quartz", None)
+        else:
+            _sys.modules["Quartz"] = old_quartz
+        if old_as is None:
+            _sys.modules.pop("ApplicationServices", None)
+        else:
+            _sys.modules["ApplicationServices"] = old_as
+
+
+def test_paste_auto_fallback_on_unauthorized():
+    """审查 P1-5: auto 模式未授权 → unicode 抛 InjectError → 回退剪贴板
+    (pbcopy 被调), 不再静默假成功。"""
+    import sys as _sys
+    import types as _types
+    import inject
+
+    fake_quartz = _types.ModuleType("Quartz")
+    fake_quartz.CGEventCreateKeyboardEvent = lambda *a: None
+    fake_quartz.CGEventKeyboardSetUnicodeString = lambda *a: None
+    fake_quartz.CGEventPost = lambda *a: None
+    fake_quartz.kCGHIDEventTap = 0
+    fake_as = _types.ModuleType("ApplicationServices")
+    fake_as.AXIsProcessTrusted = lambda: False
+    _sys.modules["Quartz"] = fake_quartz
+    _sys.modules["ApplicationServices"] = fake_as
+
+    calls = []
+
+    class R:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    def fake_run(cmds, **kw):
+        calls.append(cmds[0])
+        return R()
+
+    orig_run = inject.subprocess.run
+    inject.subprocess.run = fake_run
+    try:
+        inject.paste_text("你好")        # auto: unicode 抛 → 剪贴板回退
+        check("auto 回退剪贴板(pbcopy 被调)", calls and calls[0] == "pbcopy",
+              True)
+    finally:
+        inject.subprocess.run = orig_run
+        _sys.modules.pop("Quartz", None)
+        _sys.modules.pop("ApplicationServices", None)

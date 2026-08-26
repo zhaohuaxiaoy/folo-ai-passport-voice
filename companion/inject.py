@@ -45,6 +45,17 @@ def _type_unicode(text):
         raise InjectError(
             f"缺少 pyobjc-framework-Quartz: pip install pyobjc-framework-Quartz "
             f"({e})") from e
+    # 授权检查(审查 P1-5): CGEventPost 在无「辅助功能」授权时静默成功
+    # (事件根本不送达), 用户会看到"已注入"但目标输入框毫无反应。
+    # AXIsProcessTrusted 显式判定, False 抛带指引的 InjectError →
+    # auto 模式回退剪贴板路径(有明确报错, 不再静默假成功)。
+    try:
+        from ApplicationServices import AXIsProcessTrusted
+    except ImportError:
+        pass   # 框架缺失(fre_state 懒加载场景): 保持旧行为
+    else:
+        if not AXIsProcessTrusted():
+            raise InjectError("辅助功能未授权, CGEvent 注入被系统拦截。" + GUIDE)
     for ch in text:
         # 非 BMP 字符(emoji)占 2 个 UTF-16 单元, stringLength 按单元计
         units = len(ch.encode("utf-16-le")) // 2
