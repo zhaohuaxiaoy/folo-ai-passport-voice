@@ -334,6 +334,35 @@ def test_flush_does_not_reset_topmost_each_frame():
     print("[PASS] 热路径不每帧 -topmost")
 
 
+def test_floating_position_tracks_text():
+    """长文本换行后窗口锚点按新尺寸计算(热路径不 update_idletasks,
+    win.reqw 滞后——必须用 label req 尺寸 + 面板内边距)。"""
+    try:
+        import time  # noqa: F401
+        import ttkbootstrap as ttk
+        from floating import FloatingCandidate, _PAD_X  # noqa: F401
+        root = ttk.Window(themename="darkly")
+    except Exception as e:  # noqa: BLE001 无显示环境(TclError)等
+        print(f"SKIP: 无法创建窗口({e}); 跳过")
+        return
+    root.withdraw()
+    f = FloatingCandidate(root)
+    f.show("短")
+    root.update()
+    time.sleep(0.15)            # 过合并窗口
+    f.show("这是一段非常长的中文候选文本用于验证换行后窗口尺寸是否"
+           "及时更新, 足够长到换行显示成多行")
+    # 不 update_idletasks: _flush 已按 label 同步 req 尺寸重设 geometry
+    geo = f._win.geometry()     # "WxH+x+y" 或 "+x+y"
+    x = int(geo.split("+")[1])
+    w = f._label.winfo_reqwidth() + 2 * _PAD_X
+    want_x = max(0, (f._sw - w) // 2)
+    assert x == want_x, f"长文本锚点应随尺寸更新(实际 x={x}, want {want_x})"
+    f.destroy()
+    root.destroy()
+    print("[PASS] 长文本位置随尺寸更新(热路径无 idle)")
+
+
 if __name__ == "__main__":
     test_pick_family()
     test_anchor()
@@ -348,4 +377,5 @@ if __name__ == "__main__":
     test_floating_show_same_text_noop()
     test_floating_high_frequency_merge()
     test_flush_does_not_reset_topmost_each_frame()
+    test_floating_position_tracks_text()
     print("全部通过")

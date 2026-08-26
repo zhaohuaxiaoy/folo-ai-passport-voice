@@ -217,9 +217,12 @@ class FloatingCandidate:
         if not self._visible:
             _present_window(self._win)
             self._visible = True
-        # 用 req 尺寸, 不 update_idletasks(会强制同步布局/合成)
-        w = self._win.winfo_reqwidth()
-        h = self._win.winfo_reqheight()
+        # 尺寸 = label 请求尺寸 + 面板内边距。label.reqw 在 configure 后
+        # 同步更新, 而 win.reqw 要等 idle 布局传播——热路径不 update_idletasks
+        # (同步 WindowServer 会转圈), 故不能用窗口层 req 尺寸(长文本时
+        # 锚点按旧尺寸算, 窗口错位)。
+        w = self._label.winfo_reqwidth() + 2 * _PAD_X
+        h = self._label.winfo_reqheight() + 2 * _PAD_Y
         x, y = _anchor(self._sw if self._sw is not None
                        else self._win.winfo_screenwidth(),
                        self._sh if self._sh is not None
