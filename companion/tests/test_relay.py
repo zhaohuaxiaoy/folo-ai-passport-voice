@@ -436,6 +436,43 @@ async def test_on_phase_callback():
     check("on_phase 断连触发", "disconnected" in phases, True)
 
 
+
+async def test_on_candidate_callback():
+    """on_candidate 回调: 挂接后收全 partial+final, 零 transcript 下行
+    (设备预览由悬浮窗取代), 注入仍只落定稿一次。"""
+    t = FakeTransport()
+    injector = FakeInjector()
+    holder = {}
+    cands = []
+    relay = Relay(t,
+                  asr_factory=make_fake_asr_factory(
+                      [("中间", False), ("你好", False), ("你好世界", True)],
+                      holder),
+                  inject_fn=injector, timeout=5,
+                  on_candidate=lambda text, is_final:
+                      cands.append((text, is_final)))
+    task = asyncio.create_task(relay.run())
+    await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
+
+    t.notify_event(b'{"event":"voice.start"}\n')
+    await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
+    t.notify_audio(bytes(3200))
+    t.notify_audio(bytes(3200))
+    await wait_until(lambda: len(cands) >= 1, what="首个候选到达")
+    t.notify_event(b'{"event":"voice.end"}\n')
+    await wait_until(lambda: len(injector.calls) >= 1, what="定稿注入")
+    await wait_session_done(relay)
+
+    check("回调收全 partial+final", cands,
+          [("中间", False), ("你好", False), ("你好世界", True)])
+    check("挂接后零设备预览下行", transcript_writes(t.events), [])
+    check("注入仍只落定稿一次", injector.calls, ["你好世界"])
+    check("统计 final_text", relay.session_stats[0]["final_text"], "你好世界")
+
+    t.disconnect_cb()
+    await wait_until(task.done, what="断开退出")
+
+
 def test_paste_mac_dry_run_modes():
     """Mac paste_text dry_run: unicode/clipboard 路径打印与 mode 校验。"""
     import io
@@ -1055,6 +1092,7 @@ async def main():
     await test_time_sync_downlink_usb()
     await test_key_action_downlink()
     await test_on_phase_callback()
+    await test_on_candidate_callback()
     test_paste_mac_dry_run_modes()
     test_default_inject_fn_mode()
     test_key_action_mac_dry_run()

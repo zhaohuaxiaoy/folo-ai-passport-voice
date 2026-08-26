@@ -124,3 +124,30 @@ def test_connect_duplicate_rejected():
     t.join(timeout=2)
     root.destroy()
     print("[PASS] 重复 connect 被拒绝")
+
+
+# ---- 单元: 候选字悬浮窗接线(审查: poll 驱动 candidate 事件) ----
+# phase_q 灌 candidate → app.poll() → 悬浮窗显示候选字; final → 隐藏。
+def test_candidate_poll_wiring():
+    try:
+        import ttkbootstrap as ttk  # noqa: F811
+        from fre_app import FREApp, THEME  # noqa: F811
+        root = ttk.Window(themename=THEME)
+    except Exception as e:  # noqa: BLE001 无显示环境(TclError)等
+        print(f"SKIP: 无法创建窗口({e}); 跳过")
+        return
+    root.withdraw()
+    app = FREApp(root, dry_run=True, no_tray=True)
+    app.phase_q.put(("candidate", ("你好", False)))
+    app.poll()
+    root.update()
+    assert app._floating is not None and app._floating is not False, \
+        "partial 候选应创建悬浮窗"
+    assert app._floating._label.cget("text") == "你好", \
+        f"悬浮窗应显示候选字(实际 {app._floating._label.cget('text')!r})"
+    app.phase_q.put(("candidate", ("你好世界", True)))
+    app.poll()
+    root.update()
+    assert not app._floating._win.winfo_ismapped(), "final 后悬浮窗应隐藏"
+    root.destroy()
+    print("[PASS] candidate 事件驱动悬浮窗显隐")
