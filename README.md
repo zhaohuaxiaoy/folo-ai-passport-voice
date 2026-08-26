@@ -1,239 +1,134 @@
-# FoloToy AI Passport
+# FoloToy AI Passport · 语音输入
 
-English | [简体中文](README.zh_CN.md)
+[简体中文](README.md) | [English](README.en.md)
 
-FoloToy AI Passport is open wearable AI hardware designed for AI agents. This repository is the development baseline for the device. It goes beyond showing “what the board can run” by keeping the **hardware facts, stable interfaces, resource boundaries, reference implementations, and validation methods** that an agent needs to build applications in one place.
-
-The repository is organized around the following principles:
-
-- `main` is the smallest complete runnable baseline and an executable description of the current hardware capabilities.
-- `components/bsp` isolates board-level details and exposes stable APIs to applications.
-- `demo/*` branches show different paths from a product requirement to a working implementation.
-- `AGENTS.md` defines how an agent should work in the repository, while `docs/AI_HARDWARE_DEVELOPMENT_GUIDE.md` contains the complete hardware context and troubleshooting knowledge.
-- Build results and physical-device results are reported separately. A successful build must never be presented as successful hardware validation.
-
-The intended workflow is simple: give an agent this repository and an application requirement. The agent identifies the available capabilities and constraints, selects relevant examples, implements and builds the application, and returns an acceptance checklist that can be executed on the physical device.
-
-## Entry point for AI agents
-
-Before starting development, establish context in this order:
-
-1. Read `AGENTS.md`, this README, and [`docs/AI_HARDWARE_DEVELOPMENT_GUIDE.md`](docs/AI_HARDWARE_DEVELOPMENT_GUIDE.md).
-2. Run `git status --short --branch` and preserve all existing user changes.
-3. Read the affected `components/bsp/include/*.h` headers and their implementations. Do not infer board behavior from common chip or development-board configurations.
-4. Use `git branch -r --list 'origin/demo/*'` to find examples close to the requirement. Reuse only the relevant design patterns; do not merge an entire demo branch by default.
-5. Break the requirement into inputs, outputs, state, concurrent tasks, persistence, memory budget, and failure degradation before deciding whether to change `main` or extend `components/bsp`.
-6. Complete the minimum build check and all applicable logic tests. Keep explicit on-device acceptance items for every conclusion that depends on the display, buttons, audio, battery, or timing.
-
-### Source-of-truth priority
-
-When information conflicts, use this priority order:
+面向 **FoloToy AI Passport**（ESP32-C3）的语音输入方案：按住设备按键说话，转写候选字**实时显示在 Mac/Windows 桌面的悬浮窗**里；松手后识别完成的文本**自动注入当前输入框**——微信 Mac 端语音输入体验。
 
 ```text
-Schematic / PCB / board revision / physical measurement
-    > components/bsp/include/bsp_pins.h
-    > BSP public headers and implementations
-    > docs/AI_HARDWARE_DEVELOPMENT_GUIDE.md
-    > README and example applications
+按住 OK 说话 ──► 设备录音 ──► BLE / WiFi / USB ──► 桌面端中转 ──► 火山流式 ASR
+                                                                     │
+   当前输入框 ◄── 注入定稿(仅一次) ◄── 松手 ──► 悬浮窗实时显示候选字 ◄──┘
 ```
 
-The repository does not currently include schematic or PCB source files. When the board revision, wiring, polarity, register behavior, or unused GPIOs are unknown, an agent must report the unknown and request evidence instead of filling the gap with parameters from another ESP32-C3 board.
+> 仓库同时包含**固件**（ESP-IDF，设备端）与**桌面端**（companion/，Mac/Windows 中转程序），二者通过 BLE / WiFi / USB 三通道配合工作。
 
-## Hardware capability contract
+## 功能特性
 
-The table below describes the application capabilities implemented by the current `main` branch. It is not a list of everything that might be possible according to the chip datasheet.
+### 设备端（固件）
 
-| Capability | Confirmed implementation | Application interface | Boundaries that must be respected |
-| --- | --- | --- | --- |
-| Display | ST7789P3, 240 × 320 portrait RGB565, SPI2 at 40 MHz; LEDC backlight | `bsp_display_*`, `bsp_lvgl_*` | The ESP32-C3 has no PSRAM; the current design uses a small single DMA buffer; no LCD MISO, touch, or known TE interface |
-| Input | `UP`, `DOWN`, and `OK` share an ADC resistor ladder on GPIO0 | `bsp_button_init()`, `bsp_button_read_mv()` | Callbacks run in the button component task and must not block; do not create a second ADC1 unit |
-| Audio | ES8311 with full-duplex PCM over I2S0, supporting playback and microphone capture | `bsp_audio_*` | PCM reads and writes block and belong in a worker task; format changes must retain the BSP close/open sequence |
-| Battery | CW2017 state-of-charge and voltage readings | `bsp_battery_*` | This capability is optional at runtime; accuracy depends on the cell and battery profile and is not equivalent to a calibrated result |
-| Shared bus | ES8311 and CW2017 share I2C0 | `bsp_i2c_*` | Every device must reuse the bus owned by the BSP; do not create another bus on the same port for scanning or a new device |
-| Logging and flashing | Native ESP32-C3 USB Serial/JTAG | ESP-IDF console | GPIO18/19 are reserved for USB; the default UART0 TX on GPIO21 conflicts with the backlight |
+- **按住说话**：READY 态按住 OK 开始录音（滴声提示），松开自动发送；无取消窗口、无超时残留
+- **LISTENING 页**：录音中显示麦克风图标 + 计时，替代传统 REC 红点/音量条
+- **三键交互**：UP/DOWN/OK —— 按住说话、DOWN 回车、OK 双击清空输入框（全局语义）
+- **完整状态机**：HOME → READY → LISTENING → TRANSCRIBING → AGENT_RUNNING → APPROVAL → DONE
+- **物理审批**：Agent 审批请求时进入审批页，OK 批准 / UP 拒绝 / DOWN 看 Diff 详情（桌面端默认关闭审批）
+- **提示音**：开始 / 发送 / 审批提醒 / 完成 / 拒绝 / 错误六种
+- **三通道传输**：BLE（Mac 直连，GATT 服务 `0xA2B0`）/ WiFi+WebSocket+mDNS（Windows 无蓝牙 PC）/ USB（USB-Serial-JTAG 有线，含完整控制台命令面）
+- **低资源音频管线**：3200B/100ms 帧、静态环形缓冲、源端丢帧不整段缓存、掉帧对账
+- **控制台命令**：`st`（堆/栈水位、连接、掉帧统计）、`mode`、`wifi set`（密码不回显）、`ws`、`mdns`、`logs`、`system`、`factory reset`、`reboot`
 
-All pins, addresses, panel parameters, and button voltage windows are defined only in [`components/bsp/include/bsp_pins.h`](components/bsp/include/bsp_pins.h). Application code must not duplicate these constants. See the [AI Hardware Development Guide](docs/AI_HARDWARE_DEVELOPMENT_GUIDE.md) for the complete pin map, panel initialization, ADC thresholds, I2C addressing rules, audio clocks, and memory details.
+### 桌面端（companion/，macOS + Windows）
 
-Applications may also use ESP-IDF timers, FreeRTOS tasks, and internal Flash/NVS; the Pomodoro branch contains an NVS example. The ESP32-C3 supports 2.4 GHz Wi-Fi and Bluetooth LE, but the current BSP does not wrap either radio and `main` does not initialize a wireless stack. `demo/claude-buddy-port` is a BLE application architecture reference, not a substitute for measuring the current board's antenna, RF performance, power consumption, and coexistence behavior. Every FoloToy AI Passport has 8 MB of Flash, and the default firmware configuration targets 8 MB.
+- **候选字悬浮窗**（核心）：ASR 中间结果**全量累计文本**实时显示在屏幕底部居中的无边框置顶小窗，自动换行、随内容向上生长；松手后定稿文本注入输入框一次、窗口消失
+- **不抢焦点**：悬浮窗绝不 focus；Windows 走 `WS_EX_NOACTIVATE` + `SWP_NOACTIVATE`，macOS 热路径不触发 WindowServer 同步（按住说话不卡桌面）
+- **高频帧合并**：120ms 合并窗口只刷最新帧，首帧立即渲染，杜绝逐帧重绘卡顿
+- **5 步向导**：欢迎 → 自动发现设备（BLE → WiFi → USB）→ 火山 ASR Key 配置（零音频握手测试，不回显）→ 系统授权引导（macOS）→ 完成状态页
+- **托盘驻留**：连接后驻留系统菜单栏/托盘，状态行 + 诊断 + 设置
+- **诊断页**：USB 通道完整设备命令面；BLE/WiFi 通道只读运行状态
+- **注入**：macOS 剪贴板 + Cmd+V（需辅助功能授权；中文必须走剪贴板通道）；Windows 独立注入器
 
-### Capabilities outside the current contract
+## 按键操作
 
-The repository does not currently provide enough evidence to guarantee touch input, display readback, an IMU, external storage, charging control, USB insertion detection, controllable power-amplifier enable, deep-sleep wakeup, arbitrary “free GPIOs,” exact battery capacity, or production-grade power specifications. A capability being present in the ESP32-C3 silicon does not mean that it is connected, powered correctly, or validated on this board.
-
-Requirements involving these capabilities must begin with a schematic, board revision, component documentation, or physical measurements. Only then should the BSP and its acceptance criteria be extended.
-
-## First Run Experience (for end users)
-
-Non-developers can get started without touching a terminal. The companion is a
-cross-platform wizard (macOS Apple Silicon + Windows 10/11; Windows packaging
-requires a Windows build machine and is not produced here):
-
-1. **Download** the packaged app (`dist/AI Passport.app` on macOS — build with `companion/build/pack.py`, or use a released build).
-2. **Launch** it — the 5-step wizard opens:
-   - **Welcome** — what the device does and what to prepare.
-   - **Discover** — auto-probes the device over **BLE → WiFi → USB** (in that
-     order); you can still pick a channel manually.
-   - **ASR config** — paste your Volcano API key and **Test connection**
-     (real zero-audio WebSocket handshake, no key echoed back).
-   - **Authorize** (macOS only) — if Accessibility or Bluetooth permission is
-     missing, the wizard lists what to enable and opens the right System
-     Settings pane.
-   - **Done** — the status page shows connection channel, ASR backend,
-     injection mode, and the button layout (hold ● to talk, release to send;
-     double-click OK to clear; DOWN = Enter).
-3. **Advanced diagnostics** (status page → *Advanced*) — on the USB channel the
-   full device console command surface is available (Mode / WiFi / WebSocket /
-   mDNS / Logs / System / Factory Reset / reboot, with confirmation dialogs for
-   destructive ones); on BLE/WiFi channels it shows read-only runtime state.
-4. After connecting, the app stays in the **system tray** (macOS menu bar /
-   Windows tray): status rows (connected / device / listening), Settings
-   (re-open the window), Diagnostics, Quit. Closing the window hides to tray;
-   Quit exits fully.
-
-First run writes `companion/config.local.json` automatically (channel,
-`inject_mode`, Volcano API key when provided). Existing fields are preserved.
-If you run the source directly instead of the packaged app:
-`python3 companion/fre_app.py` (`--dry-run` walks the whole flow with a fake
-link; `--no-tray` skips the tray).
-
-## Start development with one requirement
-
-A simple request can be given directly to an agent:
-
-```text
-On the main branch, build an offline habit-tracking application for FoloToy AI Passport.
-Use the three physical buttons and the 240×320 display, and preserve records across power loss.
-Follow AGENTS.md and AI_HARDWARE_DEVELOPMENT_GUIDE.md. Inspect relevant demo branches first,
-keep hardware logic in components/bsp and application logic in main, deliver a runnable
-implementation with tests, and report the build result, unexecuted device checks, and exact
-on-device acceptance steps separately.
-```
-
-The more specific the requirement, the more likely the agent is to implement it correctly in one pass. Useful details include:
-
-- User flow: what each page displays and what short press, double press, and long press do for each button.
-- State and data: whether the application needs timing, persistence across power loss, networking, recording, or communication with a computer.
-- Experience goals: fonts, colors, animation, sound, response time, and error states.
-- Constraints: whether the main menu may be replaced, dependencies added, Flash used, or default interactions changed.
-- Acceptance criteria: which behaviors require automated tests and which must be observed on real hardware.
-
-When details are omitted, an agent may choose conservative defaults that do not change the product direction, but it must list those assumptions in the delivery. Decisions involving new wiring, electrical safety, board revisions, or irreversible data formats require confirmation first.
-
-## Demo branches are design cases, not a feature pile
-
-Each `demo/*` branch evolves the baseline into an independent application. The branches demonstrate how specific problems were solved. New applications should normally branch from `main` and consult relevant examples instead of merging multiple demos wholesale.
-
-| Branch | Application | Patterns worth reusing |
+| 按键 | 语境 | 动作 |
 | --- | --- | --- |
-| `demo/stopwatch` | Stopwatch | Minimal timer application, separation of pure logic from LVGL, host-side logic tests |
-| `demo/cat-themed-pomodoro-timer` | Cat-themed Pomodoro timer | Monotonic time, pause/resume, NVS persistence, a detailed PRD, and a state model |
-| `demo/rock-paper-scissors` | Rock paper scissors | RGB565 image assets, asset-generation scripts, and Flash resource tradeoffs |
-| `demo/tetris-game` | Three-button Tetris | Real-time game loop, low-latency `PRESS` input, partial refresh, a pure game model, audio, and microphone interaction |
-| `demo/claude-buddy-port` | Desktop AI hardware companion | Replacing the demo menu with a complete application, encrypted BLE, protocol parsing, state reduction, task communication, and extensive host tests |
+| OK **按住** | READY | 开始录音（PTT），松开发送 |
+| OK **双击** | 任意 | 清空当前输入框全部文字 |
+| DOWN 单击 | HOME / READY | 输入框回车（提交） |
+| OK 单击 | HOME | 进入 READY（工作流就绪） |
+| OK 单击 | APPROVAL | 批准 Agent 请求 |
+| UP 单击 | APPROVAL | 拒绝 Agent 请求 |
+| DOWN 单击 | APPROVAL | 查看 Diff 详情 |
 
-Inspect an example without switching the current working tree:
+## 快速开始
 
-```bash
-git branch -r --list 'origin/demo/*'
-git diff main...origin/demo/tetris-game -- main components tests
-git show origin/demo/tetris-game:main/demo_tetris.c
-```
+### 桌面端（Mac / Windows）
 
-Start a new application:
+1. 安装依赖（建议 venv）：`pip install -r companion/requirements.txt`
+2. 配置密钥（**不入 git**）：`cp companion/config.example.json companion/config.local.json`，填入火山引擎 API Key；或设环境变量 `VOLCANO_API_KEY`
+3. 运行向导（图形界面）：
+   ```bash
+   companion/.venv/bin/python companion/fre_app.py
+   ```
+   或用 CLI 中转（BLE 自动扫描 "AI Passport" 连接）：
+   ```bash
+   companion/.venv/bin/python companion/relay.py
+   ```
 
-```bash
-git switch main
-git switch -c feature/my-passport-app
-```
+macOS 首次使用需授予**辅助功能**权限（注入剪贴板+Cmd+V 必需）与蓝牙权限。Windows 使用说明见 [`companion/WINDOWS.md`](companion/WINDOWS.md)。
 
-Example branches may change the same menu, configuration, or driver in incompatible ways. An agent must understand the differences before extracting a state model, asset pipeline, or concurrency pattern. Code appearing in an example branch is not automatically part of the current `main` BSP contract.
+### 固件（ESP32-C3）
 
-## Application and BSP boundary
-
-```text
-Natural-language requirement
-  └─ main/                         Pages, state machines, animation, app tasks, assets
-      └─ components/bsp/include/  Stable board-level APIs
-          └─ components/bsp/src/  GPIO, buses, devices, and driver details
-              └─ bsp_pins.h       Single source of truth for pins and hardware parameters
-```
-
-To add a regular page, create `main/demo_<feature>.c` and implement the `enter`, `exit`, and `key` interface, then update:
-
-- Declarations in `main/demo.h`.
-- The source list in `main/CMakeLists.txt`.
-- The `DEMOS[]` registration in `main/main.c`.
-- Menu initialization status and failure degradation if a new optional peripheral is involved.
-
-Only hardware capabilities shared by multiple applications belong in `components/bsp`. A BSP API must document blocking behavior, thread context, memory ownership, failure values, and initialization order. Pins and I2C addresses belong only in `bsp_pins.h`.
-
-### Runtime invariants
-
-- LVGL is not thread-safe. Code outside the LVGL context must hold `bsp_lvgl_lock()` while accessing `lv_*` objects.
-- Button callbacks only dispatch lightweight events. Recording, playback, storage, and other slow operations belong in worker tasks.
-- When leaving a page, stop every task or timer that may access its UI before deleting the screen and clearing object pointers.
-- The default global interaction is `UP`/`DOWN` navigation in the menu, short `OK` to enter, and long `OK` to return from a page. Any change must be explicit.
-- New images, fonts, network stacks, audio buffers, LVGL buffers, and task stacks must be evaluated against internal RAM. Sufficient total free heap does not guarantee a sufficiently large contiguous block.
-- Testable state machines, protocols, timing, and layout calculations should be separated from ESP-IDF/LVGL and covered by host-side logic tests.
-
-## Build and run baseline
-
-The project uses ESP-IDF 5.5.x; the known development environment is 5.5.3:
+需要 ESP-IDF 5.5.x（已知环境 5.5.3）：
 
 ```bash
-get_idf553                    # Maintainer-local helper
-# Or source "$HOME/esp/esp-idf-v5.5.3/export.sh" (example installation path)
-idf.py set-target esp32c3     # Run for a fresh checkout or after using another target
+source "$HOME/esp/esp-idf-v5.5.3/export.sh"   # 或你的安装路径
+idf.py set-target esp32c3
 idf.py build
 idf.py flash monitor
 ```
 
-The first build uses ESP-IDF Component Manager to fetch LVGL, `esp_lvgl_port`, `button`, `esp_codec_dev`, and other dependencies. Do not edit the generated `managed_components/` directory. If configuration state is stale, use `idf.py fullclean` and configure again, but never use it to clean user source changes.
+首次构建会经 Component Manager 拉取 LVGL、`esp_lvgl_port`、`button`、`esp_codec_dev` 等依赖。烧录后控制台为 USB-Serial-JTAG（GPIO18/19；UART0 默认 TX GPIO21 与本板背光冲突）。
 
-> The current `main` is the **AI Passport firmware MVP with pure-BLE direct connection**: the device is a zero-config voice recorder (BLE peripheral, GATT service `0xA2B0` with CTRL/EVENT/AUDIO characteristics), and the Mac companion (`companion/relay.py`) is the BLE central — it streams the audio to Volcano ASR, pushes live transcript previews to the device screen (`final:false` frames), and pastes the final text into the focused input box (clipboard + Cmd+V). No Wi-Fi, WebSocket, mDNS, provisioning, or HID keyboard. Usage, console commands, host tests and the device acceptance checklist are in [README.zh_CN.md](README.zh_CN.md) under “AI Passport 固件 MVP”.
+## 仓库结构
 
-The current baseline includes a pure-logic test that can run independently:
+```text
+main/                    ESP32-C3 固件:状态机、UI、三通道传输、音频流、控制台命令
+components/bsp/          板级驱动:显示 / 按键 / 音频 / 电池 / 共享 I2C(bsp_pins.h 为硬件事实唯一来源)
+companion/               桌面端:relay 中转(ASR 流式 + 注入)、悬浮窗、向导、托盘、三通道传输
+tests/                   可脱离硬件运行的固件逻辑测试(纯 C,ctest)
+docs/                    硬件开发指南与验收文档
+sdkconfig.defaults       ESP32-C3、USB console、Flash、LVGL 默认配置
+partitions.csv           自定义分区表(factory 4MB)
+```
+
+## 工作原理
+
+1. 设备 READY 态按住 OK → 滴声 → `voice.start` → 3200B/100ms 音频帧经 BLE（GATT NOTIFY）/ WS / USB 上行
+2. 桌面端 relay 把音频帧流式送入火山引擎 ASR（`bigmodel_async`，每包结果携带**全量累计文本**）
+3. 中间结果（partial）→ 悬浮窗实时显示（120ms 帧合并节流；GUI 挂接时设备端不再预览候选字）
+4. 松开 OK → `voice.end` → ASR 定稿 → **注入当前输入框一次**（剪贴板 + Cmd+V）→ 悬浮窗消失
+
+注入目标是用户当前焦点窗口，悬浮窗绝不抢焦点；任何预览失败只记日志，不影响注入。
+
+## 开发
+
+固件逻辑测试（无硬件，cmake + ctest）：
 
 ```bash
-cc -std=c11 -Wall -Wextra -Werror -Imain \
-  tests/test_ui_pixel_math.c main/ui_pixel_math.c \
-  -o /tmp/test_ui_pixel_math
-/tmp/test_ui_pixel_math
+cd tests && cmake -B build && cmake --build build && ctest --test-dir build
 ```
 
-Different example branches may provide their own host-test commands; follow the README on that branch.
+桌面端单测（pytest）：
 
-## Acceptance and delivery format
-
-`idf.py build` is the minimum automated check, not hardware validation. For changes involving physical peripherals, record at least the following on a FoloToy AI Passport:
-
-- USB Serial/JTAG produces stable startup logs with no reboot loop, assertion, or watchdog reset.
-- Display orientation, colors, edges, refresh behavior, and backlight are correct.
-- `UP`, `DOWN`, and `OK` produce the intended events, and long `OK` returns correctly.
-- Audio sample rate, playback, non-zero recording, and page exit behavior are correct.
-- Battery readings are plausible, and the application degrades safely when the CW2017 is absent.
-- Repeated page transitions and concurrent operations do not continuously leak tasks, objects, or heap.
-
-An agent's final delivery must distinguish these outcomes:
-
-```text
-Build: PASS / FAIL / NOT RUN
-Host tests: PASS / FAIL / NOT RUN
-Device tests: PASS / FAIL / NOT RUN
-Unverified: items that still require a board, instrument, or user confirmation
+```bash
+companion/.venv/bin/python -m pytest companion/tests/ -q -o asyncio_mode=auto
 ```
 
-See the [AI Hardware Development Guide](docs/AI_HARDWARE_DEVELOPMENT_GUIDE.md) for the acceptance matrix by change type—including pins, LCD, ADC, codec, I2C, and DMA—and the troubleshooting reference.
+- 固件状态机、协议、音频分片、UI 像素计算均有 host 侧测试覆盖；构建通过 ≠ 硬件验证通过
+- 添加新页面/功能时保持硬件逻辑在 `components/bsp`、应用逻辑在 `main`；可测试的纯逻辑与 ESP-IDF/LVGL 分离
+- LVGL 非线程安全；按键回调只派发轻量事件；慢操作放工作任务
 
-## Project structure
+### 真机验收状态
 
-```text
-components/bsp/include/  Public BSP APIs and bsp_pins.h hardware facts
-components/bsp/src/      Display, button, audio, battery, and shared-I2C implementations
-main/                    App UI, state machine, multi-channel transport (BLE GATT / WiFi WS / USB serial), audio streaming
-tests/                   Lightweight logic tests that can run without hardware
-companion/               Relay: ASR streaming client, input injector (BLE / WiFi WS / USB serial transports)
-docs/                    Agent hardware development guide and extension documentation
-sdkconfig.defaults       ESP32-C3, USB console, Flash, and LVGL defaults
-AGENTS.md                Coding, validation, and contribution rules for agents
-```
+设备到货后的完整验收清单见 [`docs/ON_DEVICE.md`](docs/ON_DEVICE.md)。当前状态：**Build PASS、Host tests PASS、Device tests NOT RUN（待真机）**。重点验证项：悬浮窗真实会话（长按 PTT → 实时候选 → 松手注入一次）、Windows 焦点不抢占、连说十几秒无丢字（如丢字可调 `companion/relay.py` 的 `AUDIO_Q_MAX` 20→30-40）、BLE 吞吐/掉帧率、USB 拔线恢复、电池读数。
+
+## 安全
+
+- 火山 API Key / WiFi 密码**绝不入库**：`companion/config.local.json` 已被 `.gitignore` 忽略，可用环境变量 `VOLCANO_API_KEY` 替代
+- 设备侧 `wifi set` 命令**不回显密码**，密码仅存于设备 NVS
+- 日志不打印密钥；回传的会话/诊断数据不含凭据
+
+## 许可
+
+MIT © 2026 FoloToy，见 [LICENSE](LICENSE)。
+
+第三方组件：LVGL、esp_lvgl_port、NimBLE、cJSON 等版权归其各自作者。
