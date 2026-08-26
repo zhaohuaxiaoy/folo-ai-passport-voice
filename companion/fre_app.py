@@ -8,6 +8,10 @@
 架构: tkinter 主线程 + 后台 asyncio 线程(跑 relay 全流程), UI 更新经
 thread-safe queue + root.after 轮询(不跨线程碰控件)。GUI 只是壳,
 核心业务在 relay / asr_client / probe 等模块, 全部可单测、CLI 可跑。
+语音候选字: 按住 PTT 讲话时 ASR 中间结果经 relay on_candidate 回调 →
+phase_q candidate 事件 → 主屏底部悬浮窗实时显示(floating.py);
+识别完成后自动注入输入框、窗口消失。GUI 模式下悬浮窗取代设备屏幕
+预览(relay 挂接 on_candidate 后停发 transcript 下行)。
 
 用法:
   python3 companion/fre_app.py            # 正常启动
@@ -100,6 +104,7 @@ class FREApp:
         self.last_error = ""
         self._tray = None                # pystray Icon(连接成功后启动)
         self._shutdown_deadline = 0.0    # 分片退出轮询的强收期限
+        self._floating = None            # 候选字悬浮窗(懒创建,见 floating.py)
         self._tray_state = {"connected": False, "device": "", "listening": False}
 
         self.cfg = fre_state.load_or_default_cfg()
@@ -446,7 +451,11 @@ class FREApp:
 
             relay = Relay(transport,
                           inject_fn=inject_fn, key_action_fn=key_action_fn,
-                          on_phase=lambda ph: self.phase_q.put(("phase", ph)))
+                          on_phase=lambda ph: self.phase_q.put(("phase", ph)),
+                          # 候选字经 phase_q 回 UI 悬浮窗; 挂接后 relay
+                          # 停发设备预览下行(悬浮窗取代设备屏幕预览)
+                          on_candidate=lambda text, is_final:
+                              self.phase_q.put(("candidate", (text, is_final))))
             self._relay = relay                      # 诊断页命令桥用
             self.syscmd_available = getattr(relay, "_syscmd", None) is not None
             # BLE 直接连已发现地址; WiFi/USB 由 relay 内部扫描/等待
@@ -502,10 +511,14 @@ class FREApp:
                     self._on_syscmd_resp(payload)
                 elif kind == "tray_action":
                     self._on_tray_action(payload)
+                elif kind == "candidate":
+                    self._on_candidate(payload)
                 elif kind == "error":
                     self.last_error = payload
+                    self._floating_hide()   # 兜底: 错误收尾不留窗
                 elif kind == "relay_done":
                     self.set_status(self.last_error or "连接已断开")
+                    self._floating_hide()   # 兜底: relay 结束不留窗
         except queue.Empty:
             pass
         self.root.after(100, self.poll)
@@ -528,14 +541,51 @@ class FREApp:
             self._tray_phase("listening")
         elif phase == "session_end":
             self._tray_phase("idle")
+            self._floating_hide()   # 兜底: 无 final 的超时收尾也收窗
         elif phase == "disconnected":
             self._tray_phase("disconnected")
+            self._floating_hide()
             self.show_page("discover")
             self.set_status("连接已断开")
         elif phase == "failed":
             self._tray_phase("disconnected")
             self.show_page("discover")
             self.set_status(self.last_error or "连接失败")
+
+    # ---------------- 候选字悬浮窗 ----------------
+
+    def _on_candidate(self, payload):
+        """candidate 事件(candidate, (text, is_final)): partial 显示,
+        final 隐藏(注入已由 relay 触发, 窗即消失, 微信式)。"""
+        text, is_final = payload
+        if is_final:
+            self._floating_hide()
+        elif text:
+            self._floating_show(text)
+
+    def _floating_show(self, text):
+        """懒创建悬浮窗并显示候选文本; 显示环境异常降级不阻断主流程。"""
+        if self._floating is None:
+            try:
+                from floating import FloatingCandidate
+                self._floating = FloatingCandidate(self.root)
+            except Exception as e:  # noqa: BLE001 无显示环境等
+                print(f"[fre] 悬浮窗不可用: {e}", file=sys.stderr)
+                self._floating = False   # 禁用标记: 不再重试
+                return
+        if self._floating is False:
+            return
+        try:
+            self._floating.show(text)
+        except Exception as e:  # noqa: BLE001 悬浮窗异常不阻断注入
+            print(f"[fre] 悬浮窗显示失败: {e}", file=sys.stderr)
+
+    def _floating_hide(self):
+        if self._floating is not None and self._floating is not False:
+            try:
+                self._floating.hide()
+            except Exception:  # noqa: BLE001
+                pass
 
     # ---------------- 托盘 ----------------
 
