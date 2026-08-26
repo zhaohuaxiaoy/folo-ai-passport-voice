@@ -376,8 +376,12 @@ class FREApp:
 
     def on_asr_next(self):
         key = self._asr_key_var.get().strip()
-        if key and not self.dry_run:
-            fre_state.write_asr_cfg(key)
+        if key:
+            # 同步内存 cfg: 状态页 ASR 行读 self.cfg, 只写盘不同步会
+            # 显示「未配置」(REVIEW P2-B); dry_run 只同步内存不写盘
+            self.cfg = {**self.cfg, "volcano_api_key": key}
+            if not self.dry_run:
+                fre_state.write_asr_cfg(key)
         self.connect()
 
     def on_channel_change(self):
@@ -540,8 +544,10 @@ class FREApp:
         elif phase == "session_start":
             self._tray_phase("listening")
         elif phase == "session_end":
+            # 不关悬浮窗: voice.end 几乎总早于 ASR final(200ms-2s), 抢关
+            # 会导致窗闪没再闪回; 窗口由 final/relay_done/disconnected/error
+            # 收口(见 REVIEW P2-A)。
             self._tray_phase("idle")
-            self._floating_hide()   # 兜底: 无 final 的超时收尾也收窗
         elif phase == "disconnected":
             self._tray_phase("disconnected")
             self._floating_hide()
@@ -549,6 +555,7 @@ class FREApp:
             self.set_status("连接已断开")
         elif phase == "failed":
             self._tray_phase("disconnected")
+            self._floating_hide()   # 连接失败不留窗
             self.show_page("discover")
             self.set_status(self.last_error or "连接失败")
 

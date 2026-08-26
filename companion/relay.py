@@ -627,6 +627,10 @@ class Relay:
             except asyncio.TimeoutError:
                 print(f"[approval] {self.timeout:.0f}s 未收到 agent.action",
                       file=sys.stderr)
+        except Exception as e:
+            # 发送失败等异常不冒出: create_task 无人 await, 冒出会变
+            # "Task exception was never retrieved"(REVIEW 批次)
+            print(f"[approval] 审批流程异常: {e}", file=sys.stderr)
         finally:
             self._approval_waiter = None
             self._approval_task = None

@@ -151,3 +151,72 @@ def test_candidate_poll_wiring():
     assert not app._floating._win.winfo_ismapped(), "final 后悬浮窗应隐藏"
     root.destroy()
     print("[PASS] candidate 事件驱动悬浮窗显隐")
+
+
+# ---- 单元: session_end 不抢关悬浮窗(REVIEW P2-A) ----
+# voice.end(session_end) 几乎总早于 ASR final: 抢关会窗闪没再闪回。
+# 窗口只能由 final / disconnected / relay_done / error / failed 收口。
+def test_session_end_keeps_floating():
+    try:
+        import time  # noqa: F401
+        import ttkbootstrap as ttk  # noqa: F811
+        from fre_app import FREApp, THEME  # noqa: F811
+        root = ttk.Window(themename=THEME)
+    except Exception as e:  # noqa: BLE001 无显示环境(TclError)等
+        print(f"SKIP: 无法创建窗口({e}); 跳过")
+        return
+    root.withdraw()
+    app = FREApp(root, dry_run=True, no_tray=True)
+    app.phase_q.put(("candidate", ("你好", False)))
+    app.poll()
+    root.update()
+    assert app._floating is not None and app._floating is not False
+    win = app._floating._win
+    # session_end(voice.end)不得关闭窗口
+    app.phase_q.put(("phase", "session_end"))
+    app.poll()
+    root.update()
+    assert win.winfo_ismapped(), "session_end 后悬浮窗应保持可见"
+    # 后续 partial 正常更新(等过 120ms 帧合并窗口, 模拟真实帧间隔)
+    time.sleep(0.15)
+    app.phase_q.put(("candidate", ("你好世界", False)))
+    app.poll()
+    root.update()
+    assert app._floating._label.cget("text") == "你好世界", \
+        f"session_end 后 partial 应继续更新(实际 {app._floating._label.cget('text')!r})"
+    # final 才收口
+    app.phase_q.put(("candidate", ("你好世界", True)))
+    app.poll()
+    root.update()
+    assert not win.winfo_ismapped(), "final 后悬浮窗应隐藏"
+    # failed 也收口
+    app.phase_q.put(("candidate", ("再来", False)))
+    app.poll()
+    root.update()
+    app.phase_q.put(("phase", "failed"))
+    app.poll()
+    root.update()
+    assert not win.winfo_ismapped(), "failed 后悬浮窗应隐藏"
+    root.destroy()
+    print("[PASS] session_end 不抢关悬浮窗, final/failed 收口")
+
+
+# ---- 单元: 向导 API Key 同步内存 cfg(REVIEW P2-B) ----
+# on_asr_next 只写盘不同步 self.cfg → 状态页 ASR 行误显示「未配置」。
+def test_asr_key_syncs_cfg():
+    try:
+        import ttkbootstrap as ttk  # noqa: F811
+        from fre_app import FREApp, THEME  # noqa: F811
+        root = ttk.Window(themename=THEME)
+    except Exception as e:  # noqa: BLE001 无显示环境(TclError)等
+        print(f"SKIP: 无法创建窗口({e}); 跳过")
+        return
+    root.withdraw()
+    app = FREApp(root, dry_run=True, no_tray=True)
+    # 不依赖初始为空(本机 config.local.json 可能已配真实 key, 亦不回显它)
+    app._asr_key_var.set("review-key")
+    app.on_asr_next()
+    assert app.cfg.get("volcano_api_key") == "review-key", \
+        "on_asr_next 应同步内存 cfg(覆盖为新值)"
+    root.destroy()
+    print("[PASS] 向导 API Key 同步内存 cfg")

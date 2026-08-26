@@ -473,6 +473,22 @@ async def test_on_candidate_callback():
     await wait_until(task.done, what="断开退出")
 
 
+async def test_demo_approval_send_error_swallowed():
+    """_demo_approval 发送失败(RelayError 等): 不外冒, 槽位清理
+    (create_task 无人 await, 冒出会变 "Task exception was never retrieved")。"""
+    t = FakeTransport()
+    relay = Relay(t, asr_factory=make_fake_asr_factory([], {}),
+                  inject_fn=FakeInjector(), timeout=5)
+
+    async def boom(_):
+        raise RelayError("CTRL 载荷超限")
+
+    relay._send_ctrl = boom
+    await relay._demo_approval()
+    check("发送异常不外冒", relay._approval_waiter is None, True)
+    check("approval 任务槽清理", relay._approval_task is None, True)
+
+
 def test_paste_mac_dry_run_modes():
     """Mac paste_text dry_run: unicode/clipboard 路径打印与 mode 校验。"""
     import io
@@ -1093,6 +1109,7 @@ async def main():
     await test_key_action_downlink()
     await test_on_phase_callback()
     await test_on_candidate_callback()
+    await test_demo_approval_send_error_swallowed()
     test_paste_mac_dry_run_modes()
     test_default_inject_fn_mode()
     test_key_action_mac_dry_run()
