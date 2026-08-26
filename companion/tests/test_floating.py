@@ -72,8 +72,59 @@ def test_floating_window_show_hide():
     print("[PASS] 悬浮窗 show/hide 生命周期")
 
 
+def test_floating_show_same_text_noop():
+    """重复 partial 文本 show() 应短路(零 configure/geometry); hide 重置后
+    同文本不得被吞(新会话首帧)。"""
+    try:
+        import ttkbootstrap as ttk
+        from floating import FloatingCandidate
+        root = ttk.Window(themename="darkly")
+    except Exception as e:  # noqa: BLE001 无显示环境(TclError)等
+        print(f"SKIP: 无法创建窗口({e}); 跳过")
+        return
+    root.withdraw()
+    f = FloatingCandidate(root)
+    f.show("你好世界")
+    root.update()
+
+    configured, moved = [], []
+    orig_cfg = f._label.configure
+    def spy_cfg(**kw):
+        configured.append(kw)
+        return orig_cfg(**kw)
+    f._label.configure = spy_cfg
+    orig_geo = f._win.geometry
+    def spy_geo(*a):
+        moved.append(a)
+        return orig_geo(*a)
+    f._win.geometry = spy_geo
+
+    f.show("你好世界")               # 同文本: 应短路
+    root.update()
+    assert configured == [], f"重复文本不应再 configure({configured})"
+    assert moved == [], f"重复文本不应重定位({moved})"
+    assert f._last_text == "你好世界"
+
+    f.show("你好, 天气")             # 新文本: 正常刷新
+    root.update()
+    assert len(configured) == 1, "新文本应触发 configure"
+    assert f._label.cget("text") == "你好, 天气"
+
+    f.hide()                         # hide 重置幂等缓存
+    root.update()
+    root.update()   # macOS overrideredirect 窗口 withdraw 状态延迟一拍
+    f.show("你好世界")               # 同文本但已 hide: 不得被短路吞
+    root.update()
+    assert len(configured) == 2, "hide 后同文本应正常显示"
+    assert f._win.winfo_ismapped(), "hide 后 show 应可见"
+    f.destroy()
+    root.destroy()
+    print("[PASS] show 同文本幂等短路 + hide 重置")
+
+
 if __name__ == "__main__":
     test_pick_family()
     test_anchor()
     test_floating_window_show_hide()
+    test_floating_show_same_text_noop()
     print("全部通过")
