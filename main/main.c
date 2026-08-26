@@ -230,13 +230,12 @@ static void app_task(void *arg)
             next_tick = now_ms + APP_TICK_MS;
         }
 
-        // 渲染判定(S1 降频):有事件/动作、LISTENING(计时+音量条持续变化)、
-        // 或距上次渲染 ≥1s(顶栏/电量兜底)才渲染。静止状态从每 100ms 降到 ≤1 次/s,
-        // 省下 LVGL 锁 + 10+ 次 label set_text 重排/重绘。快照仅一次,判定与渲染共用。
+        // 渲染判定(S1 降频):有事件/动作、或距上次渲染 ≥1s(顶栏/电量/
+        // LISTENING 计时兜底)才渲染。LISTENING 页是静态内容(麦克风图标 +
+        // 1Hz 计时),不再强制每 100ms 重绘——省下 LVGL 锁 + label 重排/重绘。
         app_ui_snapshot_t snap;
         app_state_snapshot(&s_state, now_ms, &snap);
         bool need_render = got || tick_acted
-                        || snap.state == APP_ST_LISTENING
                         || (now_ms - s_last_render_ms >= 1000);
         if (need_render) {
             // 电量 I2C 读取移出 LVGL 锁(总线事务最长 100ms,不占锁;第 7 轮 F2)。
