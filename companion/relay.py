@@ -13,9 +13,11 @@ MTU-3), EVENT 行以 '\\n' 结尾, AUDIO 帧正好 3200B。本程序负责重组
 (reassemble_audio / reassemble_event 纯函数, 独立可测)。
 
 流程: 扫描 "AI Passport" → 连接 → 订阅 EVENT+AUDIO → voice.start 开 ASR 流
-→ 帧喂火山(中间结果实时下行设备屏幕预览) → voice.end 收最终结果
-(下行定稿帧 + 注入输入框一次) → 审批演示(发 approval_request → 设备按键
-→ 收 agent.action)。用户确认的行为: 输入框只落定稿, 中间预览在设备屏幕。
+→ 帧喂火山(中间结果实时预览: GUI 模式挂 on_candidate 走悬浮窗,
+CLI 模式照旧下行设备屏幕) → voice.end 收最终结果(下行定稿帧 + 注入
+输入框一次) → 审批演示(发 approval_request → 设备按键 → 收
+agent.action)。用户确认的行为: 输入框只落定稿, 中间预览在悬浮窗
+(GUI)或设备屏幕(CLI)。
 voice 窗口掉帧统计(理论帧数 vs 实收帧数, 与设备 status 帧 drop 双端对账)。
 转写下行走 CTRL 特征, 与注入解耦(--no-inject 仍下行)。
 
@@ -185,15 +187,20 @@ class Relay:
     """BLE 中转主逻辑。transport / asr_factory / inject_fn 均可注入(单测)。"""
 
     def __init__(self, transport=None, *, asr_factory=None, inject_fn=None,
-                 key_action_fn=None, on_phase=None, timeout=60.0, do_inject=True,
-                 do_approval=True, dry_run=False, connect_timeout_s=5.0,
-                 stdin_input=None):
+                 key_action_fn=None, on_phase=None, on_candidate=None,
+                 timeout=60.0, do_inject=True, do_approval=True, dry_run=False,
+                 connect_timeout_s=5.0, stdin_input=None):
         from asr_client import StreamingASR
         from inject import paste_text, key_action
         # GUI 前端(FRE 向导)状态钩子: on_phase(phase) 在 relay 线程调用,
         # phase ∈ scanning/connecting/connected/disconnected/
         #       session_start/session_end; 默认 None 时零行为变化。
         self._on_phase = on_phase
+        # 候选字回调: on_candidate(text, is_final) 在 relay 线程调用, 每个
+        # 非空 ASR 结果触发一次。非 None 表示 GUI 悬浮窗已挂接 —— 设备屏幕
+        # 预览由悬浮窗取代, transcript 下行停发; None(默认)时 CLI 行为不变,
+        # 中间结果照旧下行设备屏幕预览。
+        self._on_candidate = on_candidate
         self._transport = transport or BleakTransport()
         # USB 通道扩展探测:transport 带 send_syscmd(SerialTransport) →
         # 启用 stdin `!命令` 交互(USB 模式无控制台)与通道专属提示
@@ -586,6 +593,7 @@ class Relay:
     async def _downlink_transcript(self, text, is_final):
         """把转写文本下行到设备屏幕: partial → final:false(预览态),
         定稿 → final:true。超长按 UTF-8 码点边界分多条。失败只记日志, 不中断。
+        仅 CLI(未挂接 on_candidate)路径使用; GUI 模式由悬浮窗取代。
         """
         if not text:
             return
@@ -723,18 +731,28 @@ class _VoiceSession:
         self._results_task = asyncio.create_task(self._results_loop())
 
     async def _results_loop(self):
-        """消费 ASR 结果: 中间结果仅下行设备屏幕预览, 定稿收尾并注入一次。
+        """消费 ASR 结果: 中间结果仅预览(不注入), 定稿收尾并注入一次。
 
-        每包 result.text 是全量累计文本: partial → 下行 final:false 预览态
-        (不注入——剪贴板粘贴是插入语义, 多次注入会叠加文本; 用户确认的
-        行为是输入框只落定稿), 定稿(voice.end 最终文本) → final:true 落定
-        + 注入输入框一次。
-        下行与注入解耦: 任何下行失败只记日志, 不影响注入与收尾。
+        每包 result.text 是全量累计文本: partial → 预览态, 投递方式二选一
+        —— GUI 模式(挂接 on_candidate)经回调走悬浮窗, CLI 模式照旧下行
+        设备屏幕(final:false); 均不注入(剪贴板粘贴是插入语义, 多次注入
+        会叠加文本; 用户确认的行为是输入框只落定稿)。定稿(voice.end
+        最终文本) → 注入输入框一次, 预览通道同步收到 final:true。
+        预览与注入解耦: 任何预览失败只记日志, 不影响注入与收尾。
         """
         try:
             async for text, is_final in self.asr.results():
                 if text:
-                    await self.relay._downlink_transcript(text, is_final)
+                    if self.relay._on_candidate is not None:
+                        # GUI 悬浮窗消费者: 异常不吞 final 注入(只记日志)
+                        try:
+                            self.relay._on_candidate(text, is_final)
+                        except Exception as e:
+                            print(f"[voice] on_candidate 回调异常: {e}",
+                                  file=sys.stderr)
+                    else:
+                        # CLI 无悬浮窗: 照旧下行设备屏幕预览(行为不变)
+                        await self.relay._downlink_transcript(text, is_final)
                 if is_final:
                     if text:
                         self.final_text = text
