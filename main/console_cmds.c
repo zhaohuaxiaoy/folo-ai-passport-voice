@@ -192,11 +192,18 @@ static int cmd_mdns(int argc, char **argv)
 static int cmd_log(int argc, char **argv)
 {
     (void)argc; (void)argv;
-    char buf[USB_LOG_RING_CAP];
-    size_t n = usb_link_dump_log(buf, sizeof(buf));
-    if (n == 0) out("(log ring empty)\n");
-    else if (s_emit) s_emit(buf, n);   // 原样透传(含换行),不进 out 的截断缓冲
-    else fwrite(buf, 1, n, stdout);
+    // 分块导出:日志环最大 4096B,而本命令在 2048B 栈的 usb_read_task 中执行,
+    // 声明整段栈数组必爆栈(审查 P0)。512B 小缓冲循环经 s_emit 透传。
+    char buf[512];
+    size_t off = 0;
+    size_t n;
+    while ((n = usb_link_dump_log_at(buf, sizeof(buf), off)) > 0) {
+        if (s_emit) s_emit(buf, n);   // 原样透传(含换行),不进 out 的截断缓冲
+        else fwrite(buf, 1, n, stdout);
+        off += n;
+        if (n < sizeof(buf) - 1) break;   // 末块(不足一满块),避免尾帧死循环
+    }
+    if (off == 0) out("(log ring empty)\n");
     return 0;
 }
 

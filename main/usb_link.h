@@ -44,6 +44,11 @@ void usb_link_restore_log(void);
 // 返回写入 buf 的字节数(≤ cap-1,保证 NUL 结尾)。REPL 模式下环为空。
 #define USB_LOG_RING_CAP 4096
 size_t usb_link_dump_log(char *buf, size_t cap);
+// 游标式分块导出:从逻辑第 offset 字节开始复制 ≤cap 字节,返回实际复制数;
+// offset ≥ 已缓冲字节数时返回 0。调用方可持小缓冲(≤512B)循环导出,
+// 避免在栈受限任务(usb_read_task 2048B)上声明 USB_LOG_RING_CAP 级数组
+// (审查 P0:cmd_log 4096B 栈数组必爆栈)。cap 建议 ≤512。
+size_t usb_link_dump_log_at(char *buf, size_t cap, size_t offset);
 
 #ifdef __cplusplus
 }

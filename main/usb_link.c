@@ -126,17 +126,21 @@ static int usb_log_vprintf(const char *fmt, va_list args)
     return n;
 }
 
-size_t usb_link_dump_log(char *buf, size_t cap)
+size_t usb_link_dump_log_at(char *buf, size_t cap, size_t offset)
 {
+    // 语义:逻辑序列 = 最老 → 最新(起点由 w/n 推得);offset 从最老端计。
+    // 临界区内一次性快照 ≤cap-1 字节;期间新日志写入不影响本次复制
+    // (各次调用间可能跳字节/重复,日志导出是尽力而为,调用方按块透传)。
     if (buf == NULL || cap == 0 || !s_log_ring) return 0;
     portENTER_CRITICAL(&s_log_mux);
-    if (s_log_n == 0) {
+    if (offset >= s_log_n) {
         portEXIT_CRITICAL(&s_log_mux);
         buf[0] = '\0';
         return 0;
     }
-    size_t want = s_log_n < cap - 1 ? s_log_n : cap - 1;
-    size_t start = (s_log_w + USB_LOG_RING_CAP - s_log_n) % USB_LOG_RING_CAP;
+    size_t want = s_log_n - offset;                 // 剩余可导出字节
+    if (want > cap - 1) want = cap - 1;
+    size_t start = (s_log_w + USB_LOG_RING_CAP - s_log_n + offset) % USB_LOG_RING_CAP;
     size_t first = USB_LOG_RING_CAP - start;
     if (first > want) first = want;
     memcpy(buf, s_log_ring + start, first);
@@ -144,6 +148,11 @@ size_t usb_link_dump_log(char *buf, size_t cap)
     portEXIT_CRITICAL(&s_log_mux);
     buf[want] = '\0';
     return want;
+}
+
+size_t usb_link_dump_log(char *buf, size_t cap)
+{
+    return usb_link_dump_log_at(buf, cap, 0);   // 整段导出 = 从 0 开始
 }
 
 // ---- 会话 ----
