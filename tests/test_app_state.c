@@ -390,25 +390,42 @@ static void test_done_back_home(void) {
     assert(s.state == APP_ST_DONE);
 }
 
-// ---- 息屏/唤醒 ----
+// ---- 两级息屏/唤醒 ----
+// 20s 无键 → 关背光(screen_on=false, 面板仍通电);60s → 面板 SLPIN 断电;
+// PRESS 任意键 → 面板上电 + 背光亮。
 static void test_screen_off_wake(void) {
     reset();
-    reduce(APP_EV_TICK, now + APP_IDLE_SCREENOFF_MS + 1);  // 60s 无键
+    const uint64_t t0 = now;   // 息屏计时基准(= last_key_ms;reduce 会改 now,须先取)
+    // 20s 级:关背光,面板不动
+    reduce(APP_EV_TICK, t0 + APP_IDLE_BACKLIGHT_OFF_MS + 1);
     assert(s.screen_on == false);
+    assert(s.panel_on == true);
     assert(has_action(APP_ACT_UI_SCREEN_OFF));
+    assert(!has_action(APP_ACT_UI_PANEL_OFF));
+    // 60s 边界:59.999s 不触发,恰好 60s(>=)触发面板断电
+    reduce(APP_EV_TICK, t0 + APP_IDLE_PANEL_OFF_MS - 1);
+    assert(s.panel_on == true);
+    reduce(APP_EV_TICK, t0 + APP_IDLE_PANEL_OFF_MS);
+    assert(s.panel_on == false);
+    assert(has_action(APP_ACT_UI_PANEL_OFF));
 
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + APP_IDLE_SCREENOFF_MS + 2); // 任意键唤醒
+    // 任意键唤醒:面板 + 背光一起恢复
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, t0 + APP_IDLE_PANEL_OFF_MS + 2);
+    assert(s.panel_on == true);
     assert(s.screen_on == true);
+    assert(has_action(APP_ACT_UI_PANEL_ON));
     assert(has_action(APP_ACT_UI_SCREEN_ON));
 
     // 唤醒后的同一事件流:CLICK 应被忽略(不产生状态跳转)
     s.screen_on = false;
+    s.panel_on = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);    // 息屏时 CLICK 不唤醒
     assert(s.state == APP_ST_HOME);
     assert(s.screen_on == false);
-    // 唤醒后再按键才生效(HOME 下 UP 无处理,旧断言过期 —— 改用 OK 对齐实现)
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);    // PRESS 唤醒
+    // 背光灭但面板还通电(20-60s 区间):PRESS 只恢复背光,不再发 PANEL_ON
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);
     assert(s.screen_on == true);
+    assert(!has_action(APP_ACT_UI_PANEL_ON));
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 30);
     assert(s.state == APP_ST_READY);
 }
@@ -596,17 +613,21 @@ static void test_listening_arrows_ignored(void) {
     assert(s.state == APP_ST_LISTENING);
 }
 
-// ---- DONE 下 60s 无按键同样熄屏,任意键唤醒 ----
+// ---- DONE 下无按键同样分级息屏,任意键唤醒 ----
 static void test_screen_off_done(void) {
     reset();
     s.state = APP_ST_DONE;
     s.state_since_ms = now;
-    reduce(APP_EV_TICK, now + APP_IDLE_SCREENOFF_MS + 1);
+    reduce(APP_EV_TICK, now + APP_IDLE_BACKLIGHT_OFF_MS + 1);
     assert(s.screen_on == false);
     assert(has_action(APP_ACT_UI_SCREEN_OFF));
+    reduce(APP_EV_TICK, now + APP_IDLE_PANEL_OFF_MS + 1);
+    assert(s.panel_on == false);
+    assert(has_action(APP_ACT_UI_PANEL_OFF));
 
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + APP_IDLE_SCREENOFF_MS + 2); // 唤醒
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + APP_IDLE_PANEL_OFF_MS + 2); // 唤醒
     assert(s.screen_on == true);
+    assert(s.panel_on == true);
     assert(s.state == APP_ST_DONE);                        // 只唤醒,不离开 DONE
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
     assert(s.state == APP_ST_HOME);                        // 再单击才回 HOME

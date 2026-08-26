@@ -35,6 +35,7 @@ static const char *TAG = "main";
 static app_state_t s_state;   // app_task 独占,无需锁
 static uint32_t s_last_drop_count = 0;   // 最近一次 STREAM_STOP 的会话丢帧数(voice.end 后 status 帧)
 static bool s_ui_screen_on = true;       // 上次渲染时的屏幕状态(初始亮,与 app_ui 内 s_last_screen_on 一致)
+static bool s_ui_panel_on  = true;       // 上次渲染时的面板供电状态(init 已完成 DISPON)
 static int s_batt_soc = -1;              // 电量缓存(至多 1s 读一次真实 I2C,见渲染路径)
 static uint64_t s_batt_last_ms = (uint64_t)-1000;   // 上次电量读取时刻(负初值:首帧立即读)
 static uint64_t s_last_render_ms = 0;    // 上次渲染时刻(S1 降频:非计时状态 ≥1s 兜底;初值 0 → 首帧立即渲染)
@@ -73,7 +74,9 @@ static void run_actions(const app_action_t *acts, uint8_t n)
         case APP_ACT_UI_REFRESH:
         case APP_ACT_UI_SCREEN_OFF:
         case APP_ACT_UI_SCREEN_ON:
-            break;                       // 渲染/背光由主循环末尾统一做(快照驱动)
+        case APP_ACT_UI_PANEL_OFF:
+        case APP_ACT_UI_PANEL_ON:
+            break;                       // 渲染/背光/面板电源由主循环末尾统一做(快照驱动)
         case APP_ACT_SEND_VOICE_START:
             len = app_protocol_voice_start(buf, sizeof(buf));
             send_event_line_important(buf, len);   // 会话边界帧:不丢(审查 P2)
@@ -248,6 +251,13 @@ static void app_task(void *arg)
         bool need_render = got || tick_acted
                         || (now_ms - s_last_render_ms >= 1000);
         if (need_render) {
+            // 面板电源(快照驱动):状态变化帧执行——60s 级 SLPIN 断电;
+            // 唤醒(任意键)SLPOUT+120ms+DISPON 在此阻塞一次(可接受)。
+            // 必须在渲染跳过判断之前:断电后渲染路径被跳过,此处不能跟着跳。
+            if (snap.panel_on != s_ui_panel_on) {
+                bsp_display_power(snap.panel_on);
+                s_ui_panel_on = snap.panel_on;
+            }
             // 电量 I2C 读取移出 LVGL 锁(总线事务最长 100ms,不占锁;第 7 轮 F2)。
             // 息屏跳过语义保持:息屏期间不读 I2C、不渲染。读数至多 1s 一次,缓存复用(#9)。
             if (snap.screen_on || s_ui_screen_on) {

@@ -17,6 +17,7 @@ void app_state_init(app_state_t *s) {
     memset(s, 0, sizeof(*s));
     s->state = APP_ST_HOME;
     s->screen_on = true;
+    s->panel_on = true;
     // 开机即按"未连接"渲染(无 Mac 时不会收到断开事件,初始 true 会一直误判为
     // 链路通 → PTT 可用但音频全丢且无离线横幅)。Mac 连入订阅 EVENT 后翻 true。
     s->ble_connected = false;
@@ -45,6 +46,7 @@ void app_state_snapshot(const app_state_t *s, uint64_t now_ms, app_ui_snapshot_t
     snap->state            = s->state;
     snap->link_up          = s->link_up;
     snap->screen_on        = s->screen_on;
+    snap->panel_on         = s->panel_on;
     snap->net_busy         = s->net_busy;
     snap->ble_connected    = s->ble_connected;
     str_cpy(snap->link_name, sizeof(snap->link_name),
@@ -110,6 +112,11 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
 
     if (wake_only) {
         if (ev->type == APP_EV_KEY_PRESS) {
+            if (!s->panel_on) {
+                s->panel_on = true;
+                app_action_t p = { .type = APP_ACT_UI_PANEL_ON };
+                emit(out, n, max, p);
+            }
             s->screen_on = true;
             s->last_key_ms = now_ms;
             app_action_t a = { .type = APP_ACT_UI_SCREEN_ON };
@@ -238,16 +245,26 @@ static void handle_tick(app_state_t *s, uint64_t now_ms, app_action_t *out, uint
         emit(out, n, max, r);
     }
 
-    if (!s->screen_on) return;
-
-    // 息屏:HOME/READY/DONE 下 60s 无按键(APPROVAL 保持常亮:安全审批不熄屏)
-    if ((s->state == APP_ST_HOME || s->state == APP_ST_READY || s->state == APP_ST_DONE) &&
-        (now_ms - s->last_key_ms) >= APP_IDLE_SCREENOFF_MS) {
-        s->screen_on = false;
-        app_action_t a = { .type = APP_ACT_UI_SCREEN_OFF };
-        emit(out, n, max, a);
-        return;
+    // 分级息屏:HOME/READY/DONE 下无按键(APPROVAL 保持常亮:安全审批不熄屏)
+    // 20s → 关背光(渲染跳过,面板冻结最后一帧);60s → 面板 SLPIN 断电(μA 级)。
+    // 背光关后 tick 仍需走到面板判定,故不提前 return。
+    const bool idle_state = (s->state == APP_ST_HOME ||
+                             s->state == APP_ST_READY ||
+                             s->state == APP_ST_DONE);
+    if (idle_state) {
+        if (s->screen_on && (now_ms - s->last_key_ms) >= APP_IDLE_BACKLIGHT_OFF_MS) {
+            s->screen_on = false;
+            app_action_t a = { .type = APP_ACT_UI_SCREEN_OFF };
+            emit(out, n, max, a);
+        }
+        if (s->panel_on && (now_ms - s->last_key_ms) >= APP_IDLE_PANEL_OFF_MS) {
+            s->panel_on = false;
+            app_action_t a = { .type = APP_ACT_UI_PANEL_OFF };
+            emit(out, n, max, a);
+        }
     }
+
+    if (!s->screen_on) return;
 
     // 状态超时
     const uint64_t elapsed = now_ms - s->state_since_ms;

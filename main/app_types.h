@@ -160,6 +160,8 @@ typedef enum {
     APP_ACT_UI_REFRESH,
     APP_ACT_UI_SCREEN_OFF,
     APP_ACT_UI_SCREEN_ON,
+    APP_ACT_UI_PANEL_OFF,   // 面板 SLPIN 断电(60s 无操作级)
+    APP_ACT_UI_PANEL_ON,    // 面板 SLPOUT 上电(唤醒)
     APP_ACT_SEND_VOICE_START,
     APP_ACT_SEND_VOICE_END,
     APP_ACT_SEND_KEY_ACTION,   // 上行按键动作(enter/clear,PC client 执行注入)
@@ -194,6 +196,7 @@ typedef struct {
     app_stage_t    state;
     bool           link_up;       // false → OFFLINE(link_name DISCONNECTED)横幅 + 禁 PTT;true = 通道已通
     bool           screen_on;
+    bool           panel_on;      // 面板供电(SLPIN 断电后 false)
     bool           net_busy;      // 音频丢帧中 → BUSY 横幅
     bool           ble_connected; // BLE 连接是否建立(未订阅时图标灰色)
     char           link_name[8];  // 当前链路通道名:"BLE"/"WiFi"(断线横幅按此渲染)
@@ -217,7 +220,8 @@ typedef struct {
 } app_ui_snapshot_t;
 
 // ---------------- 超时常量 ----------------
-#define APP_IDLE_SCREENOFF_MS   60000u   // 无按键息屏
+#define APP_IDLE_BACKLIGHT_OFF_MS   20000u   // 无按键 → 关背光(息屏,渲染跳过)
+#define APP_IDLE_PANEL_OFF_MS       60000u   // 无按键 → 面板 SLPIN 断电(μA 级)
 #define APP_TRANSCRIBE_TIMEOUT  30000u   // 转写等待超时
 #define APP_AGENT_RUN_TIMEOUT   90000u   // Agent 执行超时
 #define APP_TICK_MS             100u     // 应用任务心跳
