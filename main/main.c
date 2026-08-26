@@ -103,7 +103,13 @@ static void run_actions(const app_action_t *acts, uint8_t n)
         case APP_ACT_STREAM_START:
             // 新会话:清零对账计数(上一次会话若断链无 voice.end,计数在此丢弃)
             s_last_drop_count = 0;
-            audio_streamer_start();
+            if (audio_streamer_start() != ESP_OK) {
+                // 启动被拒(残留未排空/未就绪):录音没起来——投 AUDIO_ERROR
+                // 让状态机回 READY + toast,UI 不得停在 LISTENING(REVIEW P2-C)。
+                // 入队失败(罕见)仅日志:下次 PTT 可重试。
+                app_event_t ev = { .type = APP_EV_AUDIO_ERROR };
+                app_event_post(&ev);
+            }
             break;
         case APP_ACT_STREAM_STOP:
             // 正常结束:只停采集,残留帧由后续 SEND_VOICE_END 的 drain 排空并取计数
@@ -134,7 +140,11 @@ static void run_actions(const app_action_t *acts, uint8_t n)
             if (a->u.tone == APP_TONE_START) {
                 if (!app_sound_play(APP_TONE_START)) {
                     s_state.stream_started = true;   // 同任务上下文,与 reduce 一致
-                    audio_streamer_start();
+                    if (audio_streamer_start() != ESP_OK) {
+                        // 兜底路径同样检查:开流失败 → 回 READY + toast(REVIEW P2-C)
+                        app_event_t ev = { .type = APP_EV_AUDIO_ERROR };
+                        app_event_post(&ev);
+                    }
                 }
             } else {
                 app_sound_play((app_tone_t)a->u.tone);

@@ -126,7 +126,8 @@ static void test_start_rejected_until_drained(void) {
     usleep(50 * 1000);
     assert(g_notify_count == 1);
     audio_streamer_cancel();              // ~200ms 超时,s_cancel 保持
-    audio_streamer_start();               // 环未空(残留还在) → 拒绝启动
+    // 环未空(残留还在) → 拒绝启动:返回非 OK,调用方可投 AUDIO_ERROR 回 READY
+    assert(audio_streamer_start() != ESP_OK);   // REVIEW P2-C:返回值契约
     assert(!audio_streamer_active());     // 关键:未进入录音,旧帧未放行
     usleep(1300 * 1000);                  // notify 完成 + worker 丢完残留
     g_notify_block_ms = 0;                // 最终会话不留长在途(与 T3 一致;否则 1s 在途
@@ -195,7 +196,7 @@ static void test_init_failure_api_noop(void) {
     g_fake_ring_fail = 1;                     // 第一个失败点:环创建
     assert(audio_streamer_init() != ESP_OK);  // 主流程"继续运行"场景
     g_fake_ring_fail = 0;
-    audio_streamer_start();                   // 空转:不 xSemaphoreGive(NULL)
+    assert(audio_streamer_start() != ESP_OK); // 空转:返回 INVALID_STATE 而非崩溃
     audio_streamer_cancel();                  // 空转:不 xRingbufferGetCurFreeSize(NULL)
     audio_streamer_drain(50);                 // 空转:同上
     assert(!audio_streamer_active());

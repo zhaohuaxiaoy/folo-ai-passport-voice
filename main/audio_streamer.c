@@ -183,8 +183,8 @@ esp_err_t audio_streamer_init(void) {
     return ESP_OK;
 }
 
-void audio_streamer_start(void) {
-    if (!s_ready) return;   // init 失败:启动被拒(空转,不访问 NULL ring/sem)
+esp_err_t audio_streamer_start(void) {
+    if (!s_ready) return ESP_ERR_INVALID_STATE;   // init 失败:启动被拒(空转,不访问 NULL ring/sem)
     // 残留门禁(审查 P1):任何残留帧绝不流入新会话。
     // 残留来源:①cancel 排空超时的丢帧模式残留(s_cancel 保持)②正常 stop 后环内
     // 未消费残留(stop 只停采集不排空,环非空但 s_cancel 已复位)。两种都先置
@@ -199,17 +199,18 @@ void audio_streamer_start(void) {
             // 不置 s_active,丢帧模式保持——旧帧绝不流入新会话;下次 start 重试。
             // 若 notify 卡死本也无音频可发,拒绝比泄漏正确。
             ESP_LOGE(TAG, "启动被拒:上一次会话残留未排空(异常)");
-            return;
+            return ESP_ERR_TIMEOUT;
         }
         s_cancel = false;
     }
-    if (s_active) return;
+    if (s_active) return ESP_OK;
     s_active = true;
     s_peak = 0;
     s_drop_active = false;
     s_drop_count = 0;
     xSemaphoreGive(s_sem);
     ESP_LOGI(TAG, "采集开始");
+    return ESP_OK;
 }
 
 void audio_streamer_stop(void) {

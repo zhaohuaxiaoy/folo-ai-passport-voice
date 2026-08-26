@@ -24,7 +24,10 @@ void audio_streamer_set_sender(audio_send_fn_t fn);
 esp_err_t audio_streamer_init(void);   // 建环形缓冲与两个 worker(空闲等待)
 // 开始采集与发送(清零会话丢帧计数)。若上一次取消的残留仍未排空(系统级异常),
 // 拒绝启动并保持丢帧模式——下次 start 重试,旧帧绝不流入新会话。
-void audio_streamer_start(void);
+// 返回:ESP_OK 成功;ESP_ERR_INVALID_STATE 管线未就绪;ESP_ERR_TIMEOUT 残留
+// 未排空(拒绝启动)。调用方须检查返回值:失败时录音未起来,UI 不得显示录音
+// (REVIEW P2-C:回 READY + toast)。
+esp_err_t audio_streamer_start(void);
 void audio_streamer_stop(void);        // 停止采集(发送 worker 继续排空,voice.end 前须 drain)
 // 取消/断链:停采集 + 丢弃环内残留与在途帧(防残留流入下一次会话)。
 // 幂等:采集已停(STOP 后断链)时同样清残留。实现为"丢帧模式"——ble_worker 取到块
