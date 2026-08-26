@@ -11,7 +11,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from floating import _pick_family, _anchor  # noqa: E402
+from floating import (  # noqa: E402
+    HWND_TOPMOST, SWP_NOACTIVATE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    _anchor, _pick_family, _present_window, _win32_apply_noactivate,
+    _win32_exstyle_noactivate,
+)
 
 
 # ---- 纯函数(无窗口) ----
@@ -36,6 +40,150 @@ def test_anchor():
     print("[PASS] _anchor 底部居中定位")
 
 
+# ---- Windows 不激活置顶(REVIEW P2-D, 无显示 / 非 Windows 可跑) ----
+
+def test_win32_exstyle_noactivate():
+    assert _win32_exstyle_noactivate(0) == (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
+    assert _win32_exstyle_noactivate(0x8) == (
+        0x8 | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
+    print("[PASS] _win32_exstyle_noactivate 位或")
+
+
+class _FakeUser32:
+    """注入给 _win32_apply_noactivate / _present_window, 不碰真实 user32。"""
+
+    def __init__(self, styles=None, parent=0, boom=False):
+        self.styles = {} if styles is None else dict(styles)
+        self.parent = parent
+        self.boom = boom
+        self.set_pos = []
+
+    def GetParent(self, hwnd):
+        return self.parent
+
+    def GetWindowLongPtrW(self, hwnd, _idx):
+        if self.boom:
+            raise OSError("fake")
+        return self.styles.get(hwnd, 0)
+
+    def SetWindowLongPtrW(self, hwnd, _idx, val):
+        self.styles[hwnd] = val
+        return 0
+
+    def SetWindowPos(self, hwnd, after, _x, _y, _cx, _cy, flags):
+        self.set_pos.append((hwnd, after, flags))
+        return 1
+
+
+class _FakeWin:
+    def __init__(self, hwnd=42, mapped=False):
+        self._hwnd = hwnd
+        self.mapped = mapped
+        self.deiconified = 0
+        self.lifted = 0
+
+    def winfo_id(self):
+        return self._hwnd
+
+    def winfo_ismapped(self):
+        return self.mapped
+
+    def deiconify(self):
+        self.deiconified += 1
+        self.mapped = True
+
+    def lift(self):
+        self.lifted += 1
+
+
+def test_win32_apply_noactivate_sets_bits():
+    u = _FakeUser32(styles={42: 0x8})
+    assert _win32_apply_noactivate(42, user32=u) is True
+    assert u.styles[42] & WS_EX_NOACTIVATE
+    assert u.styles[42] & WS_EX_TOOLWINDOW
+    assert u.styles[42] & 0x8, "不得清掉已有扩展样式"
+    assert u.set_pos, "应 SetWindowPos 置顶"
+    hwnd, after, flags = u.set_pos[0]
+    assert hwnd == 42 and after == HWND_TOPMOST
+    assert flags & SWP_NOACTIVATE
+    print("[PASS] _win32_apply_noactivate 写 NOACTIVATE 并不激活置顶")
+
+
+def test_win32_apply_noactivate_failure():
+    assert _win32_apply_noactivate(0) is False
+    u = _FakeUser32(boom=True)
+    assert _win32_apply_noactivate(42, user32=u) is False
+    print("[PASS] _win32_apply_noactivate 失败返回 False")
+
+
+def test_present_window_win32_skips_lift():
+    """Windows 映出窗口: deiconify 但不 lift(lift 会抢前台)。"""
+    import floating
+    orig_plat = floating.sys.platform
+    orig_user32 = floating._win32_user32
+    u = _FakeUser32()
+    try:
+        floating.sys.platform = "win32"
+        floating._win32_user32 = lambda: u
+        win = _FakeWin()
+        _present_window(win)
+        assert win.deiconified == 1, "应 deiconify"
+        assert win.lifted == 0, "Windows 成功 NOACTIVATE 时不得 lift"
+        assert u.styles.get(42, 0) & WS_EX_NOACTIVATE
+    finally:
+        floating.sys.platform = orig_plat
+        floating._win32_user32 = orig_user32
+    print("[PASS] _present_window Windows 不 lift")
+
+
+def test_present_window_win32_lift_on_failure():
+    """NOACTIVATE 失败时降级 lift, 窗仍能显示。"""
+    import floating
+    orig_plat = floating.sys.platform
+    orig_user32 = floating._win32_user32
+    u = _FakeUser32(boom=True)
+    try:
+        floating.sys.platform = "win32"
+        floating._win32_user32 = lambda: u
+        win = _FakeWin()
+        _present_window(win)
+        assert win.deiconified == 1
+        assert win.lifted == 1, "失败应降级 lift"
+    finally:
+        floating.sys.platform = orig_plat
+        floating._win32_user32 = orig_user32
+    print("[PASS] _present_window Windows 失败降级 lift")
+
+
+def test_present_window_darwin_no_lift():
+    """macOS: 只 deiconify, 不 lift(lift 会让 WindowServer 转圈)。"""
+    import floating
+    orig_plat = floating.sys.platform
+    try:
+        floating.sys.platform = "darwin"
+        win = _FakeWin()
+        _present_window(win)
+        assert win.deiconified == 1
+        assert win.lifted == 0, "macOS 不得 lift"
+    finally:
+        floating.sys.platform = orig_plat
+    print("[PASS] _present_window macOS 不 lift")
+
+
+def test_present_window_other_lifts():
+    """非 macOS/Windows: deiconify + lift。"""
+    import floating
+    orig_plat = floating.sys.platform
+    try:
+        floating.sys.platform = "linux"
+        win = _FakeWin()
+        _present_window(win)
+        assert win.deiconified == 1 and win.lifted == 1
+    finally:
+        floating.sys.platform = orig_plat
+    print("[PASS] _present_window 其他平台仍 lift")
+
+
 # ---- 窗口用例(无显示环境 SKIP) ----
 
 def test_floating_window_show_hide():
@@ -51,10 +199,11 @@ def test_floating_window_show_hide():
     f = FloatingCandidate(root)
     f.show("你好世界")
     root.update()
-    assert f._win is not None and f._win.winfo_ismapped(), "show 后窗口应可见"
+    assert f._win is not None and f._visible, "show 后窗口应可见"
     assert f._label.cget("text") == "你好世界", "候选文本应更新"
     assert f._win.attributes("-topmost"), "窗口应置顶"
-    assert f._win.overrideredirect(), "窗口应无边框"
+    if sys.platform != "darwin":
+        assert f._win.overrideredirect(), "窗口应无边框"
     # show 幂等: 第二次 show 更新文本不重建窗口(等过合并窗口, 模拟真实帧间隔)
     win = f._win
     time.sleep(0.15)
@@ -64,11 +213,11 @@ def test_floating_window_show_hide():
     assert f._label.cget("text") == "第二段候选", "幂等更新文本"
     f.hide()
     root.update()
-    root.update()   # macOS overrideredirect 窗口 withdraw 状态延迟一拍
-    assert not f._win.winfo_ismapped(), "hide 后窗口应隐藏"
+    root.update()   # macOS 窗口 withdraw 状态延迟一拍
+    assert not f._visible, "hide 后窗口应隐藏"
     f.show("再次显示")      # hide 后复用窗口
     root.update()
-    assert f._win is win and f._win.winfo_ismapped(), "hide 后 show 复用窗口"
+    assert f._win is win and f._visible, "hide 后 show 复用窗口"
     f.destroy()
     root.destroy()
     print("[PASS] 悬浮窗 show/hide 生命周期")
@@ -120,7 +269,7 @@ def test_floating_show_same_text_noop():
     f.show("你好世界")               # 同文本但已 hide: 不得被短路吞
     root.update()
     assert len(configured) == 2, "hide 后同文本应正常显示"
-    assert f._win.winfo_ismapped(), "hide 后 show 应可见"
+    assert f._visible, "hide 后 show 应可见"
     f.destroy()
     root.destroy()
     print("[PASS] show 同文本幂等短路 + hide 重置")
@@ -153,10 +302,48 @@ def test_floating_high_frequency_merge():
     print("[PASS] 高频 partial 帧合并")
 
 
+def test_flush_does_not_reset_topmost_each_frame():
+    """热路径不得每帧 attributes(-topmost): macOS 上会打满 WindowServer。"""
+    try:
+        import time  # noqa: F401
+        import ttkbootstrap as ttk
+        from floating import FloatingCandidate
+        root = ttk.Window(themename="darkly")
+    except Exception as e:  # noqa: BLE001
+        print(f"SKIP: 无法创建窗口({e}); 跳过")
+        return
+    root.withdraw()
+    f = FloatingCandidate(root)
+    f.show("你好")
+    root.update()
+    time.sleep(0.15)
+    calls = []
+    orig = f._win.attributes
+    def spy(*a, **k):
+        calls.append(a)
+        return orig(*a, **k)
+    f._win.attributes = spy
+    f.show("你好世界")
+    root.update()
+    topmost = [c for c in calls if c and c[0] == "-topmost"]
+    assert topmost == [], f"每帧 -topmost 会导致转圈: {topmost}"
+    f.destroy()
+    root.destroy()
+    print("[PASS] 热路径不每帧 -topmost")
+
+
 if __name__ == "__main__":
     test_pick_family()
     test_anchor()
+    test_win32_exstyle_noactivate()
+    test_win32_apply_noactivate_sets_bits()
+    test_win32_apply_noactivate_failure()
+    test_present_window_win32_skips_lift()
+    test_present_window_win32_lift_on_failure()
+    test_present_window_darwin_no_lift()
+    test_present_window_other_lifts()
     test_floating_window_show_hide()
     test_floating_show_same_text_noop()
     test_floating_high_frequency_merge()
+    test_flush_does_not_reset_topmost_each_frame()
     print("全部通过")

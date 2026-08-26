@@ -6,10 +6,14 @@
 平台差异与已知局限:
 - 圆角: tkinter 在 macOS/Windows 都无法原生逐像素圆角
   (macOS 无 -transparentcolor; Windows 的 -transparentcolor 在部分
-  合成器下有重影风险) → 统一方形面板; macOS 仅以 -alpha 0.95 柔化。
+  合成器下有重影风险) → 统一方形面板。
 - 焦点: 悬浮窗绝不调用 focus/focus_force —— 注入目标是用户当前
-  焦点窗口, 悬浮窗不得抢焦点(macOS overrideredirect 天然不获焦,
-  Windows 需克制)。
+  焦点窗口, 悬浮窗不得抢焦点。
+  macOS: MacWindowStyle plain/noActivates 代替 overrideredirect;
+  不每帧 -topmost/lift/update_idletasks(Aqua 上这三项会打满
+  WindowServer, 全桌面转圈)。
+  Windows: deiconify/lift/-topmost 会抢前台, 改走 WS_EX_NOACTIVATE
+  + SetWindowPos(SWP_NOACTIVATE)(REVIEW P2-D)。真机抢焦点 NOT RUN。
 - 线程: 本模块全部方法只允许在 tk 主线程调用(fre_app 经 poll()
   驱动), 不跨线程触碰控件。
 
@@ -33,6 +37,17 @@ _PAD_Y = 18
 _FONT_SIZE = 14
 _FLUSH_MS = 120               # 高频 partial 帧合并窗口(首帧立即渲染)
 
+# Windows 不激活置顶(REVIEW P2-D): GWL_EXSTYLE 位 + SetWindowPos 标志。
+# 抽出纯函数便于无显示 / 非 Windows 单测。
+GWL_EXSTYLE = -20
+WS_EX_NOACTIVATE = 0x08000000
+WS_EX_TOOLWINDOW = 0x00000080   # 不进 Alt-Tab, 降低被当成前台的概率
+HWND_TOPMOST = -1
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOACTIVATE = 0x0010
+SWP_FRAMECHANGED = 0x0020
+
 
 def _pick_family(available, candidates):
     """按候选链返回第一个可用字体族; 全缺返回 None(调用方回退默认)。
@@ -55,10 +70,106 @@ def _anchor(sw, sh, w, h):
     return x, y
 
 
+def _win32_exstyle_noactivate(existing):
+    """在已有扩展样式上加上 NOACTIVATE|TOOLWINDOW(纯函数)。"""
+    return existing | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
+
+
+def _win32_user32():
+    """懒加载 user32, 并钉死 64 位 HWND/LONG_PTR 原型, 避免截断。"""
+    import ctypes
+    u = ctypes.windll.user32
+    u.GetParent.argtypes = [ctypes.c_void_p]
+    u.GetParent.restype = ctypes.c_void_p
+    get = getattr(u, "GetWindowLongPtrW", u.GetWindowLongW)
+    set_ = getattr(u, "SetWindowLongPtrW", u.SetWindowLongW)
+    get.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    get.restype = ctypes.c_ssize_t
+    set_.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
+    set_.restype = ctypes.c_ssize_t
+    u.SetWindowPos.argtypes = [
+        ctypes.c_void_p, ctypes.c_void_p,
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ctypes.c_uint]
+    u.SetWindowPos.restype = ctypes.c_int
+    return u
+
+
+def _win32_long_fns(user32):
+    get = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
+    set_ = getattr(user32, "SetWindowLongPtrW", None) or user32.SetWindowLongW
+    return get, set_
+
+
+def _win32_toplevel_hwnd(win, user32=None):
+    """Tk winfo_id 常是客户区 HWND; 有父窗口则用父(真正的 toplevel)。"""
+    hwnd = int(win.winfo_id())
+    try:
+        user32 = user32 or _win32_user32()
+        parent = user32.GetParent(hwnd)
+        return int(parent) if parent else hwnd
+    except Exception:  # noqa: BLE001
+        return hwnd
+
+
+def _win32_apply_noactivate(hwnd, user32=None):
+    """给 HWND 加上 WS_EX_NOACTIVATE|TOOLWINDOW, 并以 SWP_NOACTIVATE 置顶。
+
+    失败返回 False(调用方降级 lift, 窗仍能显示)。user32 可注入(单测)。
+    """
+    if not hwnd:
+        return False
+    try:
+        user32 = user32 or _win32_user32()
+        get_long, set_long = _win32_long_fns(user32)
+        ex = get_long(hwnd, GWL_EXSTYLE) or 0
+        set_long(hwnd, GWL_EXSTYLE, _win32_exstyle_noactivate(ex))
+        user32.SetWindowPos(
+            hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED)
+        return True
+    except Exception:  # noqa: BLE001 ctypes/权限/句柄失效
+        return False
+
+
+def _macos_style_overlay(win):
+    """macOS 用 Aqua overlay 代替 overrideredirect。
+
+    overrideredirect + -alpha + 每帧 lift/-topmost 会让 WindowServer
+    合成器打满, 表现为全桌面转圈。plain/noActivates: 无标题栏、不激活。
+    失败返回 False, 调用方回退 overrideredirect。
+    """
+    try:
+        win.tk.call("::tk::unsupported::MacWindowStyle", "style",
+                    win._w, "plain", "noActivates")
+        return True
+    except tk.TclError:
+        return False
+
+
+def _present_window(win):
+    """把已 withdraw 的 Toplevel 映出来, 不抢前台焦点。
+
+    Windows: 先写 NOACTIVATE 再 deiconify, SetWindowPos 置顶; 失败才 lift。
+    macOS: 只 deiconify, 不 lift(lift 会让 WindowServer 转圈)。
+    其他: deiconify + lift。
+    """
+    if sys.platform == "win32":
+        hwnd = _win32_toplevel_hwnd(win)
+        _win32_apply_noactivate(hwnd)
+        win.deiconify()
+        if not _win32_apply_noactivate(hwnd):
+            win.lift()
+        return
+    win.deiconify()
+    if sys.platform != "darwin":
+        win.lift()
+
+
 class FloatingCandidate:
     """候选字悬浮窗。懒创建 Toplevel, 会话间复用(show/hide 不销毁)。
 
-    - show(text): 幂等 —— 更新文本 + deiconify + lift + 置顶 + 重新定位。
+    - show(text): 幂等 —— 更新文本 + 映出 + 置顶 + 重新定位。
     - hide(): withdraw(不销毁)。
     - destroy(): 显式销毁(应用退出/relay_done 兜底; 随 root.destroy 自动回收)。
     """
@@ -74,6 +185,7 @@ class FloatingCandidate:
         self._flush_after = None    # 合并定时器 id
         self._last_flush_at = 0.0   # 上次渲染时间戳(合并窗口判定)
         self._geo_cache = None      # 上次 geometry: 尺寸未变不重设
+        self._visible = False       # 自管映射态: 不信 macOS winfo_ismapped 延迟
 
     # ---- 显示/隐藏 ----
 
@@ -86,7 +198,7 @@ class FloatingCandidate:
         """
         if self._win is None:
             self._build()
-        if text == self._last_text and self._win.winfo_ismapped():
+        if text == self._last_text and self._visible:
             return
         # 距上次渲染已过合并窗口 → 立即渲染; 否则挂 pending 等定时器刷最新
         # (monotonic 是秒, _FLUSH_MS 是毫秒, 比较前换算)
@@ -106,19 +218,20 @@ class FloatingCandidate:
             self._flush(text)
 
     def _flush(self, text):
-        """渲染一帧(文本 + 定位)。"""
+        """渲染一帧(文本 + 定位)。
+
+        macOS 热路径禁止: 每帧 -topmost / lift / update_idletasks。
+        这三项都会同步进 WindowServer, ASR partial 频率下会全桌面转圈。
+        """
         self._last_flush_at = time.monotonic()
         self._last_text = text
         self._label.configure(text=text)
-        if not self._win.winfo_ismapped():
-            # 仅首次/被外部 withdraw(托盘等)后补发: 已映射窗口上是 no-op
-            self._win.deiconify()
-            self._win.lift()
-        # -topmost 每次重发(1 次往返, 廉价): macOS 上窗口 realize 前
-        # 设置不生效, 且重发防系统/合成器漂移
-        self._win.attributes("-topmost", True)
-        self._win.update_idletasks()
-        w, h = self._win.winfo_width(), self._win.winfo_height()
+        if not self._visible:
+            _present_window(self._win)
+            self._visible = True
+        # 用 req 尺寸, 不 update_idletasks(会强制同步布局/合成)
+        w = self._win.winfo_reqwidth()
+        h = self._win.winfo_reqheight()
         x, y = _anchor(self._sw if self._sw is not None
                        else self._win.winfo_screenwidth(),
                        self._sh if self._sh is not None
@@ -134,6 +247,7 @@ class FloatingCandidate:
                 self._flush_after = None
             self._pending = None
             self._win.withdraw()
+            self._visible = False
             # 清幂等缓存 + 重置合并窗口: 新会话首帧立即渲染,
             # 且若与上会话末帧同文也不得被短路吞
             self._last_text = None
@@ -148,16 +262,26 @@ class FloatingCandidate:
             self._win = None
             self._label = None
             self._last_text = None
+            self._visible = False
 
     # ---- 构建 ----
 
     def _build(self):
         win = tk.Toplevel(self._root)
-        win.overrideredirect(True)          # 无边框
-        win.attributes("-topmost", True)    # 置顶
+        win.withdraw()                      # 立刻藏: 默认映射会抢焦, 且空窗会闪
         win.resizable(False, False)
-        if sys.platform == "darwin":
-            win.attributes("-alpha", 0.95)  # macOS 柔化(Windows 保持不透明)
+        if sys.platform == "win32":
+            win.overrideredirect(True)
+            win.update_idletasks()
+            _win32_apply_noactivate(_win32_toplevel_hwnd(win))
+        elif sys.platform == "darwin":
+            # 不用 overrideredirect/-alpha: Aqua 合成器会转圈
+            if not _macos_style_overlay(win):
+                win.overrideredirect(True)
+            win.attributes("-topmost", True)    # 只设一次, 热路径不再碰
+        else:
+            win.overrideredirect(True)
+            win.attributes("-topmost", True)
         # 绝不 focus/focus_force: 注入目标是用户焦点窗口(见模块 docstring)
 
         panel = tk.Frame(win, bg=_PANEL_BG,
@@ -165,9 +289,12 @@ class FloatingCandidate:
         panel.pack(fill="both", expand=True)
 
         # 极简单块: 深色面板 + 白字候选文本, 无任何装饰
-        self._label = tk.Label(panel, text="", bg=_PANEL_BG, fg=_PANEL_FG,
-                               font=self._pick_font(), wraplength=_WRAP,
-                               justify="left", anchor="w")
+        label_kw = dict(text="", bg=_PANEL_BG, fg=_PANEL_FG,
+                        wraplength=_WRAP, justify="left", anchor="w")
+        font = self._pick_font()
+        if font is not None:
+            label_kw["font"] = font
+        self._label = tk.Label(panel, **label_kw)
         self._label.pack(anchor="w")
 
         self._win = win
@@ -183,14 +310,20 @@ class FloatingCandidate:
 
     def _pick_font(self):
         if self._font is None:
-            try:
-                fam = _pick_family(tkfont.families(self._root),
-                                   _WIN_FONTS if sys.platform == "win32"
-                                   else _MAC_FONTS)
-                if fam is None:
-                    fam = tkfont.nametofont("TkDefaultFont").actual("family")
-                self._font = tkfont.Font(family=fam, size=_FONT_SIZE)
-            except tk.TclError:
-                # 极端环境(字体表不可用): 回退默认字体
-                self._font = tkfont.nametofont("TkDefaultFont")
+            # 禁止 tkfont.families(): macOS 枚举全表会卡住主线程数秒(转圈)。
+            # 按候选链逐个创建, actual(family) 对得上才用。
+            candidates = _WIN_FONTS if sys.platform == "win32" else _MAC_FONTS
+            for fam in candidates:
+                try:
+                    f = tkfont.Font(self._root, family=fam, size=_FONT_SIZE)
+                    if f.actual("family") == fam:
+                        self._font = f
+                        break
+                except tk.TclError:
+                    continue
+            if self._font is None:
+                try:
+                    self._font = tkfont.nametofont("TkDefaultFont")
+                except tk.TclError:
+                    self._font = None
         return self._font
