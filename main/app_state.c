@@ -1,6 +1,7 @@
 // main/app_state.c —— 状态机归约器实现。
 // 纯 C,不依赖 IDF。按键语义与超时规则见 prd/design 文档。
 #include "app_state.h"
+#include "mode.h"   // 链路事件通道门禁(审查 P1):按当前模式隔离通道事件
 #include <string.h>
 #include <stdio.h>
 
@@ -403,7 +404,18 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         break;
 
     case APP_EV_BLE_CONNECTED:
-        // 语义:EVENT 特征已订阅(链路通,PTT 可用)
+        // 语义:EVENT 特征已订阅(链路通,PTT 可用)。
+        // 通道门禁(审查 P1):非 BLE 模式下手机连入只更新图标,不写 link_up ——
+        // USB/WiFi 音频会话不被 BLE 事件翻转;mode_switching 窗口放行切换期
+        // 投递的收束事件(见 mode.h)。
+        if (mode_get() != APP_MODE_BLE && !mode_switching()) {
+            s->ble_connected = true;
+            {
+                app_action_t b = { .type = APP_ACT_UI_REFRESH };
+                emit(out, out_n, max, b);
+            }
+            break;
+        }
         s->ble_connected = true;
         s->link_channel = 0;
         s->link_up = true;
@@ -414,6 +426,14 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         break;
 
     case APP_EV_BLE_DISCONNECTED:
+        if (mode_get() != APP_MODE_BLE && !mode_switching()) {
+            s->ble_connected = false;   // 图标如实反映手机连入状态,链路不受影响
+            {
+                app_action_t b = { .type = APP_ACT_UI_REFRESH };
+                emit(out, out_n, max, b);
+            }
+            break;
+        }
         s->ble_connected = false;
         s->link_channel = 0;
         s->link_up = false;
@@ -476,7 +496,10 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         break;
 
     case APP_EV_WS_CONNECTED:
-        // 与 BLE_CONNECTED 同构:WS 通道通 = 链路通,PTT 可用
+        // 与 BLE_CONNECTED 同构:WS 通道通 = 链路通,PTT 可用。
+        // 通道门禁:非 WiFi 模式(USB 模式射频保持、WS 可能连上)不写链路状态;
+        // mode_switching 窗口放行切换期收束事件(见 mode.h)。
+        if (mode_get() != APP_MODE_WIFI && !mode_switching()) break;
         s->link_channel = 1;
         s->link_up = true;
         s->wifi_fail_reason = 0;   // 链路已恢复:后续新失败允许再次 toast
@@ -487,6 +510,9 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         break;
 
     case APP_EV_WS_DISCONNECTED:
+        // 通道门禁:非 WiFi 模式忽略(USB 模式 WS 断开不影响 USB 链路);
+        // mode_switching 窗口放行切换期收束事件。
+        if (mode_get() != APP_MODE_WIFI && !mode_switching()) break;
         s->link_up = false;
         s->wifi_fail_reason = 0;   // 新的失败片段:允许再 toast
         // 状态收束与 BLE 断连同路径(停流/回 READY/审批保持);toast 文案区分通道
@@ -501,6 +527,9 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
     // ---- USB 有线通道(第三通道:语义与 BLE/WS 对等)----
 
     case APP_EV_USB_CONNECTED:
+        // 通道门禁:非 USB 模式忽略(仅 USB 模式有 usb_link 任务,防御性);
+        // mode_switching 窗口放行切换期收束事件。
+        if (mode_get() != APP_MODE_USB && !mode_switching()) break;
         // 与 BLE_CONNECTED 同构:USB 会话通 = 链路通,PTT 可用
         s->link_channel = 2;
         s->link_up = true;
@@ -511,6 +540,8 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         break;
 
     case APP_EV_USB_DISCONNECTED:
+        // 通道门禁:非 USB 模式忽略;mode_switching 窗口放行切换期收束事件。
+        if (mode_get() != APP_MODE_USB && !mode_switching()) break;
         s->link_channel = 2;   // 断线横幅仍显示通道名(USB)
         s->link_up = false;
         // 状态收束与 BLE 断连同路径;toast 文案区分通道

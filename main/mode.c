@@ -129,7 +129,25 @@ esp_err_t mode_init(void)
     return ESP_OK;
 }
 
+// 切换窗口标志:mode_switch 前置投递"旧通道断连事件",而射频切换在本上下文
+// 继续执行(≤数百 ms),app_task 消费该事件时 mode_get() 已是新模式 —— 链路
+// 事件门禁(app_state)凭此放行窗口内投递的收束事件(审查 P1:USB/WiFi 模式下
+// BLE 连/断不再误掐当前通道音频流;模式切换本身的收束不受门禁影响)。
+static volatile bool s_switching = false;
+
+bool mode_switching(void) { return s_switching; }
+
+static esp_err_t mode_switch_impl(app_mode_t target);   // 定义在下方(原函数体)
+
 esp_err_t mode_switch(app_mode_t target)
+{
+    s_switching = true;
+    esp_err_t rc = mode_switch_impl(target);
+    s_switching = false;
+    return rc;
+}
+
+static esp_err_t mode_switch_impl(app_mode_t target)
 {
     if (target >= APP_MODE_COUNT || target == s_mode) return ESP_OK;   // 幂等
 

@@ -18,8 +18,9 @@ add_compile_options(-Wall -Wextra)
 set_source_files_properties(${CJSON_DIR}/cJSON.c PROPERTIES COMPILE_OPTIONS "-Wno-error")
 
 # --- 状态机 ---
-add_executable(test_app_state test_app_state.c ${MAIN_DIR}/app_state.c)
-target_include_directories(test_app_state PRIVATE ${MAIN_DIR})
+add_executable(test_app_state test_app_state.c ${MAIN_DIR}/app_state.c
+               ${FAKE_DIR}/fake_mode.c)
+target_include_directories(test_app_state PRIVATE ${MAIN_DIR} ${FAKE_DIR})
 add_test(NAME app_state COMMAND test_app_state)
 
 # --- UI 像素数学(仓库既有) ---
@@ -33,15 +34,18 @@ target_include_directories(test_usb_link PRIVATE ${MAIN_DIR})
 add_test(NAME usb_link COMMAND test_usb_link)
 
 # --- 协议(内置 cJSON,无需 IDF_PATH;app_state.c 提供 APP_WORKFLOW_NAMES) ---
+# fake_events.c:app_protocol_dispatch_event 的事件投递桩(轻量,见该文件头注释)
 add_executable(test_app_protocol test_app_protocol.c ${MAIN_DIR}/app_protocol.c
-               ${MAIN_DIR}/app_state.c ${CJSON_DIR}/cJSON.c)
-target_include_directories(test_app_protocol PRIVATE ${MAIN_DIR} ${CJSON_DIR})
+               ${MAIN_DIR}/app_state.c ${FAKE_DIR}/fake_mode.c
+               ${FAKE_DIR}/fake_events.c ${CJSON_DIR}/cJSON.c)
+target_include_directories(test_app_protocol PRIVATE ${MAIN_DIR} ${FAKE_DIR} ${CJSON_DIR})
 add_test(NAME app_protocol COMMAND test_app_protocol)
 
 # --- BLE 音频/事件分片打包(纯 C;事件行与 CTRL 解析复用 app_protocol,SRCS 同 test_app_protocol) ---
 add_executable(test_ble_audio test_ble_audio.c ${MAIN_DIR}/ble_audio.c
-               ${MAIN_DIR}/app_protocol.c ${MAIN_DIR}/app_state.c ${CJSON_DIR}/cJSON.c)
-target_include_directories(test_ble_audio PRIVATE ${MAIN_DIR} ${CJSON_DIR})
+               ${MAIN_DIR}/app_protocol.c ${MAIN_DIR}/app_state.c
+               ${FAKE_DIR}/fake_mode.c ${FAKE_DIR}/fake_events.c ${CJSON_DIR}/cJSON.c)
+target_include_directories(test_ble_audio PRIVATE ${MAIN_DIR} ${FAKE_DIR} ${CJSON_DIR})
 add_test(NAME ble_audio COMMAND test_ble_audio)
 
 # --- wall-clock 校时(纯 C;NVS 桩在测试文件内,settimeofday 走 ESP_PLATFORM 隔离) ---

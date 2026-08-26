@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "app_state.h"
+#include "fake_mode.h"
 
 static uint64_t now = 1000000;              // 单调递增假时钟
 static app_state_t s;
@@ -99,7 +100,8 @@ static void test_down_enter_clear(void) {
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 40);
     assert(!has_action(APP_ACT_SEND_KEY_ACTION));
 
-    // PTT 不受影响
+    // PTT 不受影响(基线缺陷:离线检查引入后此段未设 link_up,PTT 被拒;修正)
+    s.link_up = true;
     reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 50);
     assert(s.state == APP_ST_LISTENING);
     assert(has_action(APP_ACT_SEND_VOICE_START));
@@ -354,12 +356,14 @@ static void test_approval(void) {
     t = find_action(APP_ACT_PLAY_TONE);
     assert(t && t->u.tone == APP_TONE_REJECT);
 
-    // ▼ 详情视图切换
+    // ▼ 在 APPROVAL 下 = 回车(与全局 DOWN 语义统一;旧 approval_details
+    // 详情视图切换已随状态机演进移除 —— 基线测试过期,按当前语义修正)
     s.state = APP_ST_AGENT_RUNNING;
     app_state_reduce(&s, &ev, now, out, &on);
-    assert(s.approval_details == false);
+    assert(s.state == APP_ST_APPROVAL);
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 300);
-    assert(s.approval_details == true);
+    a = find_action(APP_ACT_SEND_KEY_ACTION);
+    assert(a && a->u.key_action.action == APP_KEY_ENTER);
 }
 
 // ---- DONE:●/▼ 回 HOME ----
@@ -370,10 +374,15 @@ static void test_done_back_home(void) {
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
     assert(s.state == APP_ST_HOME);
 
+    // ▼ 在 DONE 下 = 回车(与全局 DOWN 语义统一;旧"任意键回 HOME"已随
+    // 状态机演进移除 —— 基线测试过期,按当前语义修正)
     reset();
+    app_action_t *a;
     s.state = APP_ST_DONE;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 10);
-    assert(s.state == APP_ST_HOME);
+    a = find_action(APP_ACT_SEND_KEY_ACTION);
+    assert(a && a->u.key_action.action == APP_KEY_ENTER);
+    assert(s.state == APP_ST_DONE);
 
     reset();
     s.state = APP_ST_DONE;
@@ -396,8 +405,11 @@ static void test_screen_off_wake(void) {
     s.screen_on = false;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);    // 息屏时 CLICK 不唤醒
     assert(s.state == APP_ST_HOME);
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);    // 唤醒后再按键才生效
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 30);
+    assert(s.screen_on == false);
+    // 唤醒后再按键才生效(HOME 下 UP 无处理,旧断言过期 —— 改用 OK 对齐实现)
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);    // PRESS 唤醒
+    assert(s.screen_on == true);
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 30);
     assert(s.state == APP_ST_READY);
 }
 
@@ -557,14 +569,20 @@ static void test_keys_ignored_in_running(void) {
     s.state_since_ms = now;
     reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 10);
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 20);
-    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 30);
     assert(s.state == APP_ST_AGENT_RUNNING);
-    assert(on == 0);                                       // 无任何动作
+    assert(on == 0);                                       // PRESS/CLICK 无动作
+
+    // OK 双击=全局清空(各态统一,AGENT_RUNNING 也不例外)—— 基线测试过期:
+    // 旧断言"任意键全部忽略"未涵盖双击全局语义
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 30);
+    app_action_t *a = find_action(APP_ACT_SEND_KEY_ACTION);
+    assert(a && a->u.key_action.action == APP_KEY_CLEAR);
+    assert(s.state == APP_ST_AGENT_RUNNING);
 
     s.state = APP_ST_TRANSCRIBING;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 40);
     assert(s.state == APP_ST_TRANSCRIBING);
-    assert(on == 0);
+    assert(on == 0);                                       // 本次 CLICK 无动作
 }
 
 // ---- LISTENING 中 ▲/▼ 无效(不打断录音) ----
@@ -685,6 +703,7 @@ static void test_snapshot_link_up(void) {
 // ---- WiFi/WS 通道(Windows 移植):WS_CONNECTED = 链路通(与 BLE 对等) ----
 static void test_ws_link_up(void) {
     reset();
+    fake_mode_set(APP_MODE_WIFI);           // 链路事件通道门禁:WS 事件仅 WiFi 模式生效
     app_event_t c = { .type = APP_EV_WS_CONNECTED };
     app_state_reduce(&s, &c, now, out, &on);
     assert(s.link_up == true);
@@ -704,6 +723,7 @@ static void test_ws_link_up(void) {
 // ---- WS 断开:停流回 READY + 触发 mDNS 重查 + 通道名保留 ----
 static void test_ws_link_down(void) {
     reset();
+    fake_mode_set(APP_MODE_WIFI);           // 链路事件通道门禁:WS 事件仅 WiFi 模式生效
     s.link_up = true;
     s.link_channel = 1;
     s.state = APP_ST_LISTENING;
@@ -735,6 +755,7 @@ static void test_ws_link_down(void) {
 // ---- USB 有线通道(第三通道):USB_CONNECTED = 链路通(与 BLE/WS 对等) ----
 static void test_usb_link_up(void) {
     reset();
+    fake_mode_set(APP_MODE_USB);            // 链路事件通道门禁:USB 事件仅 USB 模式生效
     app_event_t c = { .type = APP_EV_USB_CONNECTED };
     app_state_reduce(&s, &c, now, out, &on);
     assert(s.link_up == true);
@@ -754,6 +775,7 @@ static void test_usb_link_up(void) {
 // ---- USB 断开:停流回 READY + 通道名保留(BLE/WS 断连同路径) ----
 static void test_usb_link_down(void) {
     reset();
+    fake_mode_set(APP_MODE_USB);            // 链路事件通道门禁:USB 事件仅 USB 模式生效
     s.link_up = true;
     s.link_channel = 2;
     s.state = APP_ST_LISTENING;
@@ -841,6 +863,49 @@ static void test_time_set(void) {
     assert(t && t->u.time_set.epoch == -1);
 }
 
+
+// ---- 链路事件通道门禁(审查 P1):非本模式通道事件不翻转链路状态 ----
+static void test_link_event_gate(void) {
+    // USB 模式(USB 会话中):BLE 连/断只更新图标,不动 link_up、不掐音频流
+    reset();
+    fake_mode_set(APP_MODE_USB);
+    s.link_up = true;                      // USB 会话进行中
+    s.link_channel = 2;
+    app_event_t d = { .type = APP_EV_BLE_DISCONNECTED };
+    app_state_reduce(&s, &d, now, out, &on);
+    assert(s.ble_connected == false);      // 图标如实更新
+    assert(s.link_up == true);             // 链路不被 BLE 事件翻转
+    assert(!has_action(APP_ACT_STREAM_CANCEL));   // 不掐 USB 音频流
+    assert(s.state == APP_ST_READY || s.state == APP_ST_HOME);
+
+    app_event_t c = { .type = APP_EV_BLE_CONNECTED };
+    app_state_reduce(&s, &c, now, out, &on);
+    assert(s.ble_connected == true);
+    assert(s.link_up == true);
+    assert(s.link_channel == 2);           // 通道名保持 USB
+
+    // 模式切换窗口:投递的旧通道断连事件必须放行(状态机收束)
+    fake_mode_set(APP_MODE_BLE);
+    fake_mode_set_switching(true);
+    s.state = APP_ST_LISTENING;
+    s.state_since_ms = now;
+    s.link_up = true;
+    s.link_channel = 2;                    // 切换前仍是 USB 链路
+    app_event_t old = { .type = APP_EV_USB_DISCONNECTED };
+    app_state_reduce(&s, &old, now, out, &on);
+    assert(s.link_up == false);            // 切换收束事件不被门禁挡住
+    assert(has_action(APP_ACT_STREAM_CANCEL));
+    assert(s.state == APP_ST_READY);
+    fake_mode_set_switching(false);
+
+    // 窗口外:非本模式事件仍被挡(防御)
+    fake_mode_set(APP_MODE_BLE);
+    s.link_up = true;
+    app_event_t wd = { .type = APP_EV_WS_DISCONNECTED };
+    app_state_reduce(&s, &wd, now, out, &on);
+    assert(s.link_up == true);
+}
+
 int main(void) {
     test_home_nav();
     test_down_enter_clear();
@@ -880,6 +945,7 @@ int main(void) {
     test_ws_target_found();
     test_time_set();
     test_bounded();
+    test_link_event_gate();
     printf("test_app_state: all assertions passed\n");
     return 0;
 }

@@ -32,11 +32,20 @@ esp_err_t mode_init(void);
 app_mode_t mode_get(void);
 const char *mode_name(app_mode_t m);   // "BLE" / "WiFi"
 
+// 是否处于 mode_switch 切换窗口(仅 app_task 上下文,切换期间置位)。
+// 供链路事件门禁使用:mode_switch 在切换前投递"旧通道断连事件"(app_task
+// 消费时 mode_get() 已是新模式),切换窗口内放行该事件,状态机才能收束。
+bool mode_switching(void);
+
 // 当前通道链路是否已通(BLE:EVENT 已订阅;WiFi:WS 已连接)。
 bool mode_link_up(void);
 
 // 事件行上行(BLE:notify EVENT;WiFi:WS 文本帧)。返回 0 = 已入队/已发。
 int mode_send_event_line(const char *line, size_t len);
+
+// 会话边界帧的可靠上行(voice.start/end):BLE 通道走阻塞入队(满等 ≤timeout_ms,
+// 审查 P2:边界帧丢失 → Mac 端会话状态悬挂);WS/USB 发送本就同步阻塞,无差别。
+int mode_send_event_line_important(const char *line, size_t len, uint32_t timeout_ms);
 
 // 切换模式(仅 app_task 上下文调用):
 //   1) 先投当前通道断连事件(状态机幂等收束:停流/回 READY/审批保持)
