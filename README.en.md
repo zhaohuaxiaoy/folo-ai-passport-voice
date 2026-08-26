@@ -5,9 +5,13 @@
 A voice input solution for the **FoloToy AI Passport** (ESP32-C3): hold the device button to talk — recognized candidates appear **live in a floating window on your Mac/Windows desktop**; release to have the final text **injected into the focused input box automatically**. WeChat-style voice input for the desktop.
 
 ```text
-Hold OK to talk ──► device records ──► BLE / WiFi / USB ──► desktop relay ──► Volcano streaming ASR
-                                                                                    │
-  focused input box ◄── inject final text (once) ◄── release ──► floating window shows candidates ◄─┘
+Hold OK to talk ──► device records ──► desktop relay ──► Volcano streaming ASR
+                        │  over BLE / WiFi / USB
+                        ▼  live partials
+            Floating window shows candidates
+                        │
+                        ▼  release → final
+            Inject into focused input box (once)
 ```
 
 > The repository contains both the **firmware** (ESP-IDF, device side) and the **desktop companion** (`companion/`, macOS/Windows relay), which work together over three channels: BLE / WiFi / USB.
