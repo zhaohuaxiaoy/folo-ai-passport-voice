@@ -226,6 +226,9 @@ class Relay:
     # -- 主流程 --
 
     async def run(self, device_addr=None, console_stdin=True):
+        # 保存运行中事件循环: bleak 回调线程经 call_soon_threadsafe 投递
+        # (审查 P2-1, asyncio.Queue/Event 非线程安全)。
+        self._loop = asyncio.get_running_loop()
         t = self._transport
         if self._on_phase:
             self._on_phase("scanning")
@@ -320,6 +323,12 @@ class Relay:
         print("[relay] 连接已断开", file=sys.stderr)
         if self._on_phase:
             self._on_phase("disconnected")
+        # 审查 P2-1: bleak 断连回调运行在蓝牙线程, asyncio 原语须经
+        # call_soon_threadsafe 回事件循环线程操作(否则与 drain 协程竞态)。
+        self._loop.call_soon_threadsafe(self._handle_disconnect)
+
+    def _handle_disconnect(self):
+        """事件循环线程内的断连收束(经 call_soon_threadsafe 调度)。"""
         self._stop.set()
         self._safe_put(self._audio_q, ("stop", b""))
         self._safe_put(self._event_q, ("stop", b""))
@@ -401,24 +410,30 @@ class Relay:
 
     def _cb(self, kind):
         def handler(data):
-            # bleak 回调线程安全: 投递到事件循环队列, 由 drain 协程处理
-            payload = bytes(data)
-            if kind == "audio":
-                try:
-                    self._audio_q.put_nowait((kind, payload))
-                except asyncio.QueueFull:
-                    # 有界上限:ASR 卡住时丢音频帧(可容忍,会话级掉帧统计兜底)
-                    self._dropped_audio += 1
-                    if self._dropped_audio % 100 == 1:
-                        print(f"[relay] 音频队列满,丢弃 1 帧"
-                              f"(累计 {self._dropped_audio})", file=sys.stderr)
-            else:
-                try:
-                    self._event_q.put_nowait((kind, payload))
-                except asyncio.QueueFull:
-                    print("[relay] 事件队列满,丢弃控制帧(异常)",
-                          file=sys.stderr)
+            # 审查 P2-1: bleak 回调运行在蓝牙线程 —— asyncio.Queue 非线程
+            # 安全, 直接在回调线程 put_nowait 与 drain 协程并发会竞态
+            # (丢项/乱序/异步队列断言)。call_soon_threadsafe 回事件循环
+            # 线程投递, 顺序与线程安全有保证。
+            self._loop.call_soon_threadsafe(self._enqueue, kind, bytes(data))
         return handler
+
+    def _enqueue(self, kind, payload):
+        """事件循环线程内的入队(经 call_soon_threadsafe 调度)。"""
+        if kind == "audio":
+            try:
+                self._audio_q.put_nowait((kind, payload))
+            except asyncio.QueueFull:
+                # 有界上限:ASR 卡住时丢音频帧(可容忍,会话级掉帧统计兜底)
+                self._dropped_audio += 1
+                if self._dropped_audio % 100 == 1:
+                    print(f"[relay] 音频队列满,丢弃 1 帧"
+                          f"(累计 {self._dropped_audio})", file=sys.stderr)
+        else:
+            try:
+                self._event_q.put_nowait((kind, payload))
+            except asyncio.QueueFull:
+                print("[relay] 事件队列满,丢弃控制帧(异常)",
+                      file=sys.stderr)
 
     async def _drain(self):
         # 音频(ASR 慢路径)与控制事件(快路径)各自独立消费:

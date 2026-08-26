@@ -716,7 +716,10 @@ async def test_disconnect_queue_full():
     for _ in range(EVENT_Q_MAX):
         relay._event_q.put_nowait(("event", b'{"event":"x"}\n'))
     relay._stop.set()
+    # P2-1: 断连收束经 call_soon_threadsafe 回事件循环,测试须注入 loop
+    relay._loop = asyncio.get_running_loop()
     relay._on_disconnected()                 # 满队列写 stop sentinel:不得抛
+    await asyncio.sleep(0)                   # 让收束协程(调度回调)执行完毕
     check("音频队列未越界", relay._audio_q.qsize(), AUDIO_Q_MAX)
     check("事件队列未越界", relay._event_q.qsize(), EVENT_Q_MAX)
 
