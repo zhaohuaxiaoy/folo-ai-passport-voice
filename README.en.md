@@ -126,12 +126,6 @@ companion/.venv/bin/python -m pytest companion/tests/ -q -o asyncio_mode=auto
 
 The full checklist for when hardware arrives is in [`docs/ON_DEVICE.md`](docs/ON_DEVICE.md). Current status: **Build PASS, host tests PASS, device tests NOT RUN (awaiting hardware)**. Key items: real floating-window sessions (hold PTT → live candidates → single injection on release), Windows focus behavior, no dropped words over ~15 s of continuous speech (if drops occur, raise `AUDIO_Q_MAX` from 20 to 30–40 in `companion/relay.py`), BLE throughput/drop rate, USB unplug recovery, battery readings.
 
-## Security
-
-- Volcano API keys / WiFi passwords are **never committed**: `companion/config.local.json` is gitignored; `VOLCANO_API_KEY` env var is supported
-- The device `wifi set` command **never echoes the password**; credentials live only in device NVS
-- Logs never contain keys; session/diagnostic payloads carry no credentials
-
 ## License
 
 MIT © 2026 FoloToy, see [LICENSE](LICENSE).

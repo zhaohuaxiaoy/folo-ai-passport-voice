@@ -126,12 +126,6 @@ companion/.venv/bin/python -m pytest companion/tests/ -q -o asyncio_mode=auto
 
 设备到货后的完整验收清单见 [`docs/ON_DEVICE.md`](docs/ON_DEVICE.md)。当前状态：**Build PASS、Host tests PASS、Device tests NOT RUN（待真机）**。重点验证项：悬浮窗真实会话（长按 PTT → 实时候选 → 松手注入一次）、Windows 焦点不抢占、连说十几秒无丢字（如丢字可调 `companion/relay.py` 的 `AUDIO_Q_MAX` 20→30-40）、BLE 吞吐/掉帧率、USB 拔线恢复、电池读数。
 
-## 安全
-
-- 火山 API Key / WiFi 密码**绝不入库**：`companion/config.local.json` 已被 `.gitignore` 忽略，可用环境变量 `VOLCANO_API_KEY` 替代
-- 设备侧 `wifi set` 命令**不回显密码**，密码仅存于设备 NVS
-- 日志不打印密钥；回传的会话/诊断数据不含凭据
-
 ## 许可
 
 MIT © 2026 FoloToy，见 [LICENSE](LICENSE)。
