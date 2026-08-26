@@ -225,7 +225,7 @@ class Relay:
 
     # -- 主流程 --
 
-    async def run(self, device_addr=None):
+    async def run(self, device_addr=None, console_stdin=True):
         t = self._transport
         if self._on_phase:
             self._on_phase("scanning")
@@ -270,8 +270,10 @@ class Relay:
         # 校时:连接建立后立即同步一次,此后每小时一次(_time_loop 内部周期)
         self._time_task = asyncio.create_task(self._time_loop())
         try:
-            # USB 通道: stdin `!命令` 交互与数据排空并行(控制台替代)
-            if self._syscmd is not None:
+            # USB 通道: stdin `!命令` 交互与数据排空并行(控制台替代)。
+            # console_stdin=False(GUI 场景): 不读 stdin —— 退出时 GUI 的
+            # _shutdown 等线程 join, 阻塞 input 读会让退出挂死(审查 P1-4)。
+            if self._syscmd is not None and console_stdin:
                 await asyncio.gather(self._drain(), self._stdin_loop())
             else:
                 await self._drain()
@@ -335,21 +337,38 @@ class Relay:
         "  !help                 本帮助")
 
     async def _stdin_loop(self):
-        """读 stdin 逐行转 SYS 命令(经 transport.send_syscmd); EOF 收束。"""
+        """读 stdin 逐行转 SYS 命令(经 transport.send_syscmd); EOF 收束。
+
+        停止竞争(审查 P1-4): 旧实现 stop 置位后仍无限阻塞在 input 读上
+        (CLI Ctrl+C 或 GUI 退出线程 join 挂死)。现改为 FIRST_COMPLETED
+        竞争: stop 事件到达即收束, 阻塞中的 input 线程放弃(守护线程,
+        进程退出自然回收)。
+        """
         print("[usb] USB 模式控制台: !<命令> 发送到设备(!help 查看)",
               file=sys.stderr)
-        while not self._stop.is_set():
-            try:
-                raw = await asyncio.to_thread(self._stdin_input, "!> ")
-            except (EOFError, OSError):
-                break
-            line = raw.strip()
-            if not line:
-                continue
-            try:
-                await self._handle_stdin_line(line)
-            except Exception as e:
-                print(f"[usb] !命令失败: {e}", file=sys.stderr)
+        stop_waiter = asyncio.create_task(self._stop.wait())
+        try:
+            while not self._stop.is_set():
+                read_task = asyncio.create_task(
+                    asyncio.to_thread(self._stdin_input, "!> "))
+                done, pending = await asyncio.wait(
+                    {read_task, stop_waiter}, return_when=asyncio.FIRST_COMPLETED)
+                if stop_waiter in done:
+                    read_task.cancel()      # 阻塞中的 input 读放弃(守护线程)
+                    return
+                try:
+                    raw = read_task.result()
+                except (EOFError, OSError):
+                    return                  # stdin EOF: 正常收束
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    await self._handle_stdin_line(line)
+                except Exception as e:
+                    print(f"[usb] !命令失败: {e}", file=sys.stderr)
+        finally:
+            stop_waiter.cancel()
 
     async def _handle_stdin_line(self, line):
         """单行 stdin 处理(纯逻辑, 独立可测; stdin 循环逐行调用)。"""

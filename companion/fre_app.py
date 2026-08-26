@@ -445,7 +445,8 @@ class FREApp:
             self.syscmd_available = getattr(relay, "_syscmd", None) is not None
             # BLE 直接连已发现地址; WiFi/USB 由 relay 内部扫描/等待
             self.relay_task = loop.create_task(
-                relay.run(self.device_addr if self.channel == "ble" else None))
+                relay.run(self.device_addr if self.channel == "ble" else None,
+                          console_stdin=False))   # GUI 无 stdin; 退出防阻塞(审查 P1-4)
             loop.run_until_complete(self.relay_task)
         except asyncio.CancelledError:
             pass   # 向导关闭/重新设置时的正常收束

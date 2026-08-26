@@ -184,3 +184,26 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+async def test_stdin_loop_stop_while_blocked():
+    """审查 P1-4: stop 置位时阻塞中的 stdin 读不得无限等待 —— _stdin_loop
+    以 FIRST_COMPLETED 竞争立即收束(GUI 退出线程 join 不再挂死)。"""
+    from threading import Event as TEvent
+    gate = TEvent()
+
+    def blocked_input(prompt):
+        gate.wait(10)          # 模拟 stdin 阻塞读(永不自行返回)
+
+    t = _build_transport({"channel": "usb"})
+    relay = Relay(t,
+                  asr_factory=make_fake_asr_factory([], {}),
+                  inject_fn=FakeInjector(), timeout=5, do_approval=False,
+                  stdin_input=blocked_input)
+    loop_task = asyncio.create_task(relay._stdin_loop())
+    await asyncio.sleep(0.3)             # input 线程已进入阻塞
+    relay._stop.set()                    # 断开/退出置位
+    await asyncio.wait_for(loop_task, 1.0)   # 1s 内必须收束(旧实现挂死)
+    check("stop 竞争下 _stdin_loop 及时收束", loop_task.done(), True)
+    gate.set()                           # 释放阻塞线程(测试进程退出不等 10s)
+    await asyncio.sleep(0.05)
