@@ -26,7 +26,7 @@ static bool s_discard_line = false;    // 超长行:丢弃到下一个 \n,不再
 static void handle_line(char *line, size_t len) {
     app_event_t ev;
     if (app_protocol_parse(line, len, &ev)) {
-        app_event_post(&ev);
+        app_protocol_dispatch_event(&ev);   // 审批重要投递,其余零阻塞
     } else {
         ESP_LOGW(TAG, "协议解析失败,丢弃: %.*s", (int)(len > 80 ? 80 : len), line);
     }

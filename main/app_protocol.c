@@ -159,6 +159,15 @@ bool app_protocol_parse(const char *json, size_t len, app_event_t *ev) {
     return ok;
 }
 
+void app_protocol_dispatch_event(const app_event_t *ev)
+{
+    if (ev->type == APP_EV_APPROVAL_REQUEST) {
+        app_event_post_important(ev, 100);   // 安全关键:满则等 100ms,不丢
+    } else {
+        app_event_post(ev);                  // 常规事件:零阻塞,满则丢(设计语义)
+    }
+}
+
 // ---- 序列化 ----
 static size_t serialize(cJSON *root, char *buf, size_t cap) {
     if (!root || !buf || cap < 2) return 0;   // cap<2 时 (cap-2) 下溢成超大 memcpy

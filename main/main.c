@@ -52,6 +52,15 @@ static void send_event_line(char *buf, size_t len)
     }
 }
 
+// 会话边界帧(voice.start/end):BLE 阻塞入队 ≤200ms 不丢,防 Mac 端会话状态悬挂
+static void send_event_line_important(char *buf, size_t len)
+{
+    if (len == 0) return;
+    if (mode_send_event_line_important(buf, len, 200) != 0) {
+        ESP_LOGW(TAG, "EVENT 行发送失败(重要),丢弃: %.*s", (int)(len > 64 ? 64 : len), buf);
+    }
+}
+
 static void run_actions(const app_action_t *acts, uint8_t n)
 {
     for (uint8_t i = 0; i < n; i++) {
@@ -67,7 +76,7 @@ static void run_actions(const app_action_t *acts, uint8_t n)
             break;                       // 渲染/背光由主循环末尾统一做(快照驱动)
         case APP_ACT_SEND_VOICE_START:
             len = app_protocol_voice_start(buf, sizeof(buf));
-            send_event_line(buf, len);
+            send_event_line_important(buf, len);   // 会话边界帧:不丢(审查 P2)
             break;
         case APP_ACT_SEND_VOICE_END:
             // 帧序保证:等残留音频块先出环,再发 voice.end;随后补发 status 帧(会话丢帧对账)。
@@ -76,9 +85,9 @@ static void run_actions(const app_action_t *acts, uint8_t n)
             audio_streamer_drain(500);
             s_last_drop_count = audio_streamer_take_drops();
             len = app_protocol_voice_end(buf, sizeof(buf));
-            send_event_line(buf, len);
+            send_event_line_important(buf, len);   // 会话边界帧:不丢(审查 P2)
             len = app_protocol_device_status(buf, sizeof(buf), s_last_drop_count);
-            send_event_line(buf, len);
+            send_event_line(buf, len);             // 对账帧:尽力而为即可
             break;
         case APP_ACT_SEND_KEY_ACTION:
             len = app_protocol_key_action(buf, sizeof(buf),
@@ -149,7 +158,10 @@ static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user)
     default:              return;
     }
     e.u.key.btn = (uint8_t)btn;
-    app_event_post(&e);
+    // 重要投递(审查 P2-1):PRES/RELEASE/CLICK/DOUBLE 是 PTT 状态机驱动事件,
+    // 按键风暴期队列满丢弃会卡死录音/发送。队列不满时零阻塞(唯一开销是满时
+    // 等 ≤100ms);按键回调在 button 任务,可容忍。
+    app_event_post_important(&e, 100);
 }
 
 // ---- 应用任务:事件 → 归约器 → 动作 → 渲染;100ms 心跳驱动超时/秒表 ----

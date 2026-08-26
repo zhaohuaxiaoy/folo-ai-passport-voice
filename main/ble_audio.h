@@ -98,6 +98,11 @@ int ble_audio_notify_audio(const uint8_t *frame, size_t len);
 // 串行发送(≤MTU-3 单包直发,否则同一分片流控)。调用方缓冲可立即复用。
 // 无连接/未订阅/队列满时返回非 0(内部累加 event 掉帧计数,console st 可查)。
 int ble_audio_notify_event(const char *line, size_t len);
+// 阻塞入队版本:队列满等 ≤timeout_ms 而非丢弃(voice.start/end 会话边界帧不丢,
+// 审查 P2:事件队列 4 深在按键风暴期可丢 voice.end → Mac 端会话状态悬挂)。
+// 队列不满时与普通版同开销(零等待);超时仍计数丢弃(队列持续拥塞 = 发送慢,
+// 会话可对账,voice.end 有 status 帧兜底)。
+int ble_audio_notify_event_blocking(const char *line, size_t len, uint32_t timeout_ms);
 
 // ---- 状态查询(console `st` / 主循环) ----
 bool ble_audio_connected(void);          // BLE 连接已建立

@@ -60,6 +60,15 @@ int mode_send_event_line(const char *line, size_t len)
     return ble_audio_notify_event(line, len);
 }
 
+int mode_send_event_line_important(const char *line, size_t len, uint32_t timeout_ms)
+{
+    if (s_mode == APP_MODE_BLE) {
+        return ble_audio_notify_event_blocking(line, len, timeout_ms);
+    }
+    // WS 同步发送、USB 写驱动阻塞式:本就等待完成,无队列可满,语义已"重要"。
+    return mode_send_event_line(line, len);
+}
+
 // ---- 音频发送函数(按模式注册给 audio_streamer)----
 static int send_audio_ble(const uint8_t *frame, size_t len)
 {

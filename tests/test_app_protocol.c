@@ -121,6 +121,20 @@ static void test_parse_rejects(void) {
     assert(!app_protocol_parse("", 0, &ev));                                 // 空
 }
 
+// dispatch:APPROVAL_REQUEST 与常规事件都经 app_protocol_dispatch_event 投递
+// (fake 桩记录到 g_events;宿主无队列满语义,important/normal 等价)
+static void test_dispatch(void) {
+    extern app_event_t g_events[];
+    extern int g_event_count;
+    g_event_count = 0;
+    app_event_t ev = { .type = APP_EV_APPROVAL_REQUEST };
+    app_protocol_dispatch_event(&ev);
+    assert(g_event_count == 1 && g_events[0].type == APP_EV_APPROVAL_REQUEST);
+    ev.type = APP_EV_AGENT_STATUS;
+    app_protocol_dispatch_event(&ev);
+    assert(g_event_count == 2 && g_events[1].type == APP_EV_AGENT_STATUS);
+}
+
 // 深层嵌套拒绝:解析在 NimBLE host task(4KB 栈)上下文,cJSON 递归无深度限制,
 // 预检拦截(见 app_protocol.c json_depth_ok)——否则 2KB 内 [[[[...]]]] 可爆栈。
 static void test_parse_deep_nesting_rejected(void) {
@@ -269,6 +283,7 @@ int main(void) {
     test_parse_rejects();
     test_parse_deep_nesting_rejected();
     test_parse_long_line_truncation();
+    test_dispatch();
     test_serialize();
     test_serialize_small_cap();
     printf("test_app_protocol: all assertions passed\n");

@@ -228,7 +228,7 @@ static int ctrl_write(uint16_t conn_handle, struct ble_gatt_access_ctxt *ctxt) {
     s_ctrl_buf[len] = '\0';
     app_event_t ev;
     if (app_protocol_parse(s_ctrl_buf, len, &ev)) {
-        app_event_post(&ev);   // 零阻塞
+        app_protocol_dispatch_event(&ev);   // 审批重要投递,其余零阻塞
         return 0;
     }
     ESP_LOGW(TAG, "CTRL 行拒绝: %.*s", (int)(len > 80 ? 80 : len), s_ctrl_buf);
@@ -526,7 +526,8 @@ static void event_worker_task(void *param) {
     }
 }
 
-int ble_audio_notify_event(const char *line, size_t len) {
+// 事件入队公共实现:timeout_ms=0 即非阻塞(普通路径);>0 为会话边界帧阻塞等待。
+static int notify_event_impl(const char *line, size_t len, uint32_t timeout_ms) {
     if (!line || len == 0 || len > EVENT_LINE_MAX) return -1;
     if (s_event_q == NULL || s_conn == 0xFFFF || !s_event_subscribed) {
         drop_count_inc(&s_drop_event);
@@ -536,13 +537,21 @@ int ble_audio_notify_event(const char *line, size_t len) {
     if (len >= sizeof(item)) len = sizeof(item) - 1;   // 协议实际行 ≤511,此处仅防越界
     memcpy(item, line, len);
     item[len] = '\0';
-    // 非阻塞入队:队列满 = 事件通道拥塞(worker 单片 ~150ms 上限),丢帧计数;
-    // status 帧带丢帧计数,链路对账可见,不掩盖。
-    if (xQueueSend(s_event_q, item, 0) != pdTRUE) {
+    // 队列满 = 事件通道拥塞(worker 单片 ~150ms 上限):普通路径丢帧计数,
+    // status 帧带丢帧计数,链路对账可见;阻塞路径等到 ≤timeout_ms(见 .h)。
+    if (xQueueSend(s_event_q, item, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
         drop_count_inc(&s_drop_event);
         return -1;
     }
     return 0;
+}
+
+int ble_audio_notify_event(const char *line, size_t len) {
+    return notify_event_impl(line, len, 0);
+}
+
+int ble_audio_notify_event_blocking(const char *line, size_t len, uint32_t timeout_ms) {
+    return notify_event_impl(line, len, timeout_ms);
 }
 
 bool ble_audio_connected(void) { return s_conn != 0xFFFF; }

@@ -264,7 +264,7 @@ static void dispatch_frame(uint8_t type, const uint8_t *payload, size_t len)
         s[len] = '\0';   // 尾 NUL:缓冲 [2048+1] 尾字节专位(feed 只写 0..2047)
         app_event_t ev;
         if (app_protocol_parse(s, len, &ev)) {
-            app_event_post(&ev);
+            app_protocol_dispatch_event(&ev);   // 审批重要投递,其余零阻塞
         } else {
             ESP_LOGW(TAG, "CTRL 行拒绝: %.*s", (int)(len > 80 ? 80 : len), s);
         }
