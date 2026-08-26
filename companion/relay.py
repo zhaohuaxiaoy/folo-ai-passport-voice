@@ -734,6 +734,15 @@ class _VoiceSession:
         self._connected.set()
         self._results_task = asyncio.create_task(self._results_loop())
 
+    def _emit_candidate(self, text, is_final):
+        """投递候选字给 GUI 消费者(on_candidate); 异常只记日志,
+        不阻断注入与收尾。空文本 + final 表示"流定稿为空"(超时收口)。"""
+        if self.relay._on_candidate is not None:
+            try:
+                self.relay._on_candidate(text, is_final)
+            except Exception as e:
+                print(f"[voice] on_candidate 回调异常: {e}", file=sys.stderr)
+
     async def _results_loop(self):
         """消费 ASR 结果: 中间结果仅预览(不注入), 定稿收尾并注入一次。
 
@@ -749,11 +758,7 @@ class _VoiceSession:
                 if text:
                     if self.relay._on_candidate is not None:
                         # GUI 悬浮窗消费者: 异常不吞 final 注入(只记日志)
-                        try:
-                            self.relay._on_candidate(text, is_final)
-                        except Exception as e:
-                            print(f"[voice] on_candidate 回调异常: {e}",
-                                  file=sys.stderr)
+                        self._emit_candidate(text, is_final)
                     else:
                         # CLI 无悬浮窗: 照旧下行设备屏幕预览(行为不变)
                         await self.relay._downlink_transcript(text, is_final)
@@ -844,6 +849,9 @@ class _VoiceSession:
             except asyncio.TimeoutError:
                 print(f"[voice] {self.relay.timeout:.0f}s 内未收到最终结果, "
                       "结束会话(无定稿注入)", file=sys.stderr)
+                # 收口 GUI 悬浮窗: 空文本 final 表示"流定稿为空"——
+                # 否则超时无 final 时窗口会残留到断连(P2-A 边角)
+                self._emit_candidate("", True)
         except Exception as e:
             print(f"[voice] 收尾异常: {e}", file=sys.stderr)
         await self._close_up()

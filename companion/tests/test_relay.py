@@ -906,9 +906,12 @@ async def test_downlink_write_failure():
 async def test_final_timeout():
     t = FakeTransport()
     holder = {}
+    cands = []
     relay = Relay(t,
                   asr_factory=make_fake_asr_factory([("中间", False)], holder),
-                  inject_fn=FakeInjector(), timeout=0.2)
+                  inject_fn=FakeInjector(), timeout=0.2,
+                  on_candidate=lambda text, is_final:
+                      cands.append((text, is_final)))
     task = asyncio.create_task(relay.run())
     await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
 
@@ -922,6 +925,7 @@ async def test_final_timeout():
     await wait_session_done(relay)   # 0.2s 超时后收尾完成
     check("超时 final_text 为空", relay.session_stats[0]["final_text"], "")
     check("超时 ASR 已关闭", holder["asr"].closed, True)
+    check("超时收口悬浮窗(空文本 final)", cands[-1], ("", True))
 
     t.disconnect_cb()
     await wait_until(task.done, what="断开退出")
