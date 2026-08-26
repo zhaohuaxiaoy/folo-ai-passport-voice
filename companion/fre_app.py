@@ -410,6 +410,7 @@ class FREApp:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         self._loop = loop
+        mdns = None
         try:
             from relay import Relay
             from relay import _build_transport
@@ -425,6 +426,17 @@ class FREApp:
                              else _build_transport(self.cfg))
                 inject_fn = _default_inject_fn(self.cfg)
                 key_action_fn = _default_key_action_fn(self.cfg)
+                # WiFi 通道: 设备经 mDNS 发现本机 WS 服务(审查 P1-2: GUI 此前
+                # 从不发布 mDNS, 设备查不到 WS 地址 → 连接必然超时)。须在事件
+                # 循环外调用(zeroconf 同步 API 自阻塞); 失败只提示不阻断
+                # (设备侧有 static ws 配置兜底)。
+                if self.channel == "wifi":
+                    try:
+                        from mdns_pub import publish_mdns
+                        mdns = publish_mdns(int(self.cfg.get("ws_port", 8765)))
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[fre] mDNS 发布失败(设备需 static ws 配置): {e}",
+                              file=sys.stderr)
 
             relay = Relay(transport,
                           inject_fn=inject_fn, key_action_fn=key_action_fn,
@@ -441,6 +453,11 @@ class FREApp:
             self.phase_q.put(("error", str(e)))
             self.phase_q.put(("phase", "failed"))
         finally:
+            if mdns is not None:
+                try:
+                    mdns[0].close()   # Zeroconf 收束: mDNS 服务下线
+                except Exception:  # noqa: BLE001
+                    pass
             self.phase_q.put(("relay_done", None))
 
     def poll(self):
