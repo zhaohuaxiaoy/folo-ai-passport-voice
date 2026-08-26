@@ -254,7 +254,7 @@ static void app_task(void *arg)
                 if (snap.screen_on || s_ui_screen_on) {
                     snap.battery_available = (s_batt_soc >= 0);
                     snap.battery_soc = (s_batt_soc > 0) ? (uint8_t)s_batt_soc : 0;
-                    app_ui_render(&snap, audio_streamer_peak());
+                    app_ui_render(&snap);
                     s_ui_screen_on = snap.screen_on;
                 }
                 bsp_lvgl_unlock();

@@ -17,9 +17,8 @@ extern "C" {
 esp_err_t app_ui_init(void);
 
 // 按快照刷新 UI。同样须持锁调用(唯一写者:app_task)。
-// mic_peak 为麦克风峰值(0..32768),LISTENING 页音量条用。
 // 息屏切换由 snapshot.screen_on 驱动(背光 0/100)。
-void app_ui_render(const app_ui_snapshot_t *snap, uint16_t mic_peak);
+void app_ui_render(const app_ui_snapshot_t *snap);
 
 #ifdef __cplusplus
 }

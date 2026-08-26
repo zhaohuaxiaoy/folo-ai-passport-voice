@@ -31,7 +31,6 @@
 // ---- 页内部件索引(与 page 切换共用) ----
 typedef struct {
     lv_obj_t *root;                       // 本页容器(显隐切换)
-    lv_obj_t *rec_bar_fill;               // LISTENING:音量条填充
     lv_obj_t *rec_elapsed;                // LISTENING:计时
     lv_obj_t *tr_message;                 // TRANSCRIBING:消息
     lv_obj_t *run_state;                  // AGENT_RUNNING:状态名
@@ -200,12 +199,15 @@ static void build_listening(void)
     lv_obj_set_size(p->root, W, H);
     lv_obj_set_pos(p->root, 0, 0);
 
-    block(p->root, 112, CONTENT_Y + 16, 16, 16, UI_RED);       // REC 圆点
-    label(p->root, "REC", &lv_font_montserrat_20, UI_INK, 0, CONTENT_Y + 40, W);
-
-    // 音量条:底框 + 填充(宽度随峰值)
-    block(p->root, 20, 172, 200, 18, UI_INK);
-    p->rec_bar_fill = block(p->root, 22, 174, 0, 14, UI_GRASS);
+    // 麦克风图标(块状像素画, 居中; 替代 REC 红点/文字与音量条 —— 录音中
+    // 只显示麦克风, 不做音量可视化)
+    block(p->root, 112, 58, 16, 26, UI_RED);    // 拾音头(胶囊)
+    block(p->root, 108, 68, 24, 6, UI_RED);     // 拾音头顶部弧
+    block(p->root, 108, 78, 24, 6, UI_RED);     // 拾音头底部弧
+    block(p->root, 116, 84, 8, 8, UI_RED);      // 拾音头底口
+    block(p->root, 116, 92, 8, 12, UI_RED);     // 立杆
+    block(p->root, 104, 104, 32, 6, UI_RED);    // 底座上沿
+    block(p->root, 112, 110, 16, 6, UI_RED);    // 底座
 
     p->rec_elapsed = label(p->root, "0s", &lv_font_montserrat_20, UI_INK, 0, 200, W);
     hint_label(p->root, "RELEASE OK: SEND");
@@ -366,7 +368,7 @@ esp_err_t app_ui_init(void)
 }
 
 // ---- 渲染 ----
-void app_ui_render(const app_ui_snapshot_t *snap, uint16_t mic_peak)
+void app_ui_render(const app_ui_snapshot_t *snap)
 {
     // 息屏/唤醒:背光切换(内容照常更新,唤醒后即为最新)
     if (snap->screen_on != s_last_screen_on) {
@@ -411,18 +413,11 @@ void app_ui_render(const app_ui_snapshot_t *snap, uint16_t mic_peak)
     // ---- 页内容 ----
     show_page(snap->state);
     switch (snap->state) {
-    case APP_ST_LISTENING: {
-        uint16_t peak = mic_peak > 32768 ? 32768 : mic_peak;
-        int w = (int)((uint32_t)peak * 196 / 32768);
-        lv_obj_set_width(s_pages[APP_ST_LISTENING].rec_bar_fill, w);
-        // 音量高时条变橙/红
-        uint32_t c = w > 150 ? UI_RED : (w > 70 ? UI_ORANGE : UI_GRASS);
-        lv_obj_set_style_bg_color(s_pages[APP_ST_LISTENING].rec_bar_fill,
-                                  lv_color_hex(c), 0);
+    case APP_ST_LISTENING:
+        // 录音中只显示麦克风图标(静态), 无音量可视化; 仅计时实时刷新
         label_set_fmt_if_changed(s_pages[APP_ST_LISTENING].rec_elapsed, "%ds",
                                  snap->elapsed_ms / 1000);
         break;
-    }
     case APP_ST_TRANSCRIBING:
         set_agent_message(s_pages[APP_ST_TRANSCRIBING].tr_message,
                           snap->agent_message, !snap->transcript_final);
