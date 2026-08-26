@@ -185,10 +185,12 @@ esp_err_t audio_streamer_init(void) {
 
 void audio_streamer_start(void) {
     if (!s_ready) return;   // init 失败:启动被拒(空转,不访问 NULL ring/sem)
-    // 上一个取消若排空超时,丢帧模式残留:先等 worker 丢完环内残留(环空)再恢复。
-    // s_cancel 的清除点:①cancel 排空成功时②此处兜底(超时残留场景)。
-    // 残留不排空绝不发送(防流入下一次会话)。
-    if (s_cancel) {
+    // 残留门禁(审查 P1):任何残留帧绝不流入新会话。
+    // 残留来源:①cancel 排空超时的丢帧模式残留(s_cancel 保持)②正常 stop 后环内
+    // 未消费残留(stop 只停采集不排空,环非空但 s_cancel 已复位)。两种都先置
+    // 丢帧模式,等 worker 丢完环内残留(环空)再恢复。
+    if (s_cancel || xRingbufferGetCurFreeSize(s_ring) != RING_BYTES) {
+        s_cancel = true;   // 统一走丢帧模式:worker 取块只归还不发送,直至环空
         // 等环空(残留/在途被 worker 归还时 give 唤醒;环已空则直过)。
         // 超时 → 拒绝启动,丢帧模式保持——旧帧绝不流入新会话。
         bool drained = wait_ring_empty(CANCEL_DRAIN_TIMEOUT_MS);
@@ -196,7 +198,7 @@ void audio_streamer_start(void) {
             // 残留未排空(notify 在途 >200ms / worker 卡死等系统级异常):拒绝启动,
             // 不置 s_active,丢帧模式保持——旧帧绝不流入新会话;下次 start 重试。
             // 若 notify 卡死本也无音频可发,拒绝比泄漏正确。
-            ESP_LOGE(TAG, "启动被拒:上一次取消残留未排空(异常)");
+            ESP_LOGE(TAG, "启动被拒:上一次会话残留未排空(异常)");
             return;
         }
         s_cancel = false;

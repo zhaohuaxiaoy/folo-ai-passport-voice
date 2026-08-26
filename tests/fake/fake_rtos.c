@@ -5,6 +5,7 @@
 //   - g_fake_audio_fail: bsp_audio_read 报错(测 AUDIO_ERROR 事件)
 //   - g_fake_ring_fail / g_fake_sem_fail: init 失败注入(测 API 空转保护)
 //   - g_events[]: app_event_post 投递记录
+#include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +23,7 @@
 
 /* init 失败注入钩子(定义于下方"外围替身与可控钩子"节,stub 引用前置声明) */
 extern int g_fake_ring_fail;
+extern int g_fake_ring_residue;
 extern int g_fake_sem_fail;
 extern int g_fake_task_fail_at;
 extern int g_sem_live;
@@ -121,6 +123,15 @@ RingbufHandle_t xRingbufferCreateStatic(size_t xBufferSize, RingbufferType_t xBu
     FakeRing *r = calloc(1, sizeof(*r));
     r->storage = pucRingbufferStorage;
     r->size    = xBufferSize;
+    if (g_fake_ring_residue > 0) {
+        // 残留注入钩子:模拟"上一次会话 stop 后环内未消费字节"(stop 只停采集
+        // 不排空,s_cancel=false)。worker 取到后按 start 的丢帧模式归还不发送。
+        size_t n = (size_t)g_fake_ring_residue;
+        if (n > r->size - 1) n = r->size - 1;
+        memset(r->storage, 0xAA, n);   // 任意字节:丢弃路径不读内容
+        r->used = n;
+        r->tail = n;
+    }
     pthread_mutex_init(&r->m, NULL);
     return r;
 }
@@ -248,6 +259,7 @@ static unsigned g_audio_seq = 0;
 // xTaskCreate 第 N 次调用失败(测 init 部分失败后公开 API 空转保护:
 // start/cancel/drain 不访问 NULL;复核 R1 的失败清理/幂等) ---
 int g_fake_ring_fail = 0;    // 非 0 → 环创建失败
+int g_fake_ring_residue = 0; // 非 0 → 环创建时预置残留字节(stop 残留注入)
 int g_fake_sem_fail = 0;     // 非 0 → 信号量创建失败
 int g_fake_task_fail_at = 0; // N>0 → 第 N 次 xTaskCreate 失败(0 = 从不)
 int g_sem_live = 0;          // 存活信号量计数(断言 init 失败路径零泄漏)
@@ -268,15 +280,26 @@ void app_event_post(const app_event_t *ev) {
     if (g_event_count < FAKE_EVENT_CAP) g_events[g_event_count++] = *ev;
 }
 
+// --- app_event_post_important:宿主无队列满语义,与普通投递等价(记录供断言)。
+esp_err_t app_event_post_important(const app_event_t *ev, uint32_t timeout_ms) {
+    (void)timeout_ms;
+    app_event_post(ev);
+    return ESP_OK;
+}
+
 // --- link_send_audio:音频帧发送桩(通道抽象后改名,语义同旧 ble_audio_notify_audio)。
 // 可配置返回码与阻塞(模拟在途发送被流控占用);由测试经 audio_streamer_set_sender 注册。
 int g_notify_count = 0;     // 成功到达发送层的帧数(cancel 丢弃的不算)
 int g_notify_rc = 0;        // 返回码(非 0 走丢帧计数路径)
 int g_notify_block_ms = 0;  // 阻塞毫秒(模拟在途发送被流控占用)
 
+int g_notify_min_len = INT_MAX;   // 发送帧长范围:非 0 发送后 min/max 相等
+int g_notify_max_len = 0;          // ⇔ 全部帧为完整块(无残留残片泄漏)
 int link_send_audio(const uint8_t *frame, size_t len) {
-    (void)frame; (void)len;
+    (void)frame;
     g_notify_count++;   // 调用即计入(发出/在途);阻塞只是模拟在途占用
+    if ((int)len < g_notify_min_len) g_notify_min_len = (int)len;
+    if ((int)len > g_notify_max_len) g_notify_max_len = (int)len;
     if (g_notify_block_ms > 0) usleep((useconds_t)(g_notify_block_ms * 1000));
     return g_notify_rc;
 }
@@ -287,6 +310,8 @@ void fake_reset(void) {
     g_notify_rc = 0;
     g_notify_block_ms = 0;
     g_notify_count = 0;
+    g_notify_min_len = INT_MAX;
+    g_notify_max_len = 0;
     g_event_count = 0;
     s_ticks_ms = 0;
     memset(g_events, 0, sizeof(g_events));

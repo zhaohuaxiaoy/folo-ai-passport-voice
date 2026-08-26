@@ -19,8 +19,11 @@
 extern int g_notify_count;       // 到达发送层的帧数(cancel 丢弃的不计)
 extern int g_notify_rc;          // 发送桩返回码(非 0 → 丢帧计数路径)
 extern int g_notify_block_ms;    // 发送桩阻塞毫秒(模拟在途)
+extern int g_notify_min_len;     // 发送桩帧长范围(min/max 相等 ⇔ 无残片泄漏)
+extern int g_notify_max_len;
 extern int g_fake_audio_fail;    // 非 0 → bsp_audio_read 报错
 extern int g_fake_ring_fail;     // 非 0 → xRingbufferCreateStatic 失败(init 失败注入)
+extern int g_fake_ring_residue;  // 非 0 → 环创建时预置残留字节(stop 残留注入)
 extern int g_fake_sem_fail;      // 非 0 → xSemaphoreCreateBinary 失败(init 失败注入)
 extern int g_fake_task_fail_at;  // N>0 → 第 N 次 xTaskCreate 失败(1=audio, 2=ble 回滚)
 extern int g_sem_live;           // 存活信号量计数(断言 init 失败路径零泄漏)
@@ -136,7 +139,24 @@ static void test_start_rejected_until_drained(void) {
     audio_streamer_cancel();              // 收尾:排空在途尾帧(下个用例零残留)
 }
 
-// 5) 丢帧对账:发送失败计数;取消丢弃的帧不计数
+// 5) stop 后残留(s_cancel=false、环非空)不得流入新会话:start 检测环非空自动置
+//    丢帧模式排空,残留零发送(审查 P1:stop 只停采集不排空,残留泄漏路径)
+static void test_start_drains_stop_residue(void) {
+    fake_reset();
+    g_fake_ring_residue = 64;         // 模拟上一会话 stop 后环内未消费残留
+    assert(audio_streamer_init() == ESP_OK);   // 首次成功 init(环预置残留)
+    audio_streamer_set_sender(link_send_audio);
+    audio_streamer_start();           // 环非空 → 自动排空再启动(不拒绝)
+    assert(audio_streamer_active());
+    usleep(100 * 1000);
+    assert(g_notify_count >= 1);      // 新会话正常
+    // 残留若被发出会以 64B 残片帧到达发送层 → min<max;全为完整块 ⇔ 零泄漏
+    assert(g_notify_min_len == g_notify_max_len);
+    audio_streamer_stop();
+    audio_streamer_cancel();
+}
+
+// 6) 丢帧对账:发送失败计数;取消丢弃的帧不计数
 static void test_drop_accounting(void) {
     fake_reset();
     ensure_init();
@@ -269,6 +289,7 @@ int main(void) {
     test_cancel_idempotent();
     test_cancel_timeout_keeps_dropping();
     test_start_rejected_until_drained();
+    test_start_drains_stop_residue();
     test_drop_accounting();
     test_audio_error_event();
     printf("test_audio_streamer: all assertions passed\n");
