@@ -63,10 +63,11 @@ def _pick_family(available, candidates):
 def _anchor(sw, sh, w, h):
     """屏幕尺寸 + 窗口尺寸 → 底部居中坐标 (x, y)。
 
-    窗口底边落在屏幕 80% 高度线: y = int(sh * 0.8) - h。
+    窗口底边落在屏幕 60% 高度线(微信语音输入式的中下部悬浮,
+    太贴底不协调): y = int(sh * 0.6) - h。
     """
     x = max(0, (sw - w) // 2)
-    y = max(0, int(sh * 0.8) - h)
+    y = max(0, int(sh * 0.6) - h)
     return x, y
 
 
@@ -471,7 +472,8 @@ class _MacPanelFloat:
         self._label = label
 
     def _relayout(self, text):
-        """按文本换行尺寸重设面板并定位(底部居中, 底边 80% 屏幕高)。"""
+        """按文本换行尺寸重设面板并定位(底部居中, 底边 60% 屏幕高,
+        微信语音输入式的中下部悬浮)。"""
         from AppKit import (NSFontAttributeName, NSScreen,
                             NSStringDrawingUsesLineFragmentOrigin)
         from Foundation import NSString, NSMakeSize, NSMakePoint, NSMakeRect
@@ -485,7 +487,7 @@ class _MacPanelFloat:
         h = max(size.height, 16.0) + 2 * _PAD_Y + 4
         sw, sh = screen.size.width, screen.size.height
         x = max(0, int((sw - w) // 2))
-        y = max(0, int(sh * 0.8) - int(h))
+        y = max(0, int(sh * 0.6) - int(h))
         self._panel.setContentSize_(NSMakeSize(w, h))
         self._label.setFrame_(NSMakeRect(_PAD_X, _PAD_Y,
                                          w - 2 * _PAD_X, h - 2 * _PAD_Y))
