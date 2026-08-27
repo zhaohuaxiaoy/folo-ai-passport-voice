@@ -153,10 +153,55 @@ def paste_text(text, dry_run=False, mode="auto"):
               "(当前剪贴板已被替换)", file=sys.stderr)
 
 
+# 终端模拟器 / 带内置终端的编辑器(前台 app 是它们时, clear 走 Ctrl+U)。
+# 原因: Home+Shift+End 的 Shift+End 会被终端模拟器拦截为"终端文本选择",
+# TUI(Claude Code/CodeX 等)收不到全选, Delete 只删 1 个字符; 而 Ctrl+U
+# 是控制字符, 终端不拦截、原样转发(readline/Ink 系标准"删到行首")。
+# bundle id 优先, 进程名兜底(_frontmost_is_terminal 两轮查询)。
+_TERMINAL_APPS = {
+    "com.apple.Terminal": "Terminal",
+    "com.googlecode.iterm2": "iTerm2",
+    "dev.warp.Warp-Stable": "Warp",
+    "com.mitchellh.ghostty": "Ghostty",
+    "net.kovidgoyal.kitty": "kitty",
+    "org.alacritty": "Alacritty",
+    "com.wezterm.wezterm": "WezTerm",
+    "com.microsoft.VSCode": "Code",         # 内置终端跑 Claude Code/CodeX
+    "com.todesktop.230313mzl4w4p92": "Cursor",
+    "dev.zed.Zed": "Zed",
+    "com.hyper": "Hyper",
+}
+
+
+def _frontmost_is_terminal():
+    """前台 app 是否为终端类。osascript 失败/超时按"非终端"降级(不改变
+    注入路径, 不恶化现状)。"""
+    queries = [
+        ('tell application "System Events" to get bundle identifier of '
+         'first application process whose frontmost is true', "id"),
+        ('tell application "System Events" to get name of '
+         'first application process whose frontmost is true', "name"),
+    ]
+    for query, _attr in queries:
+        try:
+            p = subprocess.run(["osascript", "-e", query],
+                               capture_output=True, text=True, timeout=3)
+        except Exception:
+            return False
+        if p.returncode == 0 and p.stdout.strip():
+            val = p.stdout.strip()
+            return val in _TERMINAL_APPS or val in _TERMINAL_APPS.values()
+    return False
+
+
 def key_action(action, dry_run=False):
     """把按键动作注入当前聚焦输入框(不依赖剪贴板)。
 
-    action: "enter"(回车提交)或 "clear"(Home+Shift+End 全选 + 删除清空)。
+    action: "enter"(回车提交)或 "clear"(清空输入框)。
+    clear 按前台 app 分路径:
+      - 终端类(Terminal/iTerm2/Warp/…): Ctrl+U 删到行首 —— TUI 里
+        Shift+End 全选会被终端拦截, 只用 Ctrl+U 才能整行清空;
+      - 非终端: Home+Shift+End 全选 + 删除(Chromium 里 Ctrl+U=查看源码, 避开)。
     与 paste_text 同一 osascript/System Events 通道, 同一授权要求。
     失败抛 InjectError。
     """
@@ -174,15 +219,21 @@ def key_action(action, dry_run=False):
             ["osascript", "-e",
              'tell application "System Events" to keystroke return'],
         ]
-    else:   # clear: Home + Shift+End 全选行, 再删除(通用序列, 终端 CLI 中可靠)
-        cmds = [
-            ["osascript", "-e",
-             'tell application "System Events" to key code 115'],       # 115 = Home
-            ["osascript", "-e",
-             'tell application "System Events" to key code 119 using {shift down}'],  # Shift+End
-            ["osascript", "-e",
-             'tell application "System Events" to key code 51'],        # 51 = delete
-        ]
+    else:   # clear: 终端走 Ctrl+U(删到行首); 非终端 Home+Shift+End 全选 + 删除
+        if _frontmost_is_terminal():
+            cmds = [
+                ["osascript", "-e",
+                 'tell application "System Events" to keystroke "u" using control down'],
+            ]
+        else:
+            cmds = [
+                ["osascript", "-e",
+                 'tell application "System Events" to key code 115'],       # 115 = Home
+                ["osascript", "-e",
+                 'tell application "System Events" to key code 119 using {shift down}'],  # Shift+End
+                ["osascript", "-e",
+                 'tell application "System Events" to key code 51'],        # 51 = delete
+            ]
     if dry_run:
         print(f"# 按键动作 {action!r}:")
         for c in cmds:
