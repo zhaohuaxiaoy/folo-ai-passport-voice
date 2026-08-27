@@ -15,6 +15,7 @@ pyobjc 框架必须 collect-all, 否则运行期 from Quartz import 失败。
 """
 import argparse
 import os
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -39,6 +40,31 @@ def _run(cmd, **kw):
     return subprocess.run(cmd, cwd=HERE, **kw)
 
 
+BUNDLE_ID = "com.folotoy.aipassport"
+
+
+def _patch_info_plist(app_path):
+    """PyInstaller 生成的 Info.plist 缺 macOS 隐私用途声明:
+    无 NSBluetoothAlwaysUsageDescription 时 bleak 的 CoreBluetooth
+    后端(_probe_worker)一启动就被 TCC abort。必须在签名前补上。
+
+    同时修正 CFBundleIdentifier:PyInstaller 默认用 app 名(带空格,
+    非 reverse-DNS),macOS 13+ 的 TCC 无法归因这种 id,用途声明
+    检查会一直走 abort 路径(真机验证过:只有 key 仍崩溃)。
+    """
+    plist_path = os.path.join(app_path, "Contents", "Info.plist")
+    with open(plist_path, "rb") as f:
+        plist = plistlib.load(f)
+    usage = "AI Passport 通过蓝牙连接设备以传输语音与状态。"
+    plist["CFBundleIdentifier"] = BUNDLE_ID
+    plist.setdefault("NSBluetoothAlwaysUsageDescription", usage)
+    # 老系统(10.11-10.12)的 peripheral 用途声明,新系统忽略
+    plist.setdefault("NSBluetoothPeripheralUsageDescription", usage)
+    with open(plist_path, "wb") as f:
+        plistlib.dump(plist, f)
+    print(f"✓ Info.plist 已补蓝牙用途声明+bundle id: {plist_path}")
+
+
 def build(app_name):
     cmd = [sys.executable, "-m", "PyInstaller",
            "--noconfirm", "--clean", "--windowed",
@@ -60,6 +86,7 @@ def build(app_name):
 
     if sys.platform == "darwin":
         app = os.path.join(DIST, f"{app_name}.app")
+        _patch_info_plist(app)  # 先补隐私用途声明再签名
         p = _run(["codesign", "--force", "--deep", "-s", "-", app])
         if p.returncode != 0:
             print("警告: ad-hoc 签名失败(不影响本地运行, Gatekeeper 会提示)",
