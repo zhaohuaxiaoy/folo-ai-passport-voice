@@ -83,6 +83,48 @@ static void send_key_action(app_state_t *s, app_key_action_t action,
     emit(out, n, max, a);
 }
 
+// PTT 开始(OK 按下 / UP 长按 0.5s 判定):离线 toast+error 音;在线滴声+开流。
+static void start_ptt(app_state_t *s, uint64_t now_ms,
+                      app_action_t *out, uint8_t *n, uint8_t max) {
+    if (!s->link_up) {
+        set_toast(s, now_ms, "OFFLINE - PTT blocked");
+        app_action_t t = { .type = APP_ACT_PLAY_TONE };
+        t.u.tone = APP_TONE_ERROR;
+        emit(out, n, max, t);
+        app_action_t r = { .type = APP_ACT_UI_REFRESH };
+        emit(out, n, max, r);
+    } else {
+        // 分帧时序:滴声 → voice.start → 开流由 TONE_DONE 驱动(播放完成才采,
+        // 避免 codec 分时冲突)。开流动作移到 TONE_DONE 分支,app_task 不再
+        // 同步阻塞 80ms 播滴声。
+        app_action_t t = { .type = APP_ACT_PLAY_TONE };
+        t.u.tone = APP_TONE_START;
+        emit(out, n, max, t);
+        app_action_t v = { .type = APP_ACT_SEND_VOICE_START };
+        emit(out, n, max, v);
+        s->stream_started = false;
+        s->state = APP_ST_LISTENING;
+        s->state_since_ms = now_ms;
+    }
+}
+
+// PTT 结束(OK 松开 / UP 长按松开):停流 → voice.end → 发送音 → 转写。
+static void end_ptt(app_state_t *s, uint64_t now_ms,
+                    app_action_t *out, uint8_t *n, uint8_t max) {
+    app_action_t st = { .type = APP_ACT_STREAM_STOP };
+    emit(out, n, max, st);
+    app_action_t v = { .type = APP_ACT_SEND_VOICE_END };
+    emit(out, n, max, v);
+    app_action_t t = { .type = APP_ACT_PLAY_TONE };
+    t.u.tone = APP_TONE_SEND;
+    emit(out, n, max, t);
+    s->state = APP_ST_TRANSCRIBING;
+    s->state_since_ms = now_ms;
+    s->agent_state_name[0] = '\0';   // 新会话开始,清除旧 agent 状态
+    app_action_t r = { .type = APP_ACT_UI_REFRESH };
+    emit(out, n, max, r);
+}
+
 static void go_ready(app_state_t *s, uint64_t now_ms, app_action_t *out, uint8_t *n, uint8_t max) {
     s->state = APP_ST_READY;
     s->state_since_ms = now_ms;
@@ -122,9 +164,10 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         return;
     }
 
-    // OK 双击 = 清空输入框(全局语义,各态统一;录音态不会收到双击 —— 双击的
-    // 第二按落在松开后的 TRANSCRIBING,DOUBLE 事件在会话结束后才上报)。
-    if (ev->type == APP_EV_KEY_DOUBLE && b == APP_BTN_OK) {
+    // UP(音量加)双击 = 清空输入框(全局语义,各态统一;录音态不会收到双击 ——
+    // 双击的第二按落在松开后的 TRANSCRIBING,DOUBLE 事件在会话结束后才上报)。
+    // 双击无提示音:两按均 <0.5s,不触发长按判定,自然不响滴声。
+    if (ev->type == APP_EV_KEY_DOUBLE && b == APP_BTN_UP) {
         send_key_action(s, APP_KEY_CLEAR, out, n, max);
         return;
     }
@@ -142,45 +185,20 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
             send_key_action(s, APP_KEY_ENTER, out, n, max);
         } else if (ev->type == APP_EV_KEY_PRESS && b == APP_BTN_OK) {
-            if (!s->link_up) {
-                set_toast(s, now_ms, "OFFLINE - PTT blocked");
-                app_action_t t = { .type = APP_ACT_PLAY_TONE };
-                t.u.tone = APP_TONE_ERROR;
-                emit(out, n, max, t);
-                app_action_t r = { .type = APP_ACT_UI_REFRESH };
-                emit(out, n, max, r);
-            } else {
-                // 分帧时序:滴声 → voice.start → 开流由 TONE_DONE 驱动(播放完成才采,
-                // 避免 codec 分时冲突)。开流动作移到 TONE_DONE 分支,app_task 不再
-                // 同步阻塞 80ms 播滴声。
-                app_action_t t = { .type = APP_ACT_PLAY_TONE };
-                t.u.tone = APP_TONE_START;
-                emit(out, n, max, t);
-                app_action_t v = { .type = APP_ACT_SEND_VOICE_START };
-                emit(out, n, max, v);
-                s->stream_started = false;
-                s->state = APP_ST_LISTENING;
-                s->state_since_ms = now_ms;
-            }
+            start_ptt(s, now_ms, out, n, max);
+        } else if (ev->type == APP_EV_KEY_LONG && b == APP_BTN_UP) {
+            // 音量加长按 ≥0.5s = 说话(滴声只在长按判定时响,双击不会走到这里)
+            start_ptt(s, now_ms, out, n, max);
         }
         break;
 
     case APP_ST_LISTENING:
-        // 松开立即结束并发送(无取消窗口)。双击的第二按落在 TRANSCRIBING
-        // (录音已发送),其 DOUBLE 事件由上方全局分支处理为"清空输入框"。
-        if (ev->type == APP_EV_KEY_RELEASE && b == APP_BTN_OK) {
-            app_action_t st = { .type = APP_ACT_STREAM_STOP };
-            emit(out, n, max, st);
-            app_action_t v = { .type = APP_ACT_SEND_VOICE_END };
-            emit(out, n, max, v);
-            app_action_t t = { .type = APP_ACT_PLAY_TONE };
-            t.u.tone = APP_TONE_SEND;
-            emit(out, n, max, t);
-            s->state = APP_ST_TRANSCRIBING;
-            s->state_since_ms = now_ms;
-            s->agent_state_name[0] = '\0';   // 新会话开始,清除旧 agent 状态
-            app_action_t r = { .type = APP_ACT_UI_REFRESH };
-            emit(out, n, max, r);
+        // 松开立即结束并发送(无取消窗口)。OK 用普通松开;UP(音量加)长按录音
+        // 的松开是 LONG_UP(长按态松开不再报 RELEASE)。双击的第二按落在
+        // TRANSCRIBING(录音已发送),其 DOUBLE 事件由上方全局分支处理为"清空"。
+        if ((ev->type == APP_EV_KEY_RELEASE && b == APP_BTN_OK) ||
+            (ev->type == APP_EV_KEY_LONG_UP && b == APP_BTN_UP)) {
+            end_ptt(s, now_ms, out, n, max);
         }
         break;
 
@@ -313,6 +331,7 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
     case APP_EV_KEY_CLICK:
     case APP_EV_KEY_DOUBLE:
     case APP_EV_KEY_LONG:
+    case APP_EV_KEY_LONG_UP:
         s->last_key_ms = now_ms;
         handle_key(s, ev, now_ms, out, out_n, max);
         break;

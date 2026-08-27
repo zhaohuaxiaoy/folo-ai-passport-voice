@@ -168,6 +168,7 @@ static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user)
     case BSP_BTN_CLICK:   e.type = APP_EV_KEY_CLICK;   break;
     case BSP_BTN_DOUBLE:  e.type = APP_EV_KEY_DOUBLE;  break;
     case BSP_BTN_LONG:    e.type = APP_EV_KEY_LONG;    break;
+    case BSP_BTN_LONG_UP: e.type = APP_EV_KEY_LONG_UP; break;
     default:              return;
     }
     e.u.key.btn = (uint8_t)btn;

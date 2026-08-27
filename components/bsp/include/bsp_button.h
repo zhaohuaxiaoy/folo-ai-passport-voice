@@ -17,7 +17,8 @@ typedef enum {
     BSP_BTN_RELEASE,     // 抬起瞬间(Push-to-Talk 的"松开结束"依赖它)
     BSP_BTN_CLICK,       // 单击(按下并抬起)
     BSP_BTN_DOUBLE,      // 双击
-    BSP_BTN_LONG,        // 长按
+    BSP_BTN_LONG,        // 长按(达到阈值瞬间;UP 键 0.5s 判定 = 说话开始)
+    BSP_BTN_LONG_UP,     // 长按超时后松开(长按态不再报 RELEASE;UP 键"说话结束")
 } bsp_btn_ev_t;
 
 // 按键事件回调。运行于 button 组件的定时器任务,勿在其中阻塞或做重活。

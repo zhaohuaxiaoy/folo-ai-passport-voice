@@ -72,7 +72,12 @@ static void test_home_nav(void) {
 
     reset();
     reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 10);
-    assert(s.state == APP_ST_HOME);                // OK 双击=清空,不切走
+    assert(s.state == APP_ST_HOME);                // OK 双击不再清空(迁到 UP 双击)
+    assert(!has_action(APP_ACT_SEND_KEY_ACTION));
+
+    reset();
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 10);
+    assert(s.state == APP_ST_HOME);                // UP(音量加)双击=清空,不切走
     a = find_action(APP_ACT_SEND_KEY_ACTION);
     assert(a && a->u.key_action.action == APP_KEY_CLEAR);
 
@@ -83,7 +88,7 @@ static void test_home_nav(void) {
     assert(!has_action(APP_ACT_SEND_KEY_ACTION));
 }
 
-// ---- READY:▼ 单击=回车 / 双击无动作;OK=PTT / 双击=清空;工作流固定 build ----
+// ---- READY:▼ 单击=回车 / 双击无动作;OK=PTT;UP 长按=说话 / 双击=清空 ----
 static void test_down_enter_clear(void) {
     reset();
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);   // → READY (BUILD)
@@ -242,35 +247,88 @@ static void test_listening_release_sends(void) {
     assert(t && t->u.tone == APP_TONE_SEND);
 }
 
-// ---- OK 双击 = 清空输入框(录音松开已发送,DOUBLE 事件全局处理) ----
-static void test_ok_double_clears_input(void) {
+// ---- UP(音量加)双击 = 清空输入框;OK 双击已移除(录音松开已发送,DOUBLE 全局处理)----
+static void test_up_double_clears_input(void) {
+    // READY 态完整双击流:两按均短(<0.5s 不触发长按),DOUBLE → clear,无提示音
     reset();
     s.link_up = true;
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);    // 按下 #1:开录
-    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 30);  // 松开 #1:立即发送
-    assert(s.state == APP_ST_TRANSCRIBING);
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 200);   // 双击的第二按(转写中忽略)
-    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 300);
-    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 400);  // DOUBLE → 清空输入框
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);    // → READY
+    assert(s.state == APP_ST_READY);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);
+    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_UP, now + 40);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 200);   // 双击第二按
+    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_UP, now + 220);
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 400);  // 双击窗口到期
     app_action_t *a = find_action(APP_ACT_SEND_KEY_ACTION);
+    assert(a && a->u.key_action.action == APP_KEY_CLEAR);
+    assert(!has_action(APP_ACT_PLAY_TONE));                // 双击无提示音
+    assert(!has_action(APP_ACT_SEND_VOICE_START));         // 无录音动作
+    assert(s.state == APP_ST_READY);                       // 会话状态不受影响
+
+    // 转写/执行中双击 UP 同样清空(第二按落在 TRANSCRIBING 的典型场景)
+    reset();
+    s.link_up = true;
+    s.state = APP_ST_TRANSCRIBING;
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 10);
+    a = find_action(APP_ACT_SEND_KEY_ACTION);
     assert(a && a->u.key_action.action == APP_KEY_CLEAR);
     assert(!has_action(APP_ACT_STREAM_CANCEL));            // 不清会话(无取消语义)
     assert(!has_action(APP_ACT_STREAM_STOP));
     assert(s.state == APP_ST_TRANSCRIBING);                // 会话状态不受影响
 
-    // READY 态(离线)直接双击 OK 同样清空
+    // OK 双击不再清空(功能迁到 UP 双击)
     reset();
-    s.link_up = false;
     reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 10);
-    a = find_action(APP_ACT_SEND_KEY_ACTION);
-    assert(a && a->u.key_action.action == APP_KEY_CLEAR);
+    assert(!has_action(APP_ACT_SEND_KEY_ACTION));
 }
 
-// ---- LISTENING 端:见 test_listening_release_sends / test_ok_double_clears_input ----
+// ---- UP(音量加)长按 ≥0.5s = 说话:LONG 开录(滴声在判定时响),LONG_UP 松开发送 ----
+static void test_up_long_ptt(void) {
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);    // → READY
+    assert(s.state == APP_ST_READY);
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 500);    // 0.5s 判定:开录
+    assert(s.state == APP_ST_LISTENING);
+    app_action_t *t = find_action(APP_ACT_PLAY_TONE);
+    assert(t && t->u.tone == APP_TONE_START);              // 滴声在长按判定时响
+    assert(has_action(APP_ACT_SEND_VOICE_START));
+    assert(!has_action(APP_ACT_STREAM_STOP));              // 未结束
+    assert(!has_action(APP_ACT_STREAM_CANCEL));
+    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 3500); // 松开:发送
+    assert(s.state == APP_ST_TRANSCRIBING);
+    assert(has_action(APP_ACT_STREAM_STOP));
+    assert(has_action(APP_ACT_SEND_VOICE_END));
+    assert_action_order(APP_ACT_STREAM_STOP, APP_ACT_SEND_VOICE_END);
+    t = find_action(APP_ACT_PLAY_TONE);
+    assert(t && t->u.tone == APP_TONE_SEND);               // 发送音保留
+
+    // 离线:长按 UP 被拒,error 音 + toast,不进 LISTENING
+    reset();
+    s.link_up = false;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);    // → READY
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 500);
+    assert(s.state == APP_ST_READY);
+    assert(!has_action(APP_ACT_SEND_VOICE_START));
+    t = find_action(APP_ACT_PLAY_TONE);
+    assert(t && t->u.tone == APP_TONE_ERROR);
+    assert(strstr(s.toast, "OFFLINE"));
+
+    // 短按(CLICK 而非 LONG)不触发任何动作、无提示音
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 100);
+    assert(s.state == APP_ST_READY);
+    assert(!has_action(APP_ACT_SEND_VOICE_START));
+    assert(!has_action(APP_ACT_PLAY_TONE));
+    assert(!has_action(APP_ACT_SEND_KEY_ACTION));
+}
+
+// ---- LISTENING 端:见 test_listening_release_sends / test_up_double_clears_input ----
 static void test_listening_end(void) {
     test_listening_release_sends();
-    test_ok_double_clears_input();
+    test_up_double_clears_input();
 }
 
 // ---- 超时:TRANSCRIBING 30s / AGENT_RUNNING 90s → READY ----
@@ -550,9 +608,9 @@ static void test_keys_ignored_in_running(void) {
     assert(s.state == APP_ST_AGENT_RUNNING);
     assert(on == 0);                                       // PRESS/CLICK 无动作
 
-    // OK 双击=全局清空(各态统一,AGENT_RUNNING 也不例外)—— 基线测试过期:
-    // 旧断言"任意键全部忽略"未涵盖双击全局语义
-    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 30);
+    // UP 双击=全局清空(各态统一,AGENT_RUNNING 也不例外)—— 基线测试过期:
+    // 旧断言"任意键全部忽略"未涵盖双击全局语义;OK 双击已迁到 UP
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 30);
     app_action_t *a = find_action(APP_ACT_SEND_KEY_ACTION);
     assert(a && a->u.key_action.action == APP_KEY_CLEAR);
     assert(s.state == APP_ST_AGENT_RUNNING);
@@ -897,6 +955,7 @@ int main(void) {
     test_tone_tick_fallback();
     test_tone_done_ignored_elsewhere();
     test_listening_end();
+    test_up_long_ptt();
     test_timeouts();
     test_agent_running_timeout();
     test_agent_status_flow();

@@ -205,15 +205,23 @@ static void build_listening(void)
     lv_obj_set_size(p->root, W, H);
     lv_obj_set_pos(p->root, 0, 0);
 
-    // 麦克风图标(块状像素画, 居中; 替代 REC 红点/文字与音量条 —— 录音中
-    // 只显示麦克风, 不做音量可视化)
-    block(p->root, 112, 58, 16, 26, UI_RED);    // 拾音头(胶囊)
-    block(p->root, 108, 68, 24, 6, UI_RED);     // 拾音头顶部弧
-    block(p->root, 108, 78, 24, 6, UI_RED);     // 拾音头底部弧
-    block(p->root, 116, 84, 8, 8, UI_RED);      // 拾音头底口
-    block(p->root, 116, 92, 8, 12, UI_RED);     // 立杆
-    block(p->root, 104, 104, 32, 6, UI_RED);    // 底座上沿
-    block(p->root, 112, 110, 16, 6, UI_RED);    // 底座
+    // 麦克风图标(块状像素画, 居中; 经典话筒造型:圆头 + 两侧弧支架收拢成
+    // 立杆 + 底座 —— 替代 REC 红点/文字与音量条, 录音中只显示麦克风)
+    block(p->root, 110, 58, 20, 8, UI_RED);     // 圆头顶部
+    block(p->root, 106, 66, 28, 8, UI_RED);     // 圆头上段
+    block(p->root, 104, 74, 32, 16, UI_RED);    // 圆头最宽段
+    block(p->root, 108, 90, 24, 8, UI_RED);     // 圆头下段
+    block(p->root, 106, 98, 6, 8, UI_RED);      // 左支架弧
+    block(p->root, 128, 98, 6, 8, UI_RED);      // 右支架弧
+    block(p->root, 108, 106, 4, 8, UI_RED);     // 左支架弧(内收)
+    block(p->root, 128, 106, 4, 8, UI_RED);     // 右支架弧(内收)
+    block(p->root, 110, 114, 4, 8, UI_RED);     // 左支架弧(收拢)
+    block(p->root, 126, 114, 4, 8, UI_RED);     // 右支架弧(收拢)
+    block(p->root, 114, 122, 4, 8, UI_RED);     // 左支架弧(汇入立杆)
+    block(p->root, 122, 122, 4, 8, UI_RED);     // 右支架弧(汇入立杆)
+    block(p->root, 116, 130, 8, 8, UI_RED);     // 立杆
+    block(p->root, 104, 138, 32, 6, UI_RED);    // 底座上沿
+    block(p->root, 112, 144, 16, 6, UI_RED);    // 底座
 
     p->rec_elapsed = label(p->root, "0s", &lv_font_montserrat_20, UI_INK, 0, 200, W);
     hint_label(p->root, "RELEASE OK: SEND");

@@ -28,6 +28,8 @@ typedef enum {
 } app_stage_t;
 
 // ---------------- 按键 ----------------
+// 物理键语义:UP(音量加)= 长按 0.5s 说话 / 双击清空输入框;DOWN = 回车;
+// OK = PTT 说话(按住说、松开发)。
 typedef enum {
     APP_BTN_UP = 0,
     APP_BTN_DOWN,
@@ -51,7 +53,8 @@ typedef enum {
     APP_EV_KEY_RELEASE,
     APP_EV_KEY_CLICK,
     APP_EV_KEY_DOUBLE,
-    APP_EV_KEY_LONG,
+    APP_EV_KEY_LONG,        // 长按达阈值瞬间(UP 键 0.5s → 说话开始)
+    APP_EV_KEY_LONG_UP,     // 长按超时后松开(长按态不再报 RELEASE;UP 键 → 说话结束)
     APP_EV_AGENT_STATUS,
     APP_EV_APPROVAL_REQUEST,
     APP_EV_TRANSCRIPT,
