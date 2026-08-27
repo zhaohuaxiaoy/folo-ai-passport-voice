@@ -207,23 +207,29 @@ static void build_listening(void)
     lv_obj_set_size(p->root, W, H);
     lv_obj_set_pos(p->root, 0, 0);
 
-    // 麦克风图标(块状像素画, 居中; 经典话筒造型:圆头 + 两侧弧支架收拢成
-    // 立杆 + 底座 —— 替代 REC 红点/文字与音量条, 录音中只显示麦克风)
-    block(p->root, 110, 58, 20, 8, UI_RED);     // 圆头顶部
-    block(p->root, 106, 66, 28, 8, UI_RED);     // 圆头上段
-    block(p->root, 104, 74, 32, 16, UI_RED);    // 圆头最宽段
-    block(p->root, 108, 90, 24, 8, UI_RED);     // 圆头下段
-    block(p->root, 106, 98, 6, 8, UI_RED);      // 左支架弧
-    block(p->root, 128, 98, 6, 8, UI_RED);      // 右支架弧
-    block(p->root, 108, 106, 4, 8, UI_RED);     // 左支架弧(内收)
-    block(p->root, 128, 106, 4, 8, UI_RED);     // 右支架弧(内收)
-    block(p->root, 110, 114, 4, 8, UI_RED);     // 左支架弧(收拢)
-    block(p->root, 126, 114, 4, 8, UI_RED);     // 右支架弧(收拢)
-    block(p->root, 114, 122, 4, 8, UI_RED);     // 左支架弧(汇入立杆)
-    block(p->root, 122, 122, 4, 8, UI_RED);     // 右支架弧(汇入立杆)
-    block(p->root, 116, 130, 8, 8, UI_RED);     // 立杆
-    block(p->root, 104, 138, 32, 6, UI_RED);    // 底座上沿
-    block(p->root, 112, 144, 16, 6, UI_RED);    // 底座
+    // 麦克风图标(块状像素画, 居中; 复古环形话筒造型:圆顶 + 中空圆环
+    // (环壁下段外撇) + 环底两弧收拢 + 立杆 + 底座 —— 替代 REC 红点/文字
+    // 与音量条, 录音中只显示麦克风。对照参考图逐段设计, 见 tests 渲染)
+    block(p->root, 105, 58, 30, 4, UI_RED);     // 圆顶第1行(窄)
+    block(p->root, 102, 62, 36, 4, UI_RED);     // 圆顶第2行
+    block(p->root, 100, 66, 40, 3, UI_RED);     // 圆顶第3行(最宽)
+    block(p->root, 102, 69, 7, 15, UI_RED);     // 左环壁(中空段)
+    block(p->root, 131, 69, 7, 15, UI_RED);     // 右环壁
+    block(p->root, 99, 84, 10, 5, UI_RED);      // 左环壁下段(外撇)
+    block(p->root, 131, 84, 10, 5, UI_RED);     // 右环壁下段
+    block(p->root, 98, 89, 11, 4, UI_RED);      // 环底缘(最外扩)
+    block(p->root, 131, 89, 11, 4, UI_RED);     // 环底缘
+    block(p->root, 102, 93, 6, 5, UI_RED);      // 左弧收拢1
+    block(p->root, 132, 93, 6, 5, UI_RED);      // 右弧收拢1
+    block(p->root, 105, 98, 5, 5, UI_RED);      // 左弧收拢2
+    block(p->root, 130, 98, 5, 5, UI_RED);      // 右弧收拢2
+    block(p->root, 108, 103, 4, 5, UI_RED);     // 左弧收拢3
+    block(p->root, 128, 103, 4, 5, UI_RED);     // 右弧收拢3
+    block(p->root, 110, 108, 4, 5, UI_RED);     // 左弧收拢4
+    block(p->root, 126, 108, 4, 5, UI_RED);     // 右弧收拢4
+    block(p->root, 114, 113, 6, 4, UI_RED);     // 汇合段
+    block(p->root, 114, 117, 6, 9, UI_RED);     // 立杆
+    block(p->root, 105, 126, 30, 5, UI_RED);    // 底座
 
     p->rec_elapsed = label(p->root, "0s", &lv_font_montserrat_20, UI_INK, 0, 200, W);
     hint_label(p->root, "RELEASE VOL+: SEND");
