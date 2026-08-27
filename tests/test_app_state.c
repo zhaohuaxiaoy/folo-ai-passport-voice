@@ -280,6 +280,36 @@ static void test_up_double_clears_input(void) {
     reset();
     reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 10);
     assert(!has_action(APP_ACT_SEND_KEY_ACTION));
+
+    // 长按松开(PTT 结束)后回弹窗口内的双击是"长按+机械回弹"误判的假双击:
+    // 忽略,防止 clear 上行在注入完成后删掉刚注入的文本。
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);     // → READY
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 500);     // 开录
+    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 3500); // 松开 → TRANSCRIBING
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 100);   // 松开 100ms 后的假双击
+    assert(!has_action(APP_ACT_SEND_KEY_ACTION));           // 回弹假双击被吞
+    assert(s.state == APP_ST_TRANSCRIBING);                 // 会话不受影响
+
+    // 录音中(LISTENING,手指在按住)收到 DOUBLE(ADC 阈值穿越抖动):忽略
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 500);     // 开录
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 1200);  // 按住期间的假双击
+    assert(!has_action(APP_ACT_SEND_KEY_ACTION));
+    assert(s.state == APP_ST_LISTENING);
+
+    // 松开超过回弹窗口后(注入已完成、用户看到文本)的正常双击清空不受影响
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 500);
+    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 3500);
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 1000);  // 松开 1s 后双击
+    a = find_action(APP_ACT_SEND_KEY_ACTION);
+    assert(a && a->u.key_action.action == APP_KEY_CLEAR);
 }
 
 // ---- UP(音量加)长按 ≥0.5s = 说话:LONG 开录(滴声在判定时响),LONG_UP 松开发送 ----

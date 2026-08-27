@@ -19,6 +19,7 @@ typedef struct {
     uint16_t       wifi_fail_reason; // 已 toast 的 WiFi 失败 reason(0=无;同因去重)
     uint64_t       last_key_ms;     // 最近按键时刻(息屏计时)
     uint64_t       state_since_ms;  // 进入当前状态的时刻(超时计时)
+    uint64_t       ptt_end_ms;      // PTT 松开时刻(过滤松开回弹误判的双击)
     uint64_t       toast_until_ms;
     bool           stream_started;  // 本会话采集是否已开(START 音播完后 TONE_DONE 驱动)
     char           toast[APP_TOAST_MAX];

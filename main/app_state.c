@@ -5,6 +5,11 @@
 #include <string.h>
 #include <stdio.h>
 
+// 长按松开后忽略双击的窗口:机械回弹/ADC 阈值穿越会把"长按+回弹"误判成
+// 双击 → clear 上行在注入完成后才到达,删掉刚注入的文本。真实双击清空
+// 发生在注入后(用户看到文本才决定清空,松开 300ms 内文本尚未注入)。
+#define PTT_REBOUND_GUARD_MS 300
+
 static const char *const AGENT_STATE_NAMES[APP_AGENT_COUNT] = {
     [APP_AGENT_READY]    = "ready",
     [APP_AGENT_THINKING] = "thinking",
@@ -123,6 +128,7 @@ static void end_ptt(app_state_t *s, uint64_t now_ms,
     s->agent_state_name[0] = '\0';   // 新会话开始,清除旧 agent 状态
     app_action_t r = { .type = APP_ACT_UI_REFRESH };
     emit(out, n, max, r);
+    s->ptt_end_ms = now_ms;   // 供双击防御:松开后回弹窗口内的假双击忽略
 }
 
 static void go_ready(app_state_t *s, uint64_t now_ms, app_action_t *out, uint8_t *n, uint8_t max) {
@@ -164,10 +170,17 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         return;
     }
 
-    // UP(音量加)双击 = 清空输入框(全局语义,各态统一;录音态不会收到双击 ——
-    // 双击的第二按落在松开后的 TRANSCRIBING,DOUBLE 事件在会话结束后才上报)。
+    // UP(音量加)双击 = 清空输入框(全局语义,各态统一)。
     // 双击无提示音:两按均 <0.5s,不触发长按判定,自然不响滴声。
+    // 防"注入后删除":长按松开瞬间机械回弹/ADC 阈值穿越会把"长按+回弹"误判
+    // 成双击 → clear 上行在识别注入完成后才被执行,删掉刚注入的文本(PTT
+    // 移师 UP 键后暴露;以前 PTT 在 OK 键,双击无语义)。真实双击清空发生在
+    // 注入后(用户看到文本才决定清空),故录音中(LISTENING,手指在按住、
+    // 不可能主动双击)与松开后 PTT_REBOUND_GUARD_MS 内的双击一律忽略。
     if (ev->type == APP_EV_KEY_DOUBLE && b == APP_BTN_UP) {
+        if (s->state == APP_ST_LISTENING || now_ms - s->ptt_end_ms < PTT_REBOUND_GUARD_MS) {
+            return;
+        }
         send_key_action(s, APP_KEY_CLEAR, out, n, max);
         return;
     }
