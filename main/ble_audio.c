@@ -260,31 +260,21 @@ static const struct ble_gatt_svc_def gatt_defs[] = {
             {
                 .uuid = BLE_UUID16_DECLARE(EVENT_CHR_UUID),
                 .access_cb = gatt_access,
-                .flags = BLE_GATT_CHR_F_NOTIFY,
+                // NOTIFY_INDICATE_ENC: 订阅(写 CCCD)要求已加密连接。NimBLE
+                // 对 NOTIFY 特征自动注册 CCCD,该 flag 给自动 CCCD 加
+                // WRITE_ENC → 未配对连接订阅被拒(0x0F),macOS 中央访问加密
+                // 属性时自动发起配对(Just Works SC),配对后通知自动加密。
+                // 防止未配对连接收到明文音频/事件流。
+                // (旧写法:手写 0x2902 描述符 —— 5.5 的 count_cfg 校验
+                // access_cb 非空且与自动 CCCD 重复,真机 EINVAL 不广播)
+                .flags = BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_NOTIFY_INDICATE_ENC,
                 .val_handle = &s_event_val_handle,
-                .descriptors = (struct ble_gatt_dsc_def[]) {
-                    { .uuid = BLE_UUID16_DECLARE(0x2902),
-                      // WRITE_ENC: 订阅(写 CCCD)要求已加密连接。
-                      // NimBLE 无 NOTIFY_ENC 特征 flag;在描述符上要求加密 →
-                      // 未配对连接订阅被拒(0x0F), macOS 中央访问需加密属性时
-                      // 自动发起配对(Just Works SC), 配对后通知自动加密。
-                      // 防止未配对连接收到明文音频/事件流。
-                      .att_flags = BLE_ATT_F_READ | BLE_ATT_F_WRITE
-                                 | BLE_ATT_F_WRITE_ENC, },
-                    { 0 },
-                },
             },
             {
                 .uuid = BLE_UUID16_DECLARE(AUDIO_CHR_UUID),
                 .access_cb = gatt_access,
-                .flags = BLE_GATT_CHR_F_NOTIFY,
+                .flags = BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_NOTIFY_INDICATE_ENC,
                 .val_handle = &s_audio_val_handle,
-                .descriptors = (struct ble_gatt_dsc_def[]) {
-                    { .uuid = BLE_UUID16_DECLARE(0x2902),
-                      .att_flags = BLE_ATT_F_READ | BLE_ATT_F_WRITE
-                                 | BLE_ATT_F_WRITE_ENC, },
-                    { 0 },
-                },
             },
             { 0 },
         },
@@ -373,16 +363,22 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg) {
 static void start_advertising(void) {
     struct ble_gap_adv_params adv_params = { 0 };
     struct ble_hs_adv_fields adv = { 0 };
+    struct ble_hs_adv_fields rsp = { 0 };
 
     adv.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     adv.name = (uint8_t *)DEVICE_NAME;
     adv.name_len = strlen(DEVICE_NAME);
     adv.name_is_complete = 1;
-    // 服务 UUID 一并广播,便于扫描端按 0xA2B0 过滤(bleak 可按 UUID 发现)
-    adv.uuids128 = (ble_uuid128_t *)&s_audio_svc_uuid;   // NimBLE 5.5 字段改名
-    adv.num_uuids128 = 1;
     int rc = ble_gap_adv_set_fields(&adv);
     if (rc != 0) { ESP_LOGE(TAG, "adv set_fields 失败 %d", rc); return; }
+
+    // 128-bit 服务 UUID 放扫描应答:adv 载荷 31B 放不下 flags+完整名+UUID
+    // (34B,真机 EMSGSIZE 不广播)。主动扫描的中央会发起 scan request
+    // 拿到 rsp,按 0xA2B0 过滤/发现仍可用(bleak find 按名字也够)。
+    rsp.uuids128 = (ble_uuid128_t *)&s_audio_svc_uuid;   // NimBLE 5.5 字段改名
+    rsp.num_uuids128 = 1;
+    rc = ble_gap_adv_rsp_set_fields(&rsp);
+    if (rc != 0) { ESP_LOGE(TAG, "adv_rsp set_fields 失败 %d", rc); return; }
 
     adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
     adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
@@ -393,8 +389,21 @@ static void start_advertising(void) {
     ESP_LOGI(TAG, "广播 %s (rc=%d)", DEVICE_NAME, rc);
 }
 
-// ---- 主机同步后开广播 ----
+// ---- 主机同步后:确保地址 → 推断类型 → 开广播 ----
+// 与上游 bleprph 的 on_sync 同时序:地址缓冲(STATIC_TO_DYNAMIC 动态分配)
+// 与 controller 地址此时才就绪,确保顺序不可交换 —— ensure_addr 会触发
+// set_pub/set_rnd(内部 ensure_ctx),随后 infer_auto 才可安全解引用。
 static void on_sync(void) {
+    int rc = ble_hs_util_ensure_addr(0);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ensure_addr 失败 %d,暂不广播", rc);
+        return;
+    }
+    rc = ble_hs_id_infer_auto(0, &s_own_addr_type);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "id_infer_auto 失败 %d,暂不广播", rc);
+        return;
+    }
     start_advertising();
 }
 
@@ -445,13 +454,10 @@ int ble_audio_init(void) {
     if (rc != 0) { ESP_LOGE(TAG, "listener 注册失败 %d", rc); return -1; }
     rc = ble_gatts_start();
     if (rc != 0) { ESP_LOGE(TAG, "gatts_start 失败 %d", rc); return -1; }
-
-    uint8_t addr_type;
-    rc = ble_hs_id_infer_auto(0, &addr_type);
-    if (rc != 0) { ESP_LOGE(TAG, "id_infer_auto 失败 %d", rc); return -1; }
-    s_own_addr_type = addr_type;
-    rc = ble_hs_util_ensure_addr(0);
-    if (rc != 0) { ESP_LOGE(TAG, "ensure_addr 失败 %d", rc); return -1; }
+    // 注意:地址相关(ensure_addr/infer_auto)不在 init 做 ——
+    // CONFIG_BT_NIMBLE_STATIC_TO_DYNAMIC 下地址缓冲是动态分配的,
+    // host 启动前调用会 NULL 解引用 Load fault(真机踩过)。移入 on_sync,
+    // 与上游 bleprph 同时序。
 
     nimble_port_freertos_init(nimble_host_task);
     ESP_LOGI(TAG, "BLE 音频服务就绪(0xA2B0),等待 host sync 后广播 %s", DEVICE_NAME);
