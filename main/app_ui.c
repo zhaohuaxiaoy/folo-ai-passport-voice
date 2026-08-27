@@ -172,7 +172,9 @@ static void build_home(void)
     lv_obj_set_pos(p->root, 0, 0);
 
     lv_obj_t *plate = ui_pixel_panel_create(p->root, 20, CONTENT_Y + 8, 200, 40, UI_PAPER);
-    label(plate, "VOICE INPUT", &lv_font_montserrat_20, UI_INK, 0, -2, 200);
+    // plate 有 pad_all 7(label 坐标相对 content 区,原点右移 7px),x=-7 抵消
+    // 后文字才真正水平居中于面板(此前偏右 7px)。
+    label(plate, "VOICE INPUT", &lv_font_montserrat_20, UI_INK, -7, -2, 200);
     ui_pixel_mascot_create(p->root, 101, 100);
     label(p->root, "hold OK to enter", &lv_font_montserrat_14, UI_MUTED, 0, 200, W);
     hint_label(p->root, "OK: ENTER   DBL-VOL+: CLEAR   DOWN: ENTER");
