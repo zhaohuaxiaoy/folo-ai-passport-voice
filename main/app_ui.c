@@ -49,7 +49,9 @@ static lv_obj_t *s_metrics_label;
 static lv_obj_t *s_time_label;
 static lv_obj_t *s_app_label;
 static lv_obj_t *s_offline_banner;
+static lv_obj_t *s_offline_text;
 static lv_obj_t *s_netbusy_banner;
+static lv_obj_t *s_netbusy_text;
 static lv_obj_t *s_toast;
 
 static page_t s_pages[APP_ST_COUNT];
@@ -138,15 +140,17 @@ static void build_chrome(void)
     s_app_label = label(s_chrome, "", &lv_font_montserrat_14, UI_MUTED,
                         APP_X, 5, W - APP_X);
 
-    // BLE 断线横幅(链路断时整宽显示;link_up = EVENT 特征已订阅)
+    // BLE 断线横幅(链路断时整宽显示;link_up = EVENT 特征已订阅)。
+    // 文本是子 label(render 按通道名改写文案);banner 本体是 block,不能
+    // 对 block 调 label_set_*(会按 label 布局读越界内存 → Load access fault)。
     s_offline_banner = block(s_chrome, 0, BANNER_Y, W, BANNER_H, UI_RED);
-    label(s_offline_banner, "BLE DISCONNECTED - reconnecting...", &lv_font_montserrat_14,
-          0xFFFFFF, 0, 0, W);
+    s_offline_text = label(s_offline_banner, "BLE DISCONNECTED - reconnecting...",
+                           &lv_font_montserrat_14, 0xFFFFFF, 0, 0, W);
 
     // BLE BUSY(音频丢帧中)
     s_netbusy_banner = block(s_chrome, 0, BANNER_Y, W, BANNER_H, UI_ORANGE);
-    label(s_netbusy_banner, "BLE BUSY - dropping frames", &lv_font_montserrat_14,
-          UI_INK, 0, 0, W);
+    s_netbusy_text = label(s_netbusy_banner, "BLE BUSY - dropping frames",
+                           &lv_font_montserrat_14, UI_INK, 0, 0, W);
 
     // Toast(底部浮层,空文本即隐藏)
     lv_obj_t *tbg = block(s_chrome, 30, 272, 180, 30, UI_INK);
@@ -396,9 +400,9 @@ void app_ui_render(const app_ui_snapshot_t *snap)
 
     // 横幅互斥:OFFLINE(通道断线)> BUSY(同位置 BANNER_Y)
     // 文案按当前链路通道渲染(BLE/WiFi;Windows 移植:WiFi 通道断线显示 WiFi 字样)
-    label_set_fmt_if_changed(s_offline_banner, "%s DISCONNECTED - reconnecting...",
+    label_set_fmt_if_changed(s_offline_text, "%s DISCONNECTED - reconnecting...",
                              snap->link_name);
-    label_set_fmt_if_changed(s_netbusy_banner, "%s BUSY - dropping frames",
+    label_set_fmt_if_changed(s_netbusy_text, "%s BUSY - dropping frames",
                              snap->link_name);
     set_hidden(s_offline_banner, snap->link_up);
     set_hidden(s_netbusy_banner, !snap->net_busy || !snap->link_up);
