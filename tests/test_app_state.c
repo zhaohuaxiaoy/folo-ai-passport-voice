@@ -53,7 +53,7 @@ static void reset(void) {
     s.last_key_ms = now;
 }
 
-// ---- HOME:● 单击进入 READY;● 双击=清空;▼ 单击=回车;▲ 空闲 ----
+// ---- HOME:● 单击进入 READY;▲(音量加)双击=清空;▼ 单击=回车 ----
 static void test_home_nav(void) {
     reset();
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
@@ -88,7 +88,7 @@ static void test_home_nav(void) {
     assert(!has_action(APP_ACT_SEND_KEY_ACTION));
 }
 
-// ---- READY:▼ 单击=回车 / 双击无动作;OK=PTT;UP 长按=说话 / 双击=清空 ----
+// ---- READY:OK 已退出 PTT;▲(音量加)长按=说话 / 双击=清空;▼ 单击=回车 ----
 static void test_down_enter_clear(void) {
     reset();
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);   // → READY (BUILD)
@@ -107,7 +107,7 @@ static void test_down_enter_clear(void) {
 
     // PTT 不受影响(基线缺陷:离线检查引入后此段未设 link_up,PTT 被拒;修正)
     s.link_up = true;
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 50);
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 50);
     assert(s.state == APP_ST_LISTENING);
     assert(has_action(APP_ACT_SEND_VOICE_START));
 }
@@ -117,7 +117,7 @@ static void test_ptt_offline_online(void) {
     reset();
     s.link_up = false;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);    // → READY
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);    // 离线按 ●
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);    // 离线长按 ▲
     assert(s.state == APP_ST_READY);                       // 原地不动
     app_action_t *t = find_action(APP_ACT_PLAY_TONE);
     assert(t && t->u.tone == APP_TONE_ERROR);
@@ -126,7 +126,7 @@ static void test_ptt_offline_online(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);    // 在线按 ●
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);    // 在线长按 ▲
     assert(s.state == APP_ST_LISTENING);
     assert(has_action(APP_ACT_PLAY_TONE));                 // 440Hz 就绪音
     assert(has_action(APP_ACT_SEND_VOICE_START));
@@ -141,12 +141,12 @@ static void test_ptt_offline_online(void) {
     assert(s.stream_started == true);
 }
 
-// ---- S3:READY+OK PRESS 只产出滴声 + voice.start,开流等 TONE_DONE ----
+// ---- S3:READY+▲ 长按只产出滴声 + voice.start,开流等 TONE_DONE ----
 static void test_tone_press_produce(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);    // → READY
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);    // 开录
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);    // 开录
     assert(s.state == APP_ST_LISTENING);
     assert(s.stream_started == false);
     assert(!has_action(APP_ACT_STREAM_START));
@@ -161,7 +161,7 @@ static void test_tone_done_idempotent(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);    // 开录,未开流
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);    // 开录,未开流
     app_event_t ev = { .type = APP_EV_TONE_DONE };
     app_state_reduce(&s, &ev, now + 110, out, &on);        // 滴声播完
     assert(has_action(APP_ACT_STREAM_START));
@@ -175,9 +175,9 @@ static void test_tone_done_late_after_send(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);    // 按下 #1:入 LISTENING,未开流
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);    // 按下 #1:入 LISTENING,未开流
     assert(!has_action(APP_ACT_STREAM_START));
-    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 30);  // 松开:立即发送
+    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 30);  // 松开:立即发送
     assert(s.state == APP_ST_TRANSCRIBING);
     app_event_t ev = { .type = APP_EV_TONE_DONE };
     app_state_reduce(&s, &ev, now + 210, out, &on);        // 滴声播完事件此刻才到
@@ -190,12 +190,12 @@ static void test_tone_release_sends_order(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);    // 开录
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);    // 开录
     app_event_t ev = { .type = APP_EV_TONE_DONE };
     app_state_reduce(&s, &ev, now + 110, out, &on);        // 滴声播完 → 开流
     assert(has_action(APP_ACT_STREAM_START));
     assert(s.stream_started == true);
-    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 3000); // 松开:立即停流发送
+    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 3000); // 松开:立即停流发送
     assert(s.state == APP_ST_TRANSCRIBING);
     assert(has_action(APP_ACT_STREAM_STOP));               // 停流由 RELEASE 产出
     assert_action_order(APP_ACT_STREAM_STOP, APP_ACT_SEND_VOICE_END);
@@ -206,7 +206,7 @@ static void test_tone_tick_fallback(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);    // 开录
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);    // 开录
     reduce(APP_EV_TICK, s.state_since_ms + 499);           // 499ms 未到阈值
     assert(!has_action(APP_ACT_STREAM_START));
     assert(!s.stream_started);
@@ -236,9 +236,9 @@ static void test_listening_release_sends(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);    // 开录
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);    // 开录
     assert(s.state == APP_ST_LISTENING);
-    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 3000); // 松开:立即发送
+    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 3000); // 松开:立即发送
     assert(s.state == APP_ST_TRANSCRIBING);
     assert(has_action(APP_ACT_STREAM_STOP));
     assert(has_action(APP_ACT_SEND_VOICE_END));
@@ -323,6 +323,19 @@ static void test_up_long_ptt(void) {
     assert(!has_action(APP_ACT_SEND_VOICE_START));
     assert(!has_action(APP_ACT_PLAY_TONE));
     assert(!has_action(APP_ACT_SEND_KEY_ACTION));
+
+    // OK 键已退出 PTT:按住/松开都不再开录音
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);    // → READY
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 100);   // 按住 OK
+    assert(s.state == APP_ST_READY);
+    assert(!has_action(APP_ACT_SEND_VOICE_START));
+    assert(!has_action(APP_ACT_PLAY_TONE));
+    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 200); // 松开 OK
+    assert(s.state == APP_ST_READY);
+    assert(!has_action(APP_ACT_SEND_VOICE_END));
+    assert(!has_action(APP_ACT_STREAM_STOP));
 }
 
 // ---- LISTENING 端:见 test_listening_release_sends / test_up_double_clears_input ----
@@ -336,8 +349,8 @@ static void test_timeouts(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);
-    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 3000);
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);
+    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 3000);
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 3300);  // 单击窗口到期 → TRANSCRIBING
     assert(s.state == APP_ST_TRANSCRIBING);
     reduce(APP_EV_TICK, s.state_since_ms + 29 * 1000);     // 进入后 29s 未到
@@ -562,7 +575,7 @@ static void test_approval_during_listening(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);    // 开录
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);    // 开录
     assert(s.state == APP_ST_LISTENING);
 
     app_event_t ev = { .type = APP_EV_APPROVAL_REQUEST,
@@ -573,7 +586,7 @@ static void test_approval_during_listening(void) {
     assert(has_action(APP_ACT_STREAM_STOP));
     assert(has_action(APP_ACT_SEND_VOICE_END));            // 结束被截断的会话,Mac 侧关闭 ASR
     // APPROVAL 下再松开/双击:忽略,不再触碰管线
-    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_OK, now + 200);
+    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 200);
     reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 300);
     assert(s.state == APP_ST_APPROVAL);
 }
@@ -626,7 +639,7 @@ static void test_listening_arrows_ignored(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 30);
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 40);
     assert(s.state == APP_ST_LISTENING);
@@ -753,7 +766,7 @@ static void test_ws_link_up(void) {
     // WiFi 链路下 PTT 可用(HOME 单击进 READY,再按下开录)
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
     assert(s.state == APP_ST_READY);
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);
     assert(s.state == APP_ST_LISTENING);
     assert(has_action(APP_ACT_SEND_VOICE_START));
 }
@@ -805,7 +818,7 @@ static void test_usb_link_up(void) {
     // USB 链路下 PTT 可用(HOME 单击进 READY,再按下开录)
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
     assert(s.state == APP_ST_READY);
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);
     assert(s.state == APP_ST_LISTENING);
     assert(has_action(APP_ACT_SEND_VOICE_START));
 }

@@ -83,7 +83,7 @@ static void send_key_action(app_state_t *s, app_key_action_t action,
     emit(out, n, max, a);
 }
 
-// PTT 开始(OK 按下 / UP 长按 0.5s 判定):离线 toast+error 音;在线滴声+开流。
+// PTT 开始(音量加长按 0.5s 判定):离线 toast+error 音;在线滴声+开流。
 static void start_ptt(app_state_t *s, uint64_t now_ms,
                       app_action_t *out, uint8_t *n, uint8_t max) {
     if (!s->link_up) {
@@ -108,7 +108,7 @@ static void start_ptt(app_state_t *s, uint64_t now_ms,
     }
 }
 
-// PTT 结束(OK 松开 / UP 长按松开):停流 → voice.end → 发送音 → 转写。
+// PTT 结束(音量加长按松开):停流 → voice.end → 发送音 → 转写。
 static void end_ptt(app_state_t *s, uint64_t now_ms,
                     app_action_t *out, uint8_t *n, uint8_t max) {
     app_action_t st = { .type = APP_ACT_STREAM_STOP };
@@ -184,20 +184,18 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
     case APP_ST_READY:
         if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
             send_key_action(s, APP_KEY_ENTER, out, n, max);
-        } else if (ev->type == APP_EV_KEY_PRESS && b == APP_BTN_OK) {
-            start_ptt(s, now_ms, out, n, max);
         } else if (ev->type == APP_EV_KEY_LONG && b == APP_BTN_UP) {
-            // 音量加长按 ≥0.5s = 说话(滴声只在长按判定时响,双击不会走到这里)
+            // 音量加长按 ≥0.5s = 说话(滴声只在长按判定时响,双击不会走到这里)。
+            // OK 键已退出 PTT:按住/松开不再开录音。
             start_ptt(s, now_ms, out, n, max);
         }
         break;
 
     case APP_ST_LISTENING:
-        // 松开立即结束并发送(无取消窗口)。OK 用普通松开;UP(音量加)长按录音
-        // 的松开是 LONG_UP(长按态松开不再报 RELEASE)。双击的第二按落在
-        // TRANSCRIBING(录音已发送),其 DOUBLE 事件由上方全局分支处理为"清空"。
-        if ((ev->type == APP_EV_KEY_RELEASE && b == APP_BTN_OK) ||
-            (ev->type == APP_EV_KEY_LONG_UP && b == APP_BTN_UP)) {
+        // 音量加长按录音的松开是 LONG_UP(长按态松开不再报 RELEASE),松开立即
+        // 结束并发送(无取消窗口)。双击的第二按落在 TRANSCRIBING(录音已发送),
+        // 其 DOUBLE 事件由上方全局分支处理为"清空"。
+        if (ev->type == APP_EV_KEY_LONG_UP && b == APP_BTN_UP) {
             end_ptt(s, now_ms, out, n, max);
         }
         break;
