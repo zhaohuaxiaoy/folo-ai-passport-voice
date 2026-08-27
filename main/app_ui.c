@@ -18,15 +18,15 @@
 #define W            240
 #define H            320
 
-// 顶栏左→右:BLE 图标 12px、电量、CPU/RAM(压缩 "C50 R60")、HH:MM 时间、
-// 活跃应用(右对齐截断)。240px 满:6+12 / 24+36 / 64+48 / 116+52 / 172+64。
-#define BLE_X        6
-#define BATT_X       24
-#define METRICS_X    64
-#define METRICS_W    48
-#define TIME_X       116
+// 顶栏(无 BLE 点、无 CPU/RAM 监测):右侧对齐组:电池图标(描边框+右缘
+// 触点,数字居中)、HH:MM 时间(最右贴 6px)。240px:144+34+4 / 182+52。
+#define BATT_X       144
+#define BATT_W       34
+#define BATT_H       16
+#define BATT_NUB_X   (BATT_X + BATT_W)   // 右缘触点
+#define BATT_NUB_W   4
+#define TIME_X       182
 #define TIME_W       52
-#define APP_X        172
 
 // ---- 页内部件索引(与 page 切换共用) ----
 typedef struct {
@@ -43,11 +43,10 @@ typedef struct {
 } page_t;
 
 static lv_obj_t *s_chrome;                // 顶层容器(lv_layer_top)
-static lv_obj_t *s_ble_icon;
+static lv_obj_t *s_batt_icon;   // 电池描边框(数字居中在框内)
+static lv_obj_t *s_batt_nub;    // 右缘触点
 static lv_obj_t *s_batt_label;
-static lv_obj_t *s_metrics_label;
 static lv_obj_t *s_time_label;
-static lv_obj_t *s_app_label;
 static lv_obj_t *s_offline_banner;
 static lv_obj_t *s_offline_text;
 static lv_obj_t *s_netbusy_banner;
@@ -127,18 +126,21 @@ static void build_chrome(void)
     lv_obj_remove_flag(s_chrome, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_pad_all(s_chrome, 0, 0);
 
-    // 顶栏
+    // 顶栏(无 BLE 点:USB 模式下 BLE 连接态无意义,用户要求删除)
     lv_obj_t *bar = block(s_chrome, 0, 0, W, BAR_H, UI_INK);
     (void)bar;
-    s_ble_icon = block(s_chrome, BLE_X, 7, 12, 12, UI_MUTED);   // 断开=灰,连接后改亮色
-    s_batt_label = label(s_chrome, "--", &lv_font_montserrat_14, 0xFFFFFF,
-                         BATT_X, 5, 36);
-    s_metrics_label = label(s_chrome, "", &lv_font_montserrat_14, 0xFFFFFF,
-                            METRICS_X, 5, METRICS_W);
+    // 电池图标:描边框 + 右缘触点,数字居中(无 % 后缀)
+    s_batt_icon = block(s_chrome, BATT_X, 5, BATT_W, BATT_H, UI_INK);
+    lv_obj_set_style_border_width(s_batt_icon, 2, 0);
+    lv_obj_set_style_border_color(s_batt_icon, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_radius(s_batt_icon, 3, 0);
+    s_batt_nub = block(s_chrome, BATT_NUB_X, 10, BATT_NUB_W, 6, 0xFFFFFF);
+    // 数字位置在 render 按真实字宽/字形高精确计算(batt_label_reposition):
+    // 实测 montserrat_14 数字字形高 10px,label 行高 16 → y=1 靠上视觉居中
+    s_batt_label = label(s_batt_icon, "--", &lv_font_montserrat_14, 0xFFFFFF,
+                         0, -2, BATT_W - 4);
     s_time_label = label(s_chrome, "--:--", &lv_font_montserrat_14, 0xFFFFFF,
                          TIME_X, 5, TIME_W);
-    s_app_label = label(s_chrome, "", &lv_font_montserrat_14, UI_MUTED,
-                        APP_X, 5, W - APP_X);
 
     // BLE 断线横幅(链路断时整宽显示;link_up = EVENT 特征已订阅)。
     // 文本是子 label(render 按通道名改写文案);banner 本体是 block,不能
@@ -280,30 +282,6 @@ static void build_approval(void)
     hint_label(p->root, "OK: APPROVE   UP: REJECT   DOWN: ENTER");
 }
 
-static void build_done(void)
-{
-    page_t *p = &s_pages[APP_ST_DONE];
-    p->root = lv_obj_create(s_bg);   // 基底屏的子对象:切换只显隐,不动活动屏
-    lv_obj_remove_flag(p->root, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_opa(p->root, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(p->root, 0, 0);
-    lv_obj_set_style_pad_all(p->root, 0, 0);
-    lv_obj_set_size(p->root, W, H);
-    lv_obj_set_pos(p->root, 0, 0);
-
-    // 对勾块状画
-    block(p->root, 96, 96, 48, 48, UI_GRASS);
-    block(p->root, 108, 112, 8, 18, 0xFFFFFF);
-    block(p->root, 108, 122, 22, 8, 0xFFFFFF);
-    block(p->root, 122, 108, 8, 8, 0xFFFFFF);
-    block(p->root, 122, 116, 8, 8, 0xFFFFFF);
-
-    label(p->root, "DONE", &lv_font_montserrat_20, UI_INK, 0, 164, W);
-    label(p->root, "text injected into your editor", &lv_font_montserrat_14,
-          UI_MUTED, 0, 196, W);
-    hint_label(p->root, "OK: BACK TO HOME   DOWN: ENTER");
-}
-
 static void set_hidden(lv_obj_t *o, bool hidden)
 {
     if (hidden) lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
@@ -363,7 +341,6 @@ esp_err_t app_ui_init(void)
     build_transcribing();
     build_running();
     build_approval();
-    build_done();
     for (int i = 0; i < APP_ST_COUNT; i++) {
         lv_obj_add_flag(s_pages[i].root, LV_OBJ_FLAG_HIDDEN);
     }
@@ -382,21 +359,16 @@ void app_ui_render(const app_ui_snapshot_t *snap)
     if (!snap->screen_on) return;
 
     // ---- chrome ----
-    lv_obj_set_style_bg_color(s_ble_icon,
-        lv_color_hex(snap->ble_connected ? 0x7CD6FF : UI_MUTED), 0);
     if (snap->battery_available) {
-        label_set_fmt_if_changed(s_batt_label, "%d%%", snap->battery_soc);
+        label_set_fmt_if_changed(s_batt_label, "%d", snap->battery_soc);
     } else {
         label_set_if_changed(s_batt_label, "--");
     }
-    label_set_fmt_if_changed(s_metrics_label, "C%d R%d",
-                             snap->mac_cpu, snap->mac_ram);
     {
         char t[16];
         time_sync_format_local(t, sizeof(t));
         label_set_if_changed(s_time_label, t);
     }
-    label_set_if_changed(s_app_label, snap->active_app[0] ? snap->active_app : "");
 
     // 横幅互斥:OFFLINE(通道断线)> BUSY(同位置 BANNER_Y)
     // 文案按当前链路通道渲染(BLE/WiFi;Windows 移植:WiFi 通道断线显示 WiFi 字样)

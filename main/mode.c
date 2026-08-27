@@ -106,9 +106,12 @@ esp_err_t mode_init(void)
     nvs_settings_get_mode(&m);            // 失败按 BLE 兜底(缺省)
     s_mode = (m == 2) ? APP_MODE_USB : ((m == 1) ? APP_MODE_WIFI : APP_MODE_BLE);
 
-    // WiFi/mDNS/WS 按需建栈:BLE 冷启动不占无线栈 RAM;USB 仍保持射频兼容语义。
+    // WiFi/mDNS/WS 按需建栈:BLE 冷启动不占无线栈 RAM;USB 模式数据走
+    // USB 线(WS 通道门禁,见 ws_client_start),不建 WiFi 栈 —— 真机验证:
+    // USB 模式初始化 WiFi 栈后堆耗尽(ESP_ERR_NO_MEM),USB-JTAG ringbuffer
+    // 申请失败,主通道反而起不来。
     esp_err_t e = ESP_OK;
-    if (s_mode != APP_MODE_BLE) {
+    if (s_mode == APP_MODE_WIFI) {
         e = prepare_wifi_stack();
         if (e != ESP_OK) ESP_LOGE(TAG, "WiFi 栈初始化失败: %s", esp_err_to_name(e));
     }
@@ -123,10 +126,8 @@ esp_err_t mode_init(void)
         esp_bt_controller_disable();
         ESP_LOGI(TAG, "模式: WiFi(蓝牙已关闭)");
     } else if (s_mode == APP_MODE_USB) {
-        // 射频保持:蓝牙 controller 已由 ble_audio_init 启动(不 disable),
-        // WiFi 同 WiFi 模式启动(配网则连上;WS 通道被门禁,数据仍走 USB 线)。
-        e = wifi_app_start();
-        if (e != ESP_OK) ESP_LOGE(TAG, "WiFi 启动失败: %s", esp_err_to_name(e));
+        // 射频保持:蓝牙 controller 已由 ble_audio_init 启动(不 disable);
+        // 不启 WiFi:数据走 USB 线(WS 门禁),RAM 留给 usb_link。
         e = usb_link_init();              // 驱动 + 读任务 + 日志重定向(console 门禁跳过 REPL)
         if (e != ESP_OK) ESP_LOGE(TAG, "USB 链路初始化失败: %s", esp_err_to_name(e));
         ESP_LOGI(TAG, "模式: USB(射频保持,数据走 USB)");

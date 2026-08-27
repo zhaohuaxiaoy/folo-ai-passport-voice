@@ -4,16 +4,16 @@
 无边框置顶小窗里; 识别完成(final)后文本自动注入输入框、窗口消失。
 
 平台差异与已知局限:
-- 圆角: tkinter 在 macOS/Windows 都无法原生逐像素圆角
-  (macOS 无 -transparentcolor; Windows 的 -transparentcolor 在部分
-  合成器下有重影风险) → 统一方形面板。
-- 焦点: 悬浮窗绝不调用 focus/focus_force —— 注入目标是用户当前
-  焦点窗口, 悬浮窗不得抢焦点。全平台 overrideredirect(无标题栏、
-  无关闭/最小化/最大化)。macOS 热路径不每帧 -topmost/lift/
-  update_idletasks, 也不设 -alpha(那才是 WindowServer 转圈的原因,
-  不是无边框本身)。
-  Windows: deiconify/lift/-topmost 会抢前台, 改走 WS_EX_NOACTIVATE
-  + SetWindowPos(SWP_NOACTIVATE)(REVIEW P2-D)。真机抢焦点 NOT RUN。
+- 圆角: macOS/Windows 都无法原生逐像素圆角 → 统一方形面板(macOS
+  半透明深色面板)。
+- 焦点(macOS): Tk Toplevel 底层是 NSWindow, 系统拒绝 nonactivating
+  panel 位, Tk 映射窗口时无条件激活 app —— transient/accessory
+  都拦不住抢焦点(用户实测)。macOS 改走原生 NSPanel +
+  NSNonactivatingPanelMask(PyObjC): 系统层面禁止激活 app 与成为
+  key window, 悬浮窗出现/消失都不碰输入焦点(真机验证 frontmost
+  不变)。NSPanel 构建失败时降级 Tk 实现(抢焦点, 已知局限)。
+  Windows: Tk deiconify/lift/-topmost 会抢前台, 改走 WS_EX_NOACTIVATE
+  + SetWindowPos(SWP_NOACTIVATE)。
 - 线程: 本模块全部方法只允许在 tk 主线程调用(fre_app 经 poll()
   驱动), 不跨线程触碰控件。
 
@@ -132,6 +132,34 @@ def _win32_apply_noactivate(hwnd, user32=None):
         return False
 
 
+def _mac_accessory():
+    """把本 app 激活策略降为 accessory(菜单栏常驻 app 的标准做法)。
+
+    macOS 上 Tk 映射窗口(deiconify)时会激活 app、抢走用户输入窗口的
+    前台焦点 —— transient 拦不住(用户实测仍失焦)。accessory 策略下
+    app 激活不抢占其他 app 的 key window,悬浮窗出现时输入框保持焦点。
+    失败静默降级(不阻断主流程)。Tk 初始化后才能调,故放 _build。
+    """
+    try:
+        import ctypes
+        import ctypes.util
+        objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.sel_registerName.restype = ctypes.c_void_p
+        msg = objc.objc_msgSend
+        msg.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        msg.restype = ctypes.c_void_p
+        ns_app = msg(objc.objc_getClass(b"NSApplication"),
+                     objc.sel_registerName(b"sharedApplication"))
+        if not ns_app:
+            return False
+        msg.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long]
+        msg(ns_app, objc.sel_registerName(b"setActivationPolicy:"), 1)  # Accessory
+        return True
+    except Exception:  # noqa: BLE001 ctypes/权限失败:降级,悬浮窗仍能显示
+        return False
+
+
 def _present_window(win):
     """把已 withdraw 的 Toplevel 映出来, 不抢前台焦点。
 
@@ -154,8 +182,9 @@ def _present_window(win):
     win.lift()
 
 
-class FloatingCandidate:
-    """候选字悬浮窗。懒创建 Toplevel, 会话间复用(show/hide 不销毁)。
+class _TkFloat:
+    """Tk 实现(Windows 主用;macOS 仅 NSPanel 降级路径)。懒创建 Toplevel,
+    会话间复用(show/hide 不销毁)。
 
     - show(text): 幂等 —— 更新文本 + 映出 + 置顶 + 重新定位。
     - hide(): withdraw(不销毁)。
@@ -262,6 +291,12 @@ class FloatingCandidate:
         win.withdraw()                      # 立刻藏: 默认映射会抢焦, 且空窗会闪
         win.overrideredirect(True)          # 无标题栏、无关闭/最小化/最大化
         win.resizable(False, False)
+        if sys.platform == "darwin":
+            # macOS 抢焦点根因是 Tk 映射窗口时激活 app(用户实测 transient
+            # 拦不住)。accessory 激活策略下 app 激活不抢其他 app 前台;
+            # transient 保留:窗口不能成为 key window,双保险。
+            win.transient(self._root)
+            _mac_accessory()
         if sys.platform == "win32":
             win.update_idletasks()
             _win32_apply_noactivate(_win32_toplevel_hwnd(win))
@@ -312,3 +347,175 @@ class FloatingCandidate:
                 except tk.TclError:
                     self._font = None
         return self._font
+
+
+class _MacPanelFloat:
+    """macOS 原生 NSPanel 悬浮窗(PyObjC)。
+
+    Tk Toplevel 底层是 NSWindow —— 系统拒绝 nonactivating panel 位
+    (实测 styleMask 不变化), Tk 映射窗口时无条件激活 app, 抢走输入框
+    焦点(transient/accessory 均拦不住, 用户实测)。NSPanel +
+    NSNonactivatingPanelMask 从系统层面禁止窗口激活 app 与成为 key
+    window: 悬浮窗出现/消失都不碰输入焦点(真机验证 frontmost 不变)。
+
+    高频 partial 帧沿用 _FLUSH_MS 合并(换行测量 + 面板重排不便宜)。
+    """
+
+    def __init__(self, root):
+        self._root = root
+        # 懒 import + 立刻探测: PyObjC 缺失/损坏时抛错, 门面降级 Tk。
+        from AppKit import (NSPanel, NSBorderlessWindowMask,
+                            NSNonactivatingPanelMask, NSBackingStoreBuffered,
+                            NSStatusWindowLevel, NSColor, NSTextField,
+                            NSMakeRect, NSFont, NSLineBreakByWordWrapping,
+                            NSFontAttributeName, NSScreen,
+                            NSStringDrawingUsesLineFragmentOrigin)
+        from Foundation import NSString, NSMakeSize, NSMakePoint
+        self._panel = None
+        self._label = None
+        self._font = None
+        self._last_text = None
+        self._pending = None
+        self._flush_after = None
+        self._last_flush_at = 0.0
+        self._visible = False
+
+    # ---- 显示/隐藏 ----
+
+    def show(self, text):
+        """显示候选文本。首次调用懒创建窗口(接口与 _TkFloat 对齐)。"""
+        if self._panel is None:
+            self._build()
+        if text == self._last_text and self._visible:
+            return
+        if self._flush_after is None \
+                and time.monotonic() - self._last_flush_at >= _FLUSH_MS / 1000:
+            self._flush(text)
+            return
+        self._pending = text
+        if self._flush_after is None:
+            self._flush_after = self._root.after(_FLUSH_MS, self._flush_pending)
+
+    def _flush_pending(self):
+        self._flush_after = None
+        text = self._pending
+        self._pending = None
+        if text is not None:
+            self._flush(text)
+
+    def _flush(self, text):
+        self._last_flush_at = time.monotonic()
+        self._last_text = text
+        self._label.setStringValue_(text)
+        self._relayout(text)
+        if not self._visible:
+            self._panel.orderFrontRegardless()   # 不激活 app、不成 key window
+            self._visible = True
+
+    def hide(self):
+        if self._panel is None:
+            return
+        if self._flush_after is not None:
+            self._root.after_cancel(self._flush_after)
+            self._flush_after = None
+        self._pending = None
+        if self._visible:
+            self._panel.orderOut_(None)
+            self._visible = False
+        self._last_text = None
+        self._last_flush_at = 0.0
+
+    def destroy(self):
+        if self._flush_after is not None:
+            self._root.after_cancel(self._flush_after)
+            self._flush_after = None
+        if self._panel is not None:
+            self._panel.orderOut_(None)
+            self._panel = None
+            self._label = None
+            self._font = None
+            self._last_text = None
+            self._visible = False
+
+    # ---- 构建 ----
+
+    def _build(self):
+        from AppKit import (NSPanel, NSBorderlessWindowMask,
+                            NSNonactivatingPanelMask, NSBackingStoreBuffered,
+                            NSStatusWindowLevel, NSColor, NSTextField,
+                            NSMakeRect, NSFont, NSLineBreakByWordWrapping)
+        panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(0, 0, _WIDTH, 60),
+            NSBorderlessWindowMask | NSNonactivatingPanelMask,
+            NSBackingStoreBuffered, False)
+        panel.setLevel_(NSStatusWindowLevel)
+        panel.setBackgroundColor_(NSColor.colorWithCalibratedWhite_alpha_(0.13, 0.96))
+        panel.setOpaque_(False)
+        panel.setHidesOnDeactivate_(False)
+        self._panel = panel
+        self._font = NSFont.fontWithName_size_("PingFangSC-Regular", _FONT_SIZE)
+        if self._font is None:
+            self._font = NSFont.systemFontOfSize_(_FONT_SIZE)
+        label = NSTextField.alloc().initWithFrame_(
+            NSMakeRect(_PAD_X, _PAD_Y, _WIDTH - 2 * _PAD_X, 24))
+        label.setBezeled_(False)
+        label.setDrawsBackground_(False)
+        label.setEditable_(False)
+        label.setSelectable_(False)
+        label.setStringValue_("")
+        label.setFont_(self._font)
+        label.setTextColor_(NSColor.whiteColor())
+        label.cell().setWraps_(True)
+        label.cell().setLineBreakMode_(NSLineBreakByWordWrapping)
+        panel.contentView().addSubview_(label)
+        self._label = label
+
+    def _relayout(self, text):
+        """按文本换行尺寸重设面板并定位(底部居中, 底边 80% 屏幕高)。"""
+        from AppKit import (NSFontAttributeName, NSScreen,
+                            NSStringDrawingUsesLineFragmentOrigin)
+        from Foundation import NSString, NSMakeSize, NSMakePoint, NSMakeRect
+        screen = NSScreen.mainScreen().frame()
+        attrs = {NSFontAttributeName: self._font}
+        # boundingRect 是 NSString 的方法, Python str 需桥接
+        size = NSString.stringWithString_(text).boundingRectWithSize_options_attributes_(
+            NSMakeSize(_WRAP, 1e9),
+            NSStringDrawingUsesLineFragmentOrigin, attrs).size
+        w = min(max(size.width, 80.0), float(_WRAP)) + 2 * _PAD_X
+        h = max(size.height, 16.0) + 2 * _PAD_Y + 4
+        sw, sh = screen.size.width, screen.size.height
+        x = max(0, int((sw - w) // 2))
+        y = max(0, int(sh * 0.8) - int(h))
+        self._panel.setContentSize_(NSMakeSize(w, h))
+        self._label.setFrame_(NSMakeRect(_PAD_X, _PAD_Y,
+                                         w - 2 * _PAD_X, h - 2 * _PAD_Y))
+        self._panel.setFrameOrigin_(NSMakePoint(x, y))
+
+
+class FloatingCandidate:
+    """候选字悬浮窗门面: macOS 用原生 NSPanel(不抢焦点), 其他平台用 Tk。
+
+    - show(text): 幂等 —— 更新文本 + 映出 + 置顶 + 重新定位。
+    - hide(): withdraw/orderOut(不销毁)。
+    - destroy(): 显式销毁(应用退出/relay_done 兜底)。
+    macOS 下 NSPanel 构建失败(缺 PyObjC)时降级 Tk 实现(抢焦点, 已知局限)。
+    """
+
+    def __init__(self, root):
+        self._root = root
+        if sys.platform == "darwin":
+            try:
+                self._impl = _MacPanelFloat(root)
+            except Exception:  # noqa: BLE001 缺 PyObjC: 降级 Tk(抢焦点, 已知局限)
+                self._impl = _TkFloat(root)
+        else:
+            self._impl = _TkFloat(root)
+
+    def show(self, text):
+        self._impl.show(text)
+
+    def hide(self):
+        self._impl.hide()
+
+    def destroy(self):
+        self._impl.destroy()

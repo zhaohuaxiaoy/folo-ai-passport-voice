@@ -319,7 +319,8 @@ static void test_agent_status_flow(void) {
     ev = (app_event_t){ .type = APP_EV_AGENT_STATUS,
                         .u.agent_status = { .state = APP_AGENT_DONE, .message = "24 passed" } };
     app_state_reduce(&s, &ev, now, out, &on);
-    assert(s.state == APP_ST_DONE);
+    // 无 DONE 页:done 直接回 READY 待命(用户:不要 done 提示),成功音保留
+    assert(s.state == APP_ST_READY);
     app_action_t *t = find_action(APP_ACT_PLAY_TONE);
     assert(t && t->u.tone == APP_TONE_SUCCESS);
 }
@@ -364,30 +365,6 @@ static void test_approval(void) {
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 300);
     a = find_action(APP_ACT_SEND_KEY_ACTION);
     assert(a && a->u.key_action.action == APP_KEY_ENTER);
-}
-
-// ---- DONE:●/▼ 回 HOME ----
-static void test_done_back_home(void) {
-    reset();
-    s.state = APP_ST_DONE;
-    s.state_since_ms = now;
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    assert(s.state == APP_ST_HOME);
-
-    // ▼ 在 DONE 下 = 回车(与全局 DOWN 语义统一;旧"任意键回 HOME"已随
-    // 状态机演进移除 —— 基线测试过期,按当前语义修正)
-    reset();
-    app_action_t *a;
-    s.state = APP_ST_DONE;
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 10);
-    a = find_action(APP_ACT_SEND_KEY_ACTION);
-    assert(a && a->u.key_action.action == APP_KEY_ENTER);
-    assert(s.state == APP_ST_DONE);
-
-    reset();
-    s.state = APP_ST_DONE;
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 10);    // ▲ 无效
-    assert(s.state == APP_ST_DONE);
 }
 
 // ---- 两级息屏/唤醒 ----
@@ -511,22 +488,6 @@ static void test_ble_link_down(void) {
     assert(s.state == APP_ST_APPROVAL);
 }
 
-// ---- mac.metrics 快照 ----
-static void test_metrics(void) {
-    reset();
-    app_event_t ev = { .type = APP_EV_MAC_METRICS,
-                       .u.metrics = { .cpu = 34, .ram = 58, .battery = 85,
-                                      .charging = true, .active_app = "TRAE" } };
-    app_state_reduce(&s, &ev, now, out, &on);
-    app_ui_snapshot_t snap;
-    app_state_snapshot(&s, now, &snap);
-    assert(snap.mac_cpu == 34);
-    assert(snap.mac_ram == 58);
-    assert(snap.mac_batt == 85);
-    assert(snap.mac_charging);
-    assert(strcmp(snap.active_app, "TRAE") == 0);
-}
-
 // ---- 文本安全:恰好填满缓冲也保证 NUL 结尾(截断上限由协议层测试覆盖) ----
 static void test_bounded(void) {
     reset();
@@ -613,10 +574,10 @@ static void test_listening_arrows_ignored(void) {
     assert(s.state == APP_ST_LISTENING);
 }
 
-// ---- DONE 下无按键同样分级息屏,任意键唤醒 ----
-static void test_screen_off_done(void) {
+// ---- READY 下无按键同样分级息屏,任意键唤醒 ----
+static void test_screen_off_ready(void) {
     reset();
-    s.state = APP_ST_DONE;
+    s.state = APP_ST_READY;
     s.state_since_ms = now;
     reduce(APP_EV_TICK, now + APP_IDLE_BACKLIGHT_OFF_MS + 1);
     assert(s.screen_on == false);
@@ -628,9 +589,7 @@ static void test_screen_off_done(void) {
     reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + APP_IDLE_PANEL_OFF_MS + 2); // 唤醒
     assert(s.screen_on == true);
     assert(s.panel_on == true);
-    assert(s.state == APP_ST_DONE);                        // 只唤醒,不离开 DONE
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    assert(s.state == APP_ST_HOME);                        // 再单击才回 HOME
+    assert(s.state == APP_ST_READY);                        // 只唤醒,不离开 READY
 }
 
 // ---- APPROVAL 无超时(安全审批必须等物理按键) ----
@@ -943,9 +902,8 @@ int main(void) {
     test_agent_status_flow();
     test_approval();
     test_approval_during_listening();
-    test_done_back_home();
     test_screen_off_wake();
-    test_screen_off_done();
+    test_screen_off_ready();
     test_transcript_display();
     test_ble_link_down();
     test_ble_disconnect_transcribing();
@@ -955,7 +913,6 @@ int main(void) {
     test_agent_error();
     test_audio_drop_netbusy();
     test_ble_events();
-    test_metrics();
     test_snapshot_agent_name();
     test_snapshot_link_up();
     test_ws_link_up();

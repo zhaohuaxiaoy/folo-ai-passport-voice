@@ -138,6 +138,8 @@ def test_candidate_poll_wiring():
         return
     root.withdraw()
     app = FREApp(root, dry_run=True, no_tray=True)
+    from floating import _TkFloat
+    app._floating = _TkFloat(root)   # 接线测试锁定 Tk 实现(门面在 macOS 走 NSPanel)
     app.phase_q.put(("candidate", ("你好", False)))
     app.poll()
     root.update()
@@ -167,6 +169,8 @@ def test_session_end_keeps_floating():
         return
     root.withdraw()
     app = FREApp(root, dry_run=True, no_tray=True)
+    from floating import _TkFloat
+    app._floating = _TkFloat(root)   # 接线测试锁定 Tk 实现(门面在 macOS 走 NSPanel)
     app.phase_q.put(("candidate", ("你好", False)))
     app.poll()
     root.update()

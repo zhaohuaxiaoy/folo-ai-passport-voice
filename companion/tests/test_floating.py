@@ -193,13 +193,13 @@ def test_floating_window_show_hide():
     try:
         import time  # noqa: F401
         import ttkbootstrap as ttk
-        from floating import FloatingCandidate
+        from floating import _TkFloat  # 窗口用例锁定 Tk 实现(门面在 macOS 走 NSPanel)
         root = ttk.Window(themename="darkly")
     except Exception as e:  # noqa: BLE001 无显示环境(TclError)等
         print(f"SKIP: 无法创建窗口({e}); 跳过")
         return
     root.withdraw()
-    f = FloatingCandidate(root)
+    f = _TkFloat(root)
     f.show("你好世界")
     root.update()
     assert f._win is not None and f._visible, "show 后窗口应可见"
@@ -231,13 +231,13 @@ def test_floating_show_same_text_noop():
     try:
         import time  # noqa: F401
         import ttkbootstrap as ttk
-        from floating import FloatingCandidate
+        from floating import _TkFloat  # 窗口用例锁定 Tk 实现(门面在 macOS 走 NSPanel)
         root = ttk.Window(themename="darkly")
     except Exception as e:  # noqa: BLE001 无显示环境(TclError)等
         print(f"SKIP: 无法创建窗口({e}); 跳过")
         return
     root.withdraw()
-    f = FloatingCandidate(root)
+    f = _TkFloat(root)
     f.show("你好世界")
     root.update()
     time.sleep(0.15)            # 过合并窗口: 后续 show 均立即渲染
@@ -282,13 +282,13 @@ def test_floating_high_frequency_merge():
     try:
         import time  # noqa: F401
         import ttkbootstrap as ttk
-        from floating import FloatingCandidate
+        from floating import _TkFloat  # 窗口用例锁定 Tk 实现(门面在 macOS 走 NSPanel)
         root = ttk.Window(themename="darkly")
     except Exception as e:  # noqa: BLE001 无显示环境(TclError)等
         print(f"SKIP: 无法创建窗口({e}); 跳过")
         return
     root.withdraw()
-    f = FloatingCandidate(root)
+    f = _TkFloat(root)
     f.show("第一帧")
     root.update()
     assert f._label.cget("text") == "第一帧", "首帧应立即渲染"
@@ -309,13 +309,13 @@ def test_flush_does_not_reset_topmost_each_frame():
     try:
         import time  # noqa: F401
         import ttkbootstrap as ttk
-        from floating import FloatingCandidate
+        from floating import _TkFloat  # 窗口用例锁定 Tk 实现(门面在 macOS 走 NSPanel)
         root = ttk.Window(themename="darkly")
     except Exception as e:  # noqa: BLE001
         print(f"SKIP: 无法创建窗口({e}); 跳过")
         return
     root.withdraw()
-    f = FloatingCandidate(root)
+    f = _TkFloat(root)
     f.show("你好")
     root.update()
     time.sleep(0.15)
@@ -340,13 +340,13 @@ def test_floating_position_tracks_text():
     try:
         import time  # noqa: F401
         import ttkbootstrap as ttk
-        from floating import FloatingCandidate, _PAD_X  # noqa: F401
+        from floating import _TkFloat, _PAD_X  # noqa: F401
         root = ttk.Window(themename="darkly")
     except Exception as e:  # noqa: BLE001 无显示环境(TclError)等
         print(f"SKIP: 无法创建窗口({e}); 跳过")
         return
     root.withdraw()
-    f = FloatingCandidate(root)
+    f = _TkFloat(root)
     f.show("短")
     root.update()
     time.sleep(0.15)            # 过合并窗口

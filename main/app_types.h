@@ -24,7 +24,6 @@ typedef enum {
     APP_ST_TRANSCRIBING,    // 等待 Mac 转写
     APP_ST_AGENT_RUNNING,   // Agent 执行中
     APP_ST_APPROVAL,        // 待物理审批
-    APP_ST_DONE,            // 任务完成
     APP_ST_COUNT,
 } app_stage_t;
 
@@ -53,7 +52,6 @@ typedef enum {
     APP_EV_KEY_CLICK,
     APP_EV_KEY_DOUBLE,
     APP_EV_KEY_LONG,
-    APP_EV_MAC_METRICS,
     APP_EV_AGENT_STATUS,
     APP_EV_APPROVAL_REQUEST,
     APP_EV_TRANSCRIPT,
@@ -115,7 +113,6 @@ typedef enum {
 #define APP_TITLE_MAX         64
 #define APP_TARGET_MAX        64
 #define APP_DIFF_MAX          64
-#define APP_METRIC_APP_MAX    24
 // 显示通道:须 ≥ APP_TRANSCRIPT_MAX,保证 relay 按 128B 切分的转写行完整落屏
 #define APP_AGENT_MSG_MAX     APP_TRANSCRIPT_MAX
 #define APP_TOAST_MAX         64
@@ -126,11 +123,6 @@ typedef struct {
     app_event_type_t type;
     union {
         struct { uint8_t btn; } key;                    // KEY_*
-        struct {
-            uint8_t cpu; uint8_t ram; uint8_t battery;  // 0..100
-            bool charging;
-            char active_app[APP_METRIC_APP_MAX];
-        } metrics;                                       // MAC_METRICS
         struct {
             uint8_t state;                              // app_agent_state_t
             char message[APP_AGENT_MSG_MAX];
@@ -202,11 +194,6 @@ typedef struct {
     char           link_name[8];  // 当前链路通道名:"BLE"/"WiFi"(断线横幅按此渲染)
     bool           battery_available;
     uint8_t        battery_soc;   // 0..100
-    uint8_t        mac_cpu;       // 0..100
-    uint8_t        mac_ram;       // 0..100
-    uint8_t        mac_batt;      // 0..100
-    bool           mac_charging;
-    char           active_app[APP_METRIC_APP_MAX];
     char           agent_message[APP_AGENT_MSG_MAX];
     bool           transcript_final; // false → 当前 agent_message 是转写预览(未定稿,UI 加光标感)
     char           agent_state_name[16];

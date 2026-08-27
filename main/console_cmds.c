@@ -285,6 +285,7 @@ static const struct { const char *name; esp_console_cmd_func_t fn; } s_cmds[] = 
     { "ws",      cmd_ws },
     { "mdns",    cmd_mdns },
     { "log",     cmd_log },
+    { "time",    cmd_time },
     { "st",      cmd_st },
     { "reboot",  cmd_reboot },
     { "factory", cmd_factory },
@@ -319,13 +320,21 @@ int console_cmds_run_line(const char *line, char *out_buf, size_t out_cap)
          tok && argc < 8; tok = strtok_r(NULL, " \t\r\n", &save)) {
         argv[argc++] = tok;
     }
-    if (argc == 0) return 1;   // 空行:无命令
+    if (argc == 0) {
+        if (out_buf && out_cap > 0) out_buf[0] = '\0';
+        return 1;   // 空行:无命令
+    }
 
     const esp_console_cmd_func_t *fn = NULL;
     for (size_t i = 0; i < CMD_COUNT; i++) {
         if (strcmp(argv[0], s_cmds[i].name) == 0) { fn = &s_cmds[i].fn; break; }
     }
-    if (fn == NULL) return 1;   // 未知命令:调用方(SYS)回 "unknown command"
+    if (fn == NULL) {
+        // 先落 NUL:调用方(SYS)以 out_buf[0]=='\0' 判"无输出"回 unknown command ——
+        // 不落则读到未初始化堆垃圾(实测 0x14 单字节经 SYS_RESP 上行,时间校不进去)
+        if (out_buf && out_cap > 0) out_buf[0] = '\0';
+        return 1;   // 未知命令:调用方(SYS)回 "unknown command"
+    }
 
     // 输出捕获进调用方缓冲;执行完恢复(REPL 线程与 USB 读任务互斥 ——
     // REPL 存在时 USB 驱动未装、usb_link 读任务不存在,反之亦然)

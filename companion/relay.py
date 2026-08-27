@@ -605,6 +605,20 @@ class Relay:
                 print(f"[tx] transcript 下行失败(未连接/写失败): {e}",
                       file=sys.stderr)
 
+    async def _send_agent_done(self):
+        """会话收尾: 下行 agent.status done, 设备状态机据此回 DONE。
+
+        设备 TRANSCRIBING/AGENT_RUNNING 状态只有收到 agent.status 才退出
+        (done → DONE, 带成功提示音); 悬浮窗取代的是预览, 收尾信号不能省
+        (真机验证 2026-08-27: 缺此下行设备一直 TRANSCRIBING 到 STT 超时)。
+        失败只记日志, 不中断收尾。
+        """
+        line = {"type": "agent.status", "state": "done", "message": ""}
+        try:
+            await self._send_ctrl(line)
+        except Exception as e:
+            print(f"[tx] agent.status done 下行失败: {e}", file=sys.stderr)
+
     # -- 审批演示 --
 
     async def _demo_approval(self):
@@ -627,6 +641,11 @@ class Relay:
             except asyncio.TimeoutError:
                 print(f"[approval] {self.timeout:.0f}s 未收到 agent.action",
                       file=sys.stderr)
+            else:
+                # 设备按键决策后进 AGENT_RUNNING, 等 agent.status 收尾
+                # —— 补 done 下行, 否则 APPROVAL 流程后同样卡死(与语音
+                # 会话同源问题, 真机验证 2026-08-27)。
+                await self._send_agent_done()
         except Exception as e:
             # 发送失败等异常不冒出: create_task 无人 await, 冒出会变
             # "Task exception was never retrieved"(REVIEW 批次)
@@ -766,6 +785,11 @@ class _VoiceSession:
                     if text:
                         self.final_text = text
                         await asyncio.to_thread(self.relay._inject, text)
+                    # 会话收尾信号:设备状态机(TRANSCRIBING/AGENT_RUNNING)
+                    # 靠 agent.status done 下行才回 DONE——悬浮窗取代的是
+                    # 预览,不是收尾信号(真机验证 2026-08-27: 缺此下行设备
+                    # 一直 TRANSCRIBING 直到 STT 超时)。
+                    await self.relay._send_agent_done()
                     self._final_received.set()
                     return
         except Exception as e:

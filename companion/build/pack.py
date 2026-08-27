@@ -32,7 +32,8 @@ COLLECT_SUBMODULES = ("bleak", "websockets", "zeroconf", "pystray",
 # 必须 collect-data, 否则运行时查资源失败
 COLLECT_DATA = ("ttkbootstrap",)
 COLLECT_ALL_DARWIN = ("pyobjc-framework-Quartz",
-                      "pyobjc-framework-ApplicationServices")
+                      "pyobjc-framework-ApplicationServices",
+                      "pyobjc-framework-Cocoa")   # 悬浮窗 NSPanel 需要 AppKit
 
 
 def _run(cmd, **kw):
@@ -87,6 +88,14 @@ def build(app_name):
     if sys.platform == "darwin":
         app = os.path.join(DIST, f"{app_name}.app")
         _patch_info_plist(app)  # 先补隐私用途声明再签名
+        # pyinstaller 会把 companion 包目录里的 config.local.json 当包数据
+        # 拷进 Frameworks —— 既是密钥外泄风险,又会破坏签名封套(codesign
+        # 无法对 JSON 数据文件签名,verify 报 invalid subcomponent → TCC
+        # SecCode 校验失败 → 真机 BLE 一启动就 abort)。必须在签名前清掉。
+        leaked = os.path.join(app, "Contents", "Frameworks", "config.local.json")
+        if os.path.exists(leaked):
+            os.remove(leaked)
+            print(f"✗ 已剔除误入包的 config.local.json(密钥不得进产物): {leaked}")
         p = _run(["codesign", "--force", "--deep", "-s", "-", app])
         if p.returncode != 0:
             print("警告: ad-hoc 签名失败(不影响本地运行, Gatekeeper 会提示)",

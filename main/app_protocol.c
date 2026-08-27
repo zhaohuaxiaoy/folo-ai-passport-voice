@@ -60,24 +60,6 @@ static uint8_t parse_risk(const cJSON *o) {
     return APP_RISK_MEDIUM;
 }
 
-static bool parse_metrics(const cJSON *o, app_event_t *ev) {
-    const cJSON *cpu = cJSON_GetObjectItemCaseSensitive(o, "cpu");
-    const cJSON *ram = cJSON_GetObjectItemCaseSensitive(o, "ram");
-    if (!cJSON_IsNumber(cpu) || !cJSON_IsNumber(ram)) return false;
-    ev->u.metrics.cpu    = (uint8_t)(cpu->valuedouble < 0 ? 0 : cpu->valuedouble > 100 ? 100 : cpu->valuedouble);
-    ev->u.metrics.ram    = (uint8_t)(ram->valuedouble < 0 ? 0 : ram->valuedouble > 100 ? 100 : ram->valuedouble);
-    const cJSON *batt = cJSON_GetObjectItemCaseSensitive(o, "battery");
-    ev->u.metrics.battery = cJSON_IsNumber(batt)
-        ? (uint8_t)(batt->valuedouble < 0 ? 0 : batt->valuedouble > 100 ? 100 : batt->valuedouble) : 0;
-    const cJSON *chg = cJSON_GetObjectItemCaseSensitive(o, "charging");
-    ev->u.metrics.charging = cJSON_IsBool(chg) ? cJSON_IsTrue(chg) : false;
-    const cJSON *app = cJSON_GetObjectItemCaseSensitive(o, "activeApp");
-    str_take(ev->u.metrics.active_app, sizeof(ev->u.metrics.active_app),
-             cJSON_IsString(app) ? app->valuestring : "");
-    ev->type = APP_EV_MAC_METRICS;
-    return true;
-}
-
 static bool parse_agent_status(const cJSON *o, app_event_t *ev) {
     const cJSON *st = cJSON_GetObjectItemCaseSensitive(o, "state");
     if (!cJSON_IsString(st)) return false;
@@ -148,8 +130,7 @@ bool app_protocol_parse(const char *json, size_t len, app_event_t *ev) {
     bool ok = false;
     const cJSON *type = cJSON_GetObjectItemCaseSensitive(root, "type");
     if (cJSON_IsString(type)) {
-        if      (strcmp(type->valuestring, "mac.metrics") == 0)          ok = parse_metrics(root, ev);
-        else if (strcmp(type->valuestring, "agent.status") == 0)         ok = parse_agent_status(root, ev);
+        if      (strcmp(type->valuestring, "agent.status") == 0)         ok = parse_agent_status(root, ev);
         else if (strcmp(type->valuestring, "agent.approval_request") == 0) ok = parse_approval(root, ev);
         else if (strcmp(type->valuestring, "transcript") == 0)           ok = parse_transcript(root, ev);
         else if (strcmp(type->valuestring, "time.set") == 0)             ok = parse_time_set(root, ev);

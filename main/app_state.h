@@ -22,9 +22,6 @@ typedef struct {
     uint64_t       toast_until_ms;
     bool           stream_started;  // 本会话采集是否已开(START 音播完后 TONE_DONE 驱动)
     char           toast[APP_TOAST_MAX];
-    uint8_t        mac_cpu, mac_ram, mac_batt;
-    bool           mac_charging;
-    char           active_app[APP_METRIC_APP_MAX];
     char           agent_message[APP_AGENT_MSG_MAX];
     bool           transcript_final;   // false → agent_message 是转写预览(未定稿);true = 定稿/非转写
     char           agent_state_name[16];

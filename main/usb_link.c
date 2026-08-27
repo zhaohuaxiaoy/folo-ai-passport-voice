@@ -386,7 +386,10 @@ esp_err_t usb_link_init(void)
     // 日志隔离:esp_log → RAM 环(数据帧独占物理口;经 console `log` 取回)
     esp_log_set_vprintf(usb_log_vprintf);
 
-    if (xTaskCreate(usb_read_task, "usb_link", 2048, NULL, 3, NULL) != pdPASS) {
+    // 栈 4096(对齐 ESP_CONSOLE_REPL_CONFIG_DEFAULT):SYS 命令面在
+    // usb_read_task 里执行 console_cmds_run_line(sprintf 格式化/校时路径),
+    // 2048 实测栈保护 fault(Guru Meditation, PC 落在 sprintf)。
+    if (xTaskCreate(usb_read_task, "usb_link", 4096, NULL, 3, NULL) != pdPASS) {
         ESP_LOGE(TAG, "USB 读任务创建失败");
         s_running = false;
         esp_log_set_vprintf(vprintf);

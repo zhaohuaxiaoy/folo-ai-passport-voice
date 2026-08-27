@@ -5,27 +5,6 @@
 #include "app_protocol.h"
 #include "app_types.h"
 
-static void test_parse_metrics(void) {
-    const char *j = "{\"type\":\"mac.metrics\",\"cpu\":14.2,\"ram\":38.7,"
-                    "\"battery\":87,\"charging\":false,\"activeApp\":\"Code\"}";
-    app_event_t ev;
-    assert(app_protocol_parse(j, strlen(j), &ev));
-    assert(ev.type == APP_EV_MAC_METRICS);
-    assert(ev.u.metrics.cpu == 14);
-    assert(ev.u.metrics.ram == 38);   // 38.7 截断为 38(不四舍五入)
-    assert(ev.u.metrics.battery == 87);
-    assert(ev.u.metrics.charging == false);
-    assert(strcmp(ev.u.metrics.active_app, "Code") == 0);
-}
-
-static void test_parse_metrics_bounds(void) {
-    const char *j = "{\"type\":\"mac.metrics\",\"cpu\":150,\"ram\":-5}";
-    app_event_t ev;
-    assert(app_protocol_parse(j, strlen(j), &ev));
-    assert(ev.u.metrics.cpu == 100);
-    assert(ev.u.metrics.ram == 0);
-}
-
 static void test_parse_agent_status(void) {
     const char *j = "{\"type\":\"agent.status\",\"state\":\"running\",\"message\":\"unit tests 18/24\"}";
     app_event_t ev;
@@ -274,8 +253,6 @@ static void test_serialize_small_cap(void) {
 }
 
 int main(void) {
-    test_parse_metrics();
-    test_parse_metrics_bounds();
     test_parse_agent_status();
     test_parse_approval();
     test_parse_transcript();

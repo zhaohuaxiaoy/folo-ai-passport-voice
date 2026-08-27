@@ -55,11 +55,6 @@ void app_state_snapshot(const app_state_t *s, uint64_t now_ms, app_ui_snapshot_t
             : "BLE");
     snap->elapsed_ms       = (uint32_t)(now_ms - s->state_since_ms);
     snap->battery_available = true; // 由主循环在快照后补真实值,见 app_ui
-    snap->mac_cpu          = s->mac_cpu;
-    snap->mac_ram          = s->mac_ram;
-    snap->mac_batt         = s->mac_batt;
-    snap->mac_charging     = s->mac_charging;
-    str_cpy(snap->active_app, sizeof(snap->active_app), s->active_app);
     str_cpy(snap->agent_message, sizeof(snap->agent_message), s->agent_message);
     snap->transcript_final = s->transcript_final;
     str_cpy(snap->agent_state_name, sizeof(snap->agent_state_name), s->agent_state_name);
@@ -220,17 +215,6 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         }
         break;
 
-    case APP_ST_DONE:
-        if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_OK) {
-            s->state = APP_ST_HOME;
-            s->state_since_ms = now_ms;
-            app_action_t r = { .type = APP_ACT_UI_REFRESH };
-            emit(out, n, max, r);
-        } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
-            send_key_action(s, APP_KEY_ENTER, out, n, max);
-        }
-        break;
-
     default:
         // TRANSCRIBING / AGENT_RUNNING:按键全部忽略(仅唤醒已在上面处理)
         break;
@@ -245,12 +229,13 @@ static void handle_tick(app_state_t *s, uint64_t now_ms, app_action_t *out, uint
         emit(out, n, max, r);
     }
 
-    // 分级息屏:HOME/READY/DONE 下无按键(APPROVAL 保持常亮:安全审批不熄屏)
+    // 分级息屏:HOME/READY 下无按键(APPROVAL 保持常亮:安全审批不熄屏)
     // 20s → 关背光(渲染跳过,面板冻结最后一帧);60s → 面板 SLPIN 断电(μA 级)。
     // 背光关后 tick 仍需走到面板判定,故不提前 return。
-    const bool idle_state = (s->state == APP_ST_HOME ||
-                             s->state == APP_ST_READY ||
-                             s->state == APP_ST_DONE);
+    // USB 模式(有线)不熄屏:屏幕常亮,省电只针对无线场景(用户需求)。
+    const bool idle_state = (mode_get() != APP_MODE_USB) &&
+                            (s->state == APP_ST_HOME ||
+                             s->state == APP_ST_READY);
     if (idle_state) {
         if (s->screen_on && (now_ms - s->last_key_ms) >= APP_IDLE_BACKLIGHT_OFF_MS) {
             s->screen_on = false;
@@ -332,16 +317,6 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         handle_key(s, ev, now_ms, out, out_n, max);
         break;
 
-    case APP_EV_MAC_METRICS:
-        s->mac_cpu    = ev->u.metrics.cpu;
-        s->mac_ram    = ev->u.metrics.ram;
-        s->mac_batt   = ev->u.metrics.battery;
-        s->mac_charging = ev->u.metrics.charging;
-        str_cpy(s->active_app, sizeof(s->active_app), ev->u.metrics.active_app);
-        app_action_t m = { .type = APP_ACT_UI_REFRESH };
-        emit(out, out_n, max, m);
-        break;
-
     case APP_EV_AGENT_STATUS: {
         const uint8_t st = ev->u.agent_status.state;
         str_cpy(s->agent_state_name, sizeof(s->agent_state_name),
@@ -354,7 +329,9 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
                 s->state = APP_ST_AGENT_RUNNING;
                 s->state_since_ms = now_ms;
             } else if (st == APP_AGENT_DONE) {
-                s->state = APP_ST_DONE;
+                // 无 DONE 页:识别完成直接回 READY 待命(用户:不要 done 提示),
+                // 成功音保留作反馈
+                s->state = APP_ST_READY;
                 s->state_since_ms = now_ms;
                 app_action_t t = { .type = APP_ACT_PLAY_TONE };
                 t.u.tone = APP_TONE_SUCCESS;
