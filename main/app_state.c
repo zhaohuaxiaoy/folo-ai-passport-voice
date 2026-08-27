@@ -7,8 +7,11 @@
 
 // 长按松开后忽略双击的窗口:机械回弹/ADC 阈值穿越会把"长按+回弹"误判成
 // 双击 → clear 上行在注入完成后才到达,删掉刚注入的文本。真实双击清空
-// 发生在注入后(用户看到文本才决定清空,松开 300ms 内文本尚未注入)。
-#define PTT_REBOUND_GUARD_MS 300
+// 发生在注入后(用户看到文本才决定清空),远晚于此窗口。
+// 窗口必须 ≥ 回弹按压延迟(~300ms)+ iot_button 双击判定延迟(第二按松开后
+// 再等 short_press_ticks=300ms 才上报 DOUBLE)——实测误判上报在松开后
+// 400-600ms,300ms 窗口覆盖不住,故取 700ms。
+#define PTT_REBOUND_GUARD_MS 700
 
 static const char *const AGENT_STATE_NAMES[APP_AGENT_COUNT] = {
     [APP_AGENT_READY]    = "ready",

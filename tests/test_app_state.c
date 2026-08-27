@@ -292,6 +292,16 @@ static void test_up_double_clears_input(void) {
     assert(!has_action(APP_ACT_SEND_KEY_ACTION));           // 回弹假双击被吞
     assert(s.state == APP_ST_TRANSCRIBING);                 // 会话不受影响
 
+    // 回弹按压延迟上报:误判双击的第二按在松开后 ~300ms,DOUBLE 事件要再等
+    // 双击窗口 300ms,即松开后 ~600ms 才上报 —— 也在防御窗口(700ms)内
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);     // → READY
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 500);     // 开录
+    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 3500); // 松开 → TRANSCRIBING
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 600);   // 松开 600ms 后的延迟误判
+    assert(!has_action(APP_ACT_SEND_KEY_ACTION));           // 仍在窗口内:被吞
+
     // 录音中(LISTENING,手指在按住)收到 DOUBLE(ADC 阈值穿越抖动):忽略
     reset();
     s.link_up = true;
