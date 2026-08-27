@@ -31,6 +31,7 @@
 // ---- 页内部件索引(与 page 切换共用) ----
 typedef struct {
     lv_obj_t *root;                       // 本页容器(显隐切换)
+    lv_obj_t *rec_label;                  // LISTENING:RECORDING 大字
     lv_obj_t *rec_elapsed;                // LISTENING:计时
     lv_obj_t *tr_message;                 // TRANSCRIBING:消息
     lv_obj_t *run_state;                  // AGENT_RUNNING:状态名
@@ -207,29 +208,9 @@ static void build_listening(void)
     lv_obj_set_size(p->root, W, H);
     lv_obj_set_pos(p->root, 0, 0);
 
-    // 麦克风图标(块状像素画, 居中; 复古环形话筒造型:圆顶 + 中空圆环
-    // (环壁下段外撇) + 环底两弧收拢 + 立杆 + 底座 —— 替代 REC 红点/文字
-    // 与音量条, 录音中只显示麦克风。对照参考图逐段设计, 见 tests 渲染)
-    block(p->root, 105, 58, 30, 4, UI_RED);     // 圆顶第1行(窄)
-    block(p->root, 102, 62, 36, 4, UI_RED);     // 圆顶第2行
-    block(p->root, 100, 66, 40, 3, UI_RED);     // 圆顶第3行(最宽)
-    block(p->root, 102, 69, 7, 15, UI_RED);     // 左环壁(中空段)
-    block(p->root, 131, 69, 7, 15, UI_RED);     // 右环壁
-    block(p->root, 99, 84, 10, 5, UI_RED);      // 左环壁下段(外撇)
-    block(p->root, 131, 84, 10, 5, UI_RED);     // 右环壁下段
-    block(p->root, 98, 89, 11, 4, UI_RED);      // 环底缘(最外扩)
-    block(p->root, 131, 89, 11, 4, UI_RED);     // 环底缘
-    block(p->root, 102, 93, 6, 5, UI_RED);      // 左弧收拢1
-    block(p->root, 132, 93, 6, 5, UI_RED);      // 右弧收拢1
-    block(p->root, 105, 98, 5, 5, UI_RED);      // 左弧收拢2
-    block(p->root, 130, 98, 5, 5, UI_RED);      // 右弧收拢2
-    block(p->root, 108, 103, 4, 5, UI_RED);     // 左弧收拢3
-    block(p->root, 128, 103, 4, 5, UI_RED);     // 右弧收拢3
-    block(p->root, 110, 108, 4, 5, UI_RED);     // 左弧收拢4
-    block(p->root, 126, 108, 4, 5, UI_RED);     // 右弧收拢4
-    block(p->root, 114, 113, 6, 4, UI_RED);     // 汇合段
-    block(p->root, 114, 117, 6, 9, UI_RED);     // 立杆
-    block(p->root, 105, 126, 30, 5, UI_RED);    // 底座
+    // 录音中不画图标, 直接文字:RECORDING 大字居中(原图标区 y58-131 的中心),
+    // 简洁直观; 下方 "0s" 计时与 hint 保持。
+    p->rec_label = label(p->root, "RECORDING", &lv_font_montserrat_20, UI_INK, 0, 86, W);
 
     p->rec_elapsed = label(p->root, "0s", &lv_font_montserrat_20, UI_INK, 0, 200, W);
     hint_label(p->root, "RELEASE VOL+: SEND");
