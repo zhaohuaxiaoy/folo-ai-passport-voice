@@ -321,6 +321,7 @@ class Relay:
         self._time_task = None      # 每小时校时后台任务
         self._device_drop = None    # 最近 status 帧的设备掉帧数
         self.session_stats = []     # 每个 voice 会话的掉帧统计(AC3 对账)
+        self._ble_chunk_lens = {}   # BLE chunk 长度分布(取证: CoreBluetooth 合并检测)
         self.decisions = []         # 收到的 agent.action 列表
 
     # -- 主流程 --
@@ -561,6 +562,8 @@ class Relay:
                     pcm_buf.clear()
                 last_fmt = fmt
             if fmt == "ima_adpcm":
+                n = len(chunk)
+                self._ble_chunk_lens[n] = self._ble_chunk_lens.get(n, 0) + 1
                 adpcm_state, frames = reassemble_adpcm(adpcm_state, chunk)
             else:
                 pcm_buf, frames = reassemble_audio(pcm_buf, chunk)
@@ -827,6 +830,18 @@ class Relay:
         if s["final_text"]:
             print(f"[voice] 最终转写: {s['final_text'][:120]}")
 
+    def print_ble_chunk_dist(self):
+        """BLE chunk 长度分布(每次会话收尾打印一次并清空)。
+
+        正常单片 ≤ 253B(MTU 256)。出现成倍大长度(如 364/546/728B 等)即
+        CoreBluetooth 把多条 ATT notification 合并进一次回调 —— 重组按
+        单帧头解析会错位,该会话转写就会离谱(USB 串口无此机制,故正常)。
+        """
+        if self._ble_chunk_lens:
+            dist = ", ".join(f"{k}B×{v}" for k, v in sorted(self._ble_chunk_lens.items()))
+            print(f"[voice] BLE chunk 长度分布: {dist}")
+            self._ble_chunk_lens.clear()
+
 
 class _VoiceSession:
     """一次 voice.start..voice.end 会话: ASR 流 + 下行预览 + 定稿注入 + 掉帧统计。
@@ -958,6 +973,7 @@ class _VoiceSession:
             self._stats_ref["final_text"] = self.final_text or "(disconnected)"
             self._stats_ref["done"] = True
             self.relay.print_stats(self._stats_ref)
+            self.relay.print_ble_chunk_dist()
 
     async def end(self):
         """voice.end 收尾(后台调用,非阻塞 Relay): 结束 ASR 流, 等最终结果,
@@ -1020,6 +1036,7 @@ class _VoiceSession:
         stats["final_text"] = self.final_text
         stats["done"] = True
         self.relay.print_stats(stats)
+        self.relay.print_ble_chunk_dist()
 
     def _stats(self):
         """掉帧统计: 会话时长推理论帧数 vs 实收帧数。
