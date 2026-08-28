@@ -83,6 +83,13 @@
 
 ### 桌面端（Mac / Windows）
 
+**系统要求**：
+
+| 平台 | 系统版本 | 架构 | 说明 |
+| --- | --- | --- | --- |
+| macOS | 11.0（Big Sur）及以上 | **Apple Silicon（arm64）** | Intel Mac 暂不提供官方产物（Pillow 无通用二进制，需 x86 环境自构建） |
+| Windows | 10 1803+（建议 21H2）/ 11 | x64 | bleak winrt 后端要求；首次运行需允许防火墙 |
+
 **直接使用打包好的客户端（推荐，非开发者无需碰终端）**：
 
 - **macOS**：[下载 AI-Passport-macOS.dmg](https://github.com/zhaohuaxiaoy/folo-ai-passport-voice/releases/latest)（解压拖入 /Applications）

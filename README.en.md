@@ -83,6 +83,13 @@ Data flow: the device captures 16 kHz audio → streams 100 ms frames up over **
 
 ### Desktop companion (Mac / Windows)
 
+**System requirements**:
+
+| Platform | OS version | Architecture | Notes |
+| --- | --- | --- | --- |
+| macOS | 11.0 (Big Sur) or newer | **Apple Silicon (arm64)** | No official Intel build yet (Pillow lacks a universal binary; build yourself in an x86 env) |
+| Windows | 10 1803+ (21H2 recommended) / 11 | x64 | Requires bleak winrt backend; allow through the firewall on first run |
+
 **Use the packaged client (recommended — no terminal needed for end users)**:
 
 - **macOS**: download [AI-Passport-macOS.dmg](https://github.com/zhaohuaxiaoy/folo-ai-passport-voice/releases/latest) (drag into /Applications)
