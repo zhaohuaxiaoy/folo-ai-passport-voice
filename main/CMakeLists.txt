@@ -23,5 +23,6 @@ idf_component_register(
              nvs_flash
              console  # IDF >= 5.5: esp_console 组件已重命名为 console
              bt
+             esp_pm       # 空闲 light sleep + CPU 变频(录音会话锁见 app_main)
              esp_driver_usb_serial_jtag
 )

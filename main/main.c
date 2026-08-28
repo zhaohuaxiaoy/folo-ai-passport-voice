@@ -21,6 +21,8 @@
 #include "bsp_i2c.h"
 #include "esp_log.h"
 #include "lvgl.h"                       // lv_obj_invalidate:面板唤醒后全屏重绘
+#include "esp_pm.h"                     // 空闲 light sleep + 录音会话 PM 锁
+#include "driver/usb_serial_jtag.h"     // usb_serial_jtag_is_connected:USB 在位检测
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -34,6 +36,52 @@ static const char *TAG = "main";
 
 // ---- 动作执行:与协议/音频/BLE 的边界都在这里 ----
 static app_state_t s_state;   // app_task 独占,无需锁
+
+// ---- 电源管理:录音会话 PM 锁(2026-08-28 功耗优化 #1)----
+// 空闲(无锁)时 esp_pm 变频 + light sleep;录音期间必须阻止睡眠并保持
+// 高频:① I2S 采集由 APB 驱动,APB 降频/停摆会毁音频;② ADPCM 编码与
+// BLE 发送要 CPU 余量。锁在 APP_ACT_STREAM_START 获取、STOP/CANCEL 释放
+// (残留在环内的帧由 worker 在 80MHz 下仍可编码发送,best-effort)。
+static esp_pm_lock_handle_t s_pm_cpu, s_pm_apb;
+static esp_pm_lock_handle_t s_pm_no_ls;   // USB 主机在位:禁 light sleep
+static StackType_t s_usb_presence_stack[2048 / 4];
+static StaticTask_t s_usb_presence_tcb;
+
+static void pm_session_lock(void)
+{
+    if (s_pm_cpu) esp_pm_lock_acquire(s_pm_cpu);
+    if (s_pm_apb) esp_pm_lock_acquire(s_pm_apb);
+}
+
+static void pm_session_unlock(void)
+{
+    if (s_pm_apb) esp_pm_lock_release(s_pm_apb);
+    if (s_pm_cpu) esp_pm_lock_release(s_pm_cpu);
+}
+
+// ---- USB 在位检测:插 USB 时禁 light sleep ----
+// USB-Serial-JTAG 在 light sleep 期间不服务数据流:枚举仍在但串口 0 字节
+// (2026-08-28 真机实测),有线通道/调试/日志全失联。1s 轮询检测主机在位
+// (SOF 检测,同 usb_link.c 语义),在位时持 NO_LIGHT_SLEEP 锁;拔线(电池
+// 运行)自动释放,恢复空闲省电。响应延迟 ≤1s,可接受。
+static void usb_presence_task(void *arg)
+{
+    bool locked = false;
+    for (;;) {
+        bool conn = usb_serial_jtag_is_connected();
+        if (conn != locked) {
+            if (conn) {
+                if (s_pm_no_ls) esp_pm_lock_acquire(s_pm_no_ls);
+                ESP_LOGI(TAG, "USB 主机在位:禁用 light sleep");
+            } else {
+                if (s_pm_no_ls) esp_pm_lock_release(s_pm_no_ls);
+                ESP_LOGI(TAG, "USB 断开:恢复 light sleep");
+            }
+            locked = conn;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
 static uint32_t s_last_drop_count = 0;   // 最近一次 STREAM_STOP 的会话丢帧数(voice.end 后 status 帧)
 static bool s_ui_screen_on = true;       // 上次渲染时的屏幕状态(初始亮,与 app_ui 内 s_last_screen_on 一致)
 static bool s_ui_panel_on  = true;       // 上次渲染时的面板供电状态(init 已完成 DISPON)
@@ -114,10 +162,12 @@ static void run_actions(const app_action_t *acts, uint8_t n)
             // 双通道常开:音频发送器按会话通道注册(USB=PCM/BLE=IMA ADPCM)。
             // 在开流前切换 —— 残留旧 token 帧由 worker 静默丢弃,不会错道。
             mode_select_audio_sender(s_state.link_channel);
+            pm_session_lock();   // 录音会话:阻止 light sleep + 保持 CPU/APB 高频
             if (audio_streamer_start() != ESP_OK) {
                 // 启动被拒(残留未排空/未就绪):录音没起来——投 AUDIO_ERROR
                 // 让状态机回 READY + toast,UI 不得停在 LISTENING(REVIEW P2-C)。
                 // 入队失败(罕见)仅日志:下次 PTT 可重试。
+                pm_session_unlock();   // 流没起来,锁不滞留
                 app_event_t ev = { .type = APP_EV_AUDIO_ERROR };
                 app_event_post(&ev);
             }
@@ -125,10 +175,12 @@ static void run_actions(const app_action_t *acts, uint8_t n)
         case APP_ACT_STREAM_STOP:
             // 正常结束:只停采集,残留帧由后续 SEND_VOICE_END 的 drain 排空并取计数
             audio_streamer_stop();
+            pm_session_unlock();   // 残留帧 80MHz 下照常编码发送(best-effort)
             break;
         case APP_ACT_STREAM_CANCEL:
             // 取消/断链:停采集 + 清残留 + 丢弃在途帧(残留不流入下一次会话)
             audio_streamer_cancel();
+            pm_session_unlock();
             break;
         case APP_ACT_TIME_SET:
             // 校时落地:写系统时间 + 置校时标志(app_task 上下文,单写点)
@@ -142,8 +194,10 @@ static void run_actions(const app_action_t *acts, uint8_t n)
                 if (!app_sound_play(APP_TONE_START)) {
                     s_state.stream_started = true;   // 同任务上下文,与 reduce 一致
                     mode_select_audio_sender(s_state.link_channel);   // 兜底路径同样按通道选发送器
+                    pm_session_lock();   // 与 STREAM_START 同语义(静音兜底开流)
                     if (audio_streamer_start() != ESP_OK) {
                         // 兜底路径同样检查:开流失败 → 回 READY + toast(REVIEW P2-C)
+                        pm_session_unlock();
                         app_event_t ev = { .type = APP_EV_AUDIO_ERROR };
                         app_event_post(&ev);
                     }
@@ -323,8 +377,36 @@ void app_main(void)
     // 10brownout 掉电 11sdio):用户反馈异常时第一行日志即可判断电源/软件。
     ESP_LOGI(TAG, "复位原因: %d", (int)esp_reset_reason());
 
+    // 0. 电源管理:空闲自动 light sleep + CPU 变频(功耗优化 #1)。
+    //    max 160MHz(录音/渲染峰值),min 80MHz(空闲省 CPU 电流);
+    //    light_sleep 由会话 PM 锁(录音期间)阻止,见 pm_session_lock。
+    //    按键 5ms 轮询与 BLE 连接事件会限制单次睡眠长度(~5-30ms 段),
+    //    真机实测电流后再做轮询降频(#3)进一步拉长睡眠。
+    const esp_pm_config_t pm_cfg = {
+        .max_freq_mhz = 160,
+        .min_freq_mhz = 80,
+        .light_sleep_enable = true,
+    };
+    ESP_LOGI(TAG, "PM: %dMHz→%dMHz, light_sleep=%d",
+             pm_cfg.max_freq_mhz, pm_cfg.min_freq_mhz, pm_cfg.light_sleep_enable);
+    esp_err_t e = esp_pm_configure(&pm_cfg);
+    if (e == ESP_OK) {
+        esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "ptt_cpu", &s_pm_cpu);
+        esp_pm_lock_create(ESP_PM_APB_FREQ_MAX, 0, "ptt_apb", &s_pm_apb);
+        esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "usb_ls", &s_pm_no_ls);
+    } else {
+        ESP_LOGW(TAG, "esp_pm_configure 失败 %s(无 PM,照常运行)", esp_err_to_name(e));
+    }
+    if (e == ESP_OK && s_pm_no_ls) {
+        TaskHandle_t usb_h = xTaskCreateStatic(usb_presence_task, "usb_presence",
+                                               2048, NULL, 1,
+                                               s_usb_presence_stack,
+                                               &s_usb_presence_tcb);
+        if (!usb_h) ESP_LOGW(TAG, "usb_presence 任务创建失败(USB 在位时通道可能失联)");
+    }
+
     // 1. NVS(设置持久化)
-    esp_err_t e = nvs_flash_init();
+    e = nvs_flash_init();
     if (e == ESP_ERR_NVS_NO_FREE_PAGES || e == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         nvs_flash_erase();
         e = nvs_flash_init();

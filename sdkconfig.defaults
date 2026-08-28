@@ -67,3 +67,16 @@ CONFIG_BT_NIMBLE_LOG_LEVEL_INFO=y
 # 804B(5 片)第 5 片就分配不到 mbuf,配合旧代码"首片失败即整帧作废",实测
 # 40 帧只到 3 帧(design.md §3)。24 块 = 6KB 静态 RAM,换来 24 片在途余量。
 CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=24
+
+# 电源管理(2026-08-28 功耗优化 #1):空闲时 CPU 变频 + 自动 light sleep
+# (modem sleep 保留 BLE 连接)。录音会话由 main.c 的 esp_pm_lock 阻止睡眠
+# 并保持高频(见 app_main: pm_session_lock/unlock)。
+CONFIG_PM_ENABLE=y
+# light sleep 需要 tickless idle(esp_pm_configure 的 light_sleep_enable 依赖)
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+
+# BT modem sleep(2026-08-28 功耗优化 #1.1):事件间控制器睡眠,BT 启用时 light sleep 才能应用。
+# 板无外部 32k 晶振;内部 136k RC 精度远超 500ppm,Kconfig 明确禁止用于 BLE 连接态,
+# 故用主晶振(40M)分频做 BT 睡眠时钟 —— 官方支持 连接 + light sleep + DFS 的组合。
+CONFIG_BT_CTRL_MODEM_SLEEP=y
+CONFIG_BT_CTRL_LPCLK_SEL_MAIN_XTAL=y
