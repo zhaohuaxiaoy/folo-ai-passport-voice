@@ -66,12 +66,21 @@ typedef enum {
     APP_EV_AUDIO_ERROR,     // 采集硬件错误
     APP_EV_TONE_DONE,       // START 提示音播放完成(异步开流的信号,见 design)
     APP_EV_TICK,            // 100ms 心跳,驱动超时/息屏
-    APP_EV_MODE_SWITCH,     // 射频模式切换请求(不进归约器:main.c 排空循环直接执行)
     // ---- USB 有线通道(USB-Serial-JTAG,见 design.md)----
     APP_EV_USB_CONNECTED,   // USB 会话通(收到 PC 握手 ping;link_up 的 USB 侧充分条件)
     APP_EV_USB_DISCONNECTED, // USB 会话断(拔线:is_connected 翻转)
     APP_EV_TIME_SET,         // 校时下行(epoch 秒 UTC;双通道共用:CTRL time.set 行 + SYS time set)
 } app_event_type_t;
+
+// ---------------- 链路通道(双通道常开架构,2026-08-28) ----------------
+// 旧互斥模式(BLE=0/USB=2, NVS 持久化 + 重启切换)已整体退役:BLE 广播常驻,
+// USB 数据通道插线即用(usb_link 待命,主机出现自动接入)。会话路由按
+// link_channel 取值:状态机里最近连接/使用的通道,音频与 voice.* 上行跟随它。
+typedef enum {
+    APP_CHAN_BLE = 0,       // BLE(无线):EVENT 特征订阅即通
+    APP_CHAN_USB = 2,       // USB(有线):PC ping 握手即通
+    APP_CHAN_NONE = 0xFF,   // 双通道均断(link_up=false)
+} app_chan_t;
 
 // Agent 状态(与协议字符串互转在 app_protocol.c)
 typedef enum {
@@ -118,7 +127,9 @@ typedef enum {
 typedef struct {
     app_event_type_t type;
     union {
-        struct { uint8_t btn; } key;                    // KEY_*
+        // mv = 回调时刻 bsp_button_read_mv()(mV):真实按压 3-5,假按(射频
+        // 腐蚀)2890=松开电平 —— app_state 据此区分真假 LONG(见 READY 态)
+        struct { uint8_t btn; uint16_t mv; } key;       // KEY_*
         struct {
             uint8_t state;                              // app_agent_state_t
             char message[APP_AGENT_MSG_MAX];
@@ -135,7 +146,6 @@ typedef struct {
             uint8_t inject_mode;                        // app_inject_mode_t(协议兼容保留)
             bool final;                                 // false=预览态(未定稿);true=定稿落定
         } transcript;                                   // TRANSCRIPT
-        struct { uint8_t target; } mode_switch;         // MODE_SWITCH(0=BLE/2=USB)
         struct { int64_t epoch; } time_set;             // TIME_SET(UTC 秒,int64 对齐 8,union 仍 ≤228B)
     } u;
 } app_event_t;

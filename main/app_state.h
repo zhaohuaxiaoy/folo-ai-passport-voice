@@ -21,6 +21,11 @@ typedef struct {
     uint64_t       state_since_ms;  // 进入当前状态的时刻(超时计时)
     uint64_t       wake_ms;         // 最近一次息屏唤醒时刻(OK_LONG_GUARD:防"唤醒即锁")
     uint64_t       ptt_end_ms;      // PTT 松开时刻(过滤松开回弹误判的双击)
+    uint16_t       last_up_press_mv; // UP 键最近 PRESS 回调读数:真实按压 3-5mV
+                                     // (手指在键上),假按(射频腐蚀)2890mV(无人
+                                     // 按键)。CLICK 回调时刻用户已松手(mv 恒
+                                     // 2890),真假只能从 PRESS 读数区分 ——
+                                     // TRANSCRIBING 态单击退出判定用(见 state.c)
     uint64_t       ble_connect_ms;  // BLE 连接时刻(连接握手期密集射频 → 假长按,抑制 PTT)
     uint64_t       toast_until_ms;
     bool           stream_started;  // 本会话采集是否已开(START 音播完后 TONE_DONE 驱动)

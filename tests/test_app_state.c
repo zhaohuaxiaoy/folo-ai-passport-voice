@@ -5,10 +5,10 @@
 #include "app_state.h"
 #include "fake_mode.h"
 
-// 存储语义回归:mode 枚举只删中间值不重排(BLE=0/USB=2,值 1 已废弃)。
-// 旧 NVS 存 2(USB)的设备升级后仍为 USB;值 1 解析为越界 → 回退 BLE。
-_Static_assert(APP_MODE_BLE == 0, "APP_MODE_BLE must be 0 (NVS storage semantics)");
-_Static_assert(APP_MODE_USB == 2, "APP_MODE_USB must be 2 (NVS storage semantics)");
+// 通道常量契约(双通道常开,2026-08-28):BLE=0/USB=2 —— 与旧 NVS 存储语义
+// 保持一致(只删中间值不重排),状态机 link_channel 直接沿用。
+_Static_assert(APP_CHAN_BLE == 0, "APP_CHAN_BLE must be 0");
+_Static_assert(APP_CHAN_USB == 2, "APP_CHAN_USB must be 2");
 
 static uint64_t now = 1000000;              // 单调递增假时钟
 static app_state_t s;
@@ -579,6 +579,57 @@ static void test_transcript_display(void) {
     assert(s.transcript_final == true);                      // 非转写文本,无预览光标
 }
 
+// ---- TRANSCRIBING:音量+单击退出转写场景(2026-08-28 用户需求);迟到文本丢弃 ----
+static void reduce_up_press(uint16_t mv, uint64_t ts) {
+    app_event_t ev = { .type = APP_EV_KEY_PRESS };
+    ev.u.key.btn = APP_BTN_UP;
+    ev.u.key.mv = mv;
+    now = ts;
+    app_state_reduce(&s, &ev, now, out, &on);
+}
+
+static void test_transcribing_exit(void) {
+    // 真实单击退出:PRESS(mv=3,手指在键上)→ RELEASE → CLICK → READY
+    reset();
+    s.state = APP_ST_TRANSCRIBING;
+    s.state_since_ms = now;
+    reduce_up_press(3, now + 100);
+    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_UP, now + 200);
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 250);
+    assert(s.state == APP_ST_READY);
+    assert(has_action(APP_ACT_UI_REFRESH));
+
+    // 退出后(READY)迟到的识别结果丢弃,不再上屏
+    app_event_t ev = { .type = APP_EV_TRANSCRIPT,
+                       .u.transcript = { .text = "late result", .inject_mode = APP_INJECT_TYPE,
+                                         .final = true } };
+    app_state_reduce(&s, &ev, now + 300, out, &on);
+    assert(strcmp(s.agent_message, "late result") != 0);
+
+    // 假按风暴不退出:PRESS(mv=2890,无人按键)→ RELEASE → CLICK → 状态不变
+    reset();
+    s.state = APP_ST_TRANSCRIBING;
+    s.state_since_ms = now;
+    reduce_up_press(2890, now + 100);
+    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_UP, now + 200);
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 250);
+    assert(s.state == APP_ST_TRANSCRIBING);
+
+    // HOME 态迟到文本同样丢弃
+    reset();
+    s.state = APP_ST_HOME;
+    ev.u.transcript.text[0] = 'x'; ev.u.transcript.text[1] = '\0';
+    ev.u.transcript.final = false;
+    app_state_reduce(&s, &ev, now + 10, out, &on);
+    assert(strcmp(s.agent_message, "x") != 0);
+
+    // TRANSCRIBING 态文本照常显示(正常路径不受门禁影响)
+    reset();
+    s.state = APP_ST_TRANSCRIBING;
+    app_state_reduce(&s, &ev, now + 10, out, &on);
+    assert(strcmp(s.agent_message, "x") == 0);
+}
+
 // ---- BLE 链路断开:录音中停流回 READY ----
 static void test_ble_link_down(void) {
     reset();
@@ -605,6 +656,7 @@ static void test_ble_link_down(void) {
 // ---- 文本安全:恰好填满缓冲也保证 NUL 结尾(截断上限由协议层测试覆盖) ----
 static void test_bounded(void) {
     reset();
+    s.state = APP_ST_TRANSCRIBING;   // 文本只在转写中显示(READY/HOME 迟到丢弃)
     app_event_t ev = { .type = APP_EV_TRANSCRIPT };
     memset(ev.u.transcript.text, 'x', sizeof(ev.u.transcript.text) - 1);
     ev.u.transcript.text[sizeof(ev.u.transcript.text) - 1] = '\0';
@@ -1028,14 +1080,14 @@ static void test_snapshot_link_up(void) {
     assert(snap.ble_connected == false);
 }
 
-// ---- USB 有线通道:USB_CONNECTED = 链路通(与 BLE 对等) ----
+// ---- USB 有线通道:USB_CONNECTED = 链路通(与 BLE 对等;双通道常开无门禁) ----
 static void test_usb_link_up(void) {
     reset();
-    fake_mode_set(APP_MODE_USB);            // 链路事件通道门禁:USB 事件仅 USB 模式生效
     app_event_t c = { .type = APP_EV_USB_CONNECTED };
     app_state_reduce(&s, &c, now, out, &on);
     assert(s.link_up == true);
     assert(s.ble_connected == false);
+    assert(s.link_channel == APP_CHAN_USB);                 // 首个连接通道 = 会话路由
     app_ui_snapshot_t snap;
     app_state_snapshot(&s, now, &snap);
     assert(strcmp(snap.link_name, "USB") == 0);              // 横幅按通道渲染
@@ -1051,9 +1103,8 @@ static void test_usb_link_up(void) {
 // ---- USB 断开:停流回 READY + 通道名保留(与 BLE 断连同路径) ----
 static void test_usb_link_down(void) {
     reset();
-    fake_mode_set(APP_MODE_USB);            // 链路事件通道门禁:USB 事件仅 USB 模式生效
     s.link_up = true;
-    s.link_channel = 2;
+    s.link_channel = APP_CHAN_USB;
     s.state = APP_ST_LISTENING;
     s.state_since_ms = now;
     app_event_t ev = { .type = APP_EV_USB_DISCONNECTED };
@@ -1067,7 +1118,7 @@ static void test_usb_link_down(void) {
     // APPROVAL 下断开:保持状态等待重连
     reset();
     s.link_up = true;
-    s.link_channel = 2;
+    s.link_channel = APP_CHAN_USB;
     s.state = APP_ST_APPROVAL;
     app_state_reduce(&s, &ev, now, out, &on);
     assert(s.state == APP_ST_APPROVAL);
@@ -1100,46 +1151,99 @@ static void test_time_set(void) {
 }
 
 
-// ---- 链路事件通道门禁(审查 P1):非本模式通道事件不翻转链路状态 ----
-static void test_link_event_gate(void) {
-    // USB 模式(USB 会话中):BLE 连/断只更新图标,不动 link_up、不掐音频流
+// ---- 双通道常开(2026-08-28):会话粘性 —— 活动会话期间另一通道连/断不夺路 ----
+// BLE 会话进行中:USB 连接只刷新(不夺路),USB 断开不掐 BLE 音频流。
+static void test_dual_session_survives_other_channel(void) {
     reset();
-    fake_mode_set(APP_MODE_USB);
-    s.link_up = true;                      // USB 会话进行中
-    s.link_channel = 2;
-    app_event_t d = { .type = APP_EV_BLE_DISCONNECTED };
-    app_state_reduce(&s, &d, now, out, &on);
-    assert(s.ble_connected == false);      // 图标如实更新
-    assert(s.link_up == true);             // 链路不被 BLE 事件翻转
-    assert(!has_action(APP_ACT_STREAM_CANCEL));   // 不掐 USB 音频流
-    assert(s.state == APP_ST_READY || s.state == APP_ST_HOME);
-
-    app_event_t c = { .type = APP_EV_BLE_CONNECTED };
-    app_state_reduce(&s, &c, now, out, &on);
-    assert(s.ble_connected == true);
-    assert(s.link_up == true);
-    assert(s.link_channel == 2);           // 通道名保持 USB
-
-    // 模式切换窗口:投递的旧通道断连事件必须放行(状态机收束)
-    fake_mode_set(APP_MODE_BLE);
-    fake_mode_set_switching(true);
+    s.link_up = true;
+    s.link_channel = APP_CHAN_BLE;         // BLE 会话路由中
     s.state = APP_ST_LISTENING;
     s.state_since_ms = now;
-    s.link_up = true;
-    s.link_channel = 2;                    // 切换前仍是 USB 链路
-    app_event_t old = { .type = APP_EV_USB_DISCONNECTED };
-    app_state_reduce(&s, &old, now, out, &on);
-    assert(s.link_up == false);            // 切换收束事件不被门禁挡住
-    assert(has_action(APP_ACT_STREAM_CANCEL));
-    assert(s.state == APP_ST_READY);
-    fake_mode_set_switching(false);
 
-    // 窗口外:非本模式事件仍被挡(防御)
-    fake_mode_set(APP_MODE_BLE);
-    s.link_up = true;
-    app_event_t wd = { .type = APP_EV_USB_DISCONNECTED };
-    app_state_reduce(&s, &wd, now, out, &on);
+    // USB 连接:空闲态才夺路;活动会话中只当候选,link_channel 保持 BLE
+    app_event_t uc = { .type = APP_EV_USB_CONNECTED };
+    app_state_reduce(&s, &uc, now, out, &on);
+    assert(s.link_channel == APP_CHAN_BLE);
     assert(s.link_up == true);
+    assert(s.state == APP_ST_LISTENING);
+
+    // USB 断开:非会话通道,不影响本会话
+    app_event_t ud = { .type = APP_EV_USB_DISCONNECTED };
+    app_state_reduce(&s, &ud, now, out, &on);
+    assert(s.link_up == true);
+    assert(s.state == APP_ST_LISTENING);
+    assert(!has_action(APP_ACT_STREAM_CANCEL));
+    assert(!has_action(APP_ACT_SEND_VOICE_END));
+}
+
+// ---- 双通道常开:会话通道断开 → 收束会话 + 自动切到仍通通道 ----
+static void test_dual_active_channel_down_fails_over(void) {
+    reset();
+    fake_mode_set_channel_up(APP_CHAN_BLE, true);   // BLE 仍连
+    s.link_up = true;
+    s.link_channel = APP_CHAN_USB;         // USB 会话路由中
+    s.state = APP_ST_LISTENING;
+    s.state_since_ms = now;
+
+    app_event_t ud = { .type = APP_EV_USB_DISCONNECTED };
+    app_state_reduce(&s, &ud, now, out, &on);
+    assert(s.link_up == true);             // BLE 兜底:链路仍通
+    assert(s.link_channel == APP_CHAN_BLE);
+    assert(s.state == APP_ST_READY);       // 会话收束(停流回 READY + toast)
+    assert(has_action(APP_ACT_STREAM_CANCEL));
+
+    // 双通道均断:link_up=false,通道名保留(横幅显示断掉的通道)
+    fake_mode_set_channel_up(APP_CHAN_BLE, false);
+    reset();
+    s.link_up = true;
+    s.link_channel = APP_CHAN_BLE;
+    app_event_t bd = { .type = APP_EV_BLE_DISCONNECTED };
+    app_state_reduce(&s, &bd, now, out, &on);
+    assert(s.link_up == false);
+    app_ui_snapshot_t snap;
+    app_state_snapshot(&s, now, &snap);
+    assert(strcmp(snap.link_name, "BLE") == 0);
+}
+
+// ---- 双通道常开:空闲态"最近连接/使用"胜出 —— 先 BLE 后 USB,PTT 走 USB ----
+static void test_dual_idle_last_connect_wins(void) {
+    reset();
+    app_event_t bc = { .type = APP_EV_BLE_CONNECTED };
+    app_state_reduce(&s, &bc, now, out, &on);
+    assert(s.link_channel == APP_CHAN_BLE);
+    assert(s.link_up == true);
+
+    // 空闲(READY)时 USB 连入:夺路为新会话通道
+    app_event_t uc = { .type = APP_EV_USB_CONNECTED };
+    app_state_reduce(&s, &uc, now, out, &on);
+    assert(s.link_channel == APP_CHAN_USB);
+
+    // PTT 开录:link_channel 保持 USB;期间 BLE 断开不掐流
+    // (时间推进 ≥1s:绕过 BLE 连接握手期假长按抑制窗口 BLE_CONNECT_PTT_GUARD)
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 1100);
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 1200);
+    assert(s.state == APP_ST_LISTENING);
+    assert(s.link_channel == APP_CHAN_USB);
+    app_event_t bd = { .type = APP_EV_BLE_DISCONNECTED };
+    app_state_reduce(&s, &bd, now, out, &on);
+    assert(s.link_up == true);
+    assert(s.state == APP_ST_LISTENING);
+}
+
+// ---- 双通道常开:有线主机在位(USB 供电)不自动息屏 ----
+static void test_wired_no_screen_off(void) {
+    reset();
+    fake_mode_set_wired(true);             // USB 主机在位:屏幕常亮
+    app_event_t t = { .type = APP_EV_TICK };
+    s.last_key_ms = now - 70000;           // 远超 20s 背光 / 60s 面板超时
+    app_state_reduce(&s, &t, now, out, &on);
+    assert(s.screen_on == true);
+    assert(s.panel_on == true);
+
+    fake_mode_set_wired(false);            // 无线:恢复自动息屏
+    app_state_reduce(&s, &t, now, out, &on);
+    assert(s.screen_on == false);
+    assert(s.panel_on == false);
 }
 
 int main(void) {
@@ -1170,6 +1274,7 @@ int main(void) {
     test_relock_cycle();
     test_lock_guards_listening_approval();
     test_transcript_display();
+    test_transcribing_exit();
     test_ble_link_down();
     test_ble_disconnect_transcribing();
     test_keys_ignored_in_running();
@@ -1184,7 +1289,10 @@ int main(void) {
     test_usb_link_down();
     test_time_set();
     test_bounded();
-    test_link_event_gate();
+    test_dual_session_survives_other_channel();
+    test_dual_active_channel_down_fails_over();
+    test_dual_idle_last_connect_wins();
+    test_wired_no_screen_off();
     printf("test_app_state: all assertions passed\n");
     return 0;
 }

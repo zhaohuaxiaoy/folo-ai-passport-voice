@@ -1,7 +1,9 @@
 // main/app_state.c —— 状态机归约器实现。
 // 纯 C,不依赖 IDF。按键语义与超时规则见 prd/design 文档。
+// 链路语义(双通道常开,2026-08-28):BLE/USB 同时可用,link_up = 任一通道通;
+// link_channel = 会话路由通道(最近连接/使用,活动会话期间另一通道连接不夺路)。
 #include "app_state.h"
-#include "mode.h"   // 链路事件通道门禁(审查 P1):按当前模式隔离通道事件
+#include "mode.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -12,6 +14,10 @@
 // 再等 short_press_ticks=300ms 才上报 DOUBLE)——实测误判上报在松开后
 // 400-600ms,300ms 窗口覆盖不住,故取 700ms。
 #define PTT_REBOUND_GUARD_MS 700
+// 假 LONG 判定阈值:on_key 回调时刻 ADC 读数 ≥2000mV = 松开电平 → 假按。
+// 真实按压回调读 3-5mV(事件处理时刻手指仍在键上)。三档键:UP 按下 0-150,
+// 松开 2890,2000 在两者之间留足余量(RF_GUARD_HIGH_MV 同值)。
+#define PTT_FAKE_LONG_MV 2000
 
 // 连接握手期(~0.4-1s:参数协商/DLE/PHY 更新)密集射频会把按键 ADC 整段
 // 腐蚀成 0mV → 假 UP 长按 → 自动开录音(真机实测: 连接后 130s 内自动触发
@@ -41,7 +47,7 @@ void app_state_init(app_state_t *s) {
     // 链路通 → PTT 可用但音频全丢且无离线横幅)。Mac 连入订阅 EVENT 后翻 true。
     s->ble_connected = false;
     s->link_up = false;
-    s->link_channel = 0;           // 缺省 BLE
+    s->link_channel = APP_CHAN_BLE;   // 缺省 BLE(首通道连接前 PTT 门禁靠 link_up)
     s->locked = false;             // 开机未锁定
     s->wake_ms = 0;                // 无唤醒史 → 首个 OK LONG 不受 guard 限制
 }
@@ -70,7 +76,7 @@ void app_state_snapshot(const app_state_t *s, uint64_t now_ms, app_ui_snapshot_t
     snap->net_busy         = s->net_busy;
     snap->ble_connected    = s->ble_connected;
     str_cpy(snap->link_name, sizeof(snap->link_name),
-            s->link_channel == 2 ? "USB"
+            s->link_channel == APP_CHAN_USB ? "USB"
             : "BLE");
     snap->elapsed_ms       = (uint32_t)(now_ms - s->state_since_ms);
     snap->battery_available = true; // 由主循环在快照后补真实值,见 app_ui
@@ -163,12 +169,15 @@ static void abort_to_ready(app_state_t *s, uint64_t now_ms, const char *toast,
 static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
                        app_action_t *out, uint8_t *n, uint8_t max) {
     const uint8_t b = ev->u.key.btn;
+    // 记录 UP 键最近一次 PRESS 回调读数(2026-08-28):真实按压 3-5mV(手指在
+    // 键上),假按(射频腐蚀)2890mV(无人按键)。CLICK 回调时刻用户已松手,mv
+    // 恒 2890 —— 真假单击只能从 PRESS 读数区分(TRANSCRIBING 退出判定用)。
+    if (ev->type == APP_EV_KEY_PRESS && b == APP_BTN_UP) {
+        s->last_up_press_mv = ev->u.key.mv;
+    }
     // 息屏 = 自动息屏的省电显示态(非锁定):按键先恢复显示,事件照常放行执行。
     // 锁定态见下方 locked 门禁:操作照常放行但不亮屏(与自动息屏的唤醒是两回事)。
     const bool screen_was_off = !s->screen_on;
-    // 诊断(2026-08-28):按键误触取证 —— "按 OK 后疯狂录音"定位;定位后删除。
-    printf("[KEYDBG] key btn=%u type=%u state=%u locked=%d screen=%d\n",
-           b, ev->type, (unsigned)s->state, s->locked, s->screen_on);
 
     // 锁定态(2026-08-28 语义变更):长按 OK 解锁亮屏;其余按键照常执行但不
     // 亮屏 —— 锁定 = 屏幕保持关闭的省电模式,不是输入锁(用户要求:息屏后仍
@@ -270,6 +279,17 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             if (s->ble_connected && now_ms - s->ble_connect_ms < BLE_CONNECT_PTT_GUARD_MS) {
                 break;
             }
+            // 假长按抑制(2026-08-28 真机取证,替代固定 3s 窗口):PTT 松开
+            // 后 BLE 链路异常期 SAR ADC 被腐蚀 → 假 PRESS→LONG 序列,落在
+            // READY 态即触发 PTT(第二声滴 + 假录音)。iot_button 判定按住
+            // 是腐蚀中读低压,但 on_key 回调时刻腐蚀已过 → mv 读回松开电平
+            // (2890;真实按压 3-5)。环取证 7 例假 LONG 回调 mv 全 2890、真
+            // 实 LONG 全 <150 —— 100% 区分。不能用固定窗口:用户连续长按
+            // 间隔实测 2-3s,3s 窗口把 43.17s/50.12s 真实长按吞掉("长按没
+            // 反应"根因),故以回调 mv 判假,任何间隔的真实长按都不误伤。
+            if (ev->u.key.mv >= PTT_FAKE_LONG_MV) {
+                break;
+            }
             start_ptt(s, now_ms, out, n, max);
         }
         break;
@@ -314,8 +334,21 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         }
         break;
 
+    case APP_ST_TRANSCRIBING:
+        // 音量+单击:退出转写场景(2026-08-28 用户需求)——不等识别结果,直接
+        // 回 READY。迟到的识别文本由 APP_EV_TRANSCRIPT 的 READY/HOME 门禁丢弃。
+        // 真实单击的 PRESS 回调 mv=3-5(手指在键上);假按风暴的 PRESS mv=2890
+        // (腐蚀,无人按键)→ 用 PRESS 读数区分真假单击(CLICK 回调时刻用户已
+        // 松手,mv 恒 2890,不可用)。长按(开始新录音)保持忽略:转写中须先
+        // 退出或等结果,防误触新会话。
+        if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_UP &&
+            s->last_up_press_mv < PTT_FAKE_LONG_MV) {
+            abort_to_ready(s, now_ms, NULL, out, n, max);
+        }
+        break;
+
     default:
-        // TRANSCRIBING / AGENT_RUNNING:按键全部忽略(仅唤醒已在上面处理)
+        // AGENT_RUNNING:按键全部忽略(仅唤醒已在上面处理)
         break;
     }
 }
@@ -331,10 +364,10 @@ static void handle_tick(app_state_t *s, uint64_t now_ms, app_action_t *out, uint
     // 分级息屏:HOME/READY 下无按键(APPROVAL 保持常亮:安全审批不熄屏)
     // 20s → 关背光(渲染跳过,面板冻结最后一帧);60s → 面板 SLPIN 断电(μA 级)。
     // 背光关后 tick 仍需走到面板判定,故不提前 return。
-    // USB 模式(有线)不熄屏:屏幕常亮,省电只针对无线场景(用户需求)。
+    // USB 主机在位(有线供电)不熄屏:屏幕常亮,省电只针对无线场景(用户需求)。
     // 锁定息屏为显式操作(locked 时 screen_on/panel_on 已 false,超时分支
     // 本不会触发),此处防御性排除使意图明确。
-    const bool idle_state = (mode_get() != APP_MODE_USB) &&
+    const bool idle_state = !mode_wired() &&
                             !s->locked &&
                             (s->state == APP_ST_HOME ||
                              s->state == APP_ST_READY);
@@ -482,8 +515,13 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         break;
 
     case APP_EV_TRANSCRIPT:
-        // 注入已迁 Mac 端,设备只做转写文本显示(任意状态可显示)。
+        // 注入已迁 Mac 端,设备只做转写文本显示。退出转写(音量+单击回 READY)
+        // 后迟到的识别文本丢弃:用户已明确退出该场景,预览/定稿不再上屏。
+        // 正常路径文本到达时 state=TRANSCRIBING;agent 运行期文本照常显示。
         // final:false = 预览态(未定稿,UI 附光标感);final:true = 定稿落定。
+        if (s->state == APP_ST_READY || s->state == APP_ST_HOME) {
+            break;
+        }
         str_cpy(s->agent_message, sizeof(s->agent_message), ev->u.transcript.text);
         s->transcript_final = ev->u.transcript.final;
         {
@@ -510,21 +548,17 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
 
     case APP_EV_BLE_CONNECTED:
         // 语义:EVENT 特征已订阅(链路通,PTT 可用)。
-        // 通道门禁(审查 P1):非 BLE 模式下手机连入只更新图标,不写 link_up ——
-        // USB 音频会话不被 BLE 事件翻转;mode_switching 窗口放行切换期
-        // 投递的收束事件(见 mode.h)。
+        // 双通道常开(2026-08-28):BLE 连接总是链路候选 —— link_up 已通时
+        // 只更新图标;空闲态(HOME/READY)记为新会话通道(最近使用),活动
+        // 会话中不夺路(音频/voice.end 必须回到发起会话的通道)。
         s->ble_connect_ms = now_ms;   // 握手期假长按抑制计时起点(见 handle_key)
-        if (mode_get() != APP_MODE_BLE && !mode_switching()) {
-            s->ble_connected = true;
-            {
-                app_action_t b = { .type = APP_ACT_UI_REFRESH };
-                emit(out, out_n, max, b);
-            }
-            break;
-        }
         s->ble_connected = true;
-        s->link_channel = 0;
-        s->link_up = true;
+        if (!s->link_up) {
+            s->link_channel = APP_CHAN_BLE;
+            s->link_up = true;
+        } else if (s->state == APP_ST_HOME || s->state == APP_ST_READY) {
+            s->link_channel = APP_CHAN_BLE;
+        }
         {
             app_action_t b = { .type = APP_ACT_UI_REFRESH };
             emit(out, out_n, max, b);
@@ -532,18 +566,23 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         break;
 
     case APP_EV_BLE_DISCONNECTED:
-        if (mode_get() != APP_MODE_BLE && !mode_switching()) {
-            s->ble_connected = false;   // 图标如实反映手机连入状态,链路不受影响
-            {
-                app_action_t b = { .type = APP_ACT_UI_REFRESH };
-                emit(out, out_n, max, b);
-            }
-            break;
-        }
         s->ble_connected = false;
-        s->link_channel = 0;
-        s->link_up = false;
-        handle_link_down(s, now_ms, "Mac disconnected", out, out_n, max);
+        if (s->link_channel == APP_CHAN_BLE) {
+            // 会话通道断开:收束会话(停流回 READY + toast),路由切到仍通
+            // 的另一通道(USB)。双通道均断时 link_channel 保留断掉的通道名
+            // (横幅显示),link_up=false。另一通道断开不影响本会话(上方
+            // 分支不成立时仅刷新图标)。
+            s->link_up = false;
+            handle_link_down(s, now_ms, "Mac disconnected", out, out_n, max);
+            if (mode_channel_up(APP_CHAN_USB)) {
+                s->link_channel = APP_CHAN_USB;
+                s->link_up = true;
+            }
+        }
+        {
+            app_action_t b = { .type = APP_ACT_UI_REFRESH };
+            emit(out, out_n, max, b);
+        }
         break;
 
     case APP_EV_BLE_DROP:
@@ -583,15 +622,17 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         }
         break;
 
-    // ---- USB 有线通道(语义与 BLE 对等)----
+    // ---- USB 有线通道(语义与 BLE 对等;双通道常开下同规则)----
 
     case APP_EV_USB_CONNECTED:
-        // 通道门禁:非 USB 模式忽略(仅 USB 模式有 usb_link 任务,防御性);
-        // mode_switching 窗口放行切换期收束事件。
-        if (mode_get() != APP_MODE_USB && !mode_switching()) break;
-        // 与 BLE_CONNECTED 同构:USB 会话通 = 链路通,PTT 可用
-        s->link_channel = 2;
-        s->link_up = true;
+        // USB 会话通(PC ping 握手)= 链路候选:空闲态记为新会话通道(插线
+        // 即用);活动会话中不夺路。与 BLE_CONNECTED 同构。
+        if (!s->link_up) {
+            s->link_channel = APP_CHAN_USB;
+            s->link_up = true;
+        } else if (s->state == APP_ST_HOME || s->state == APP_ST_READY) {
+            s->link_channel = APP_CHAN_USB;
+        }
         {
             app_action_t b = { .type = APP_ACT_UI_REFRESH };
             emit(out, out_n, max, b);
@@ -599,17 +640,19 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         break;
 
     case APP_EV_USB_DISCONNECTED:
-        // 通道门禁:非 USB 模式忽略;mode_switching 窗口放行切换期收束事件。
-        if (mode_get() != APP_MODE_USB && !mode_switching()) break;
-        s->link_channel = 2;   // 断线横幅仍显示通道名(USB)
-        s->link_up = false;
-        // 状态收束与 BLE 断连同路径;toast 文案区分通道
-        handle_link_down(s, now_ms, "USB disconnected", out, out_n, max);
-        break;
-
-    case APP_EV_MODE_SWITCH:
-        // 不进归约器:main.c 排空循环里直接调 mode_switch()(射频切换与状态机解耦)。
-        // 归约器永不收到该事件 —— 此处仅占位以满足 -Wswitch。
+        if (s->link_channel == APP_CHAN_USB) {
+            s->link_up = false;
+            // 状态收束与 BLE 断连同路径;toast 文案区分通道
+            handle_link_down(s, now_ms, "USB disconnected", out, out_n, max);
+            if (mode_channel_up(APP_CHAN_BLE)) {
+                s->link_channel = APP_CHAN_BLE;
+                s->link_up = true;
+            }
+        }
+        {
+            app_action_t b = { .type = APP_ACT_UI_REFRESH };
+            emit(out, out_n, max, b);
+        }
         break;
     }
 }

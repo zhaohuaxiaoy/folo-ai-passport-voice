@@ -247,6 +247,13 @@ esp_err_t button_adc_del(button_driver_t *button_driver)
 // 超上限仍低 → 按按压判定(首 tick 延迟最多 100ms,长按 300ms 阈值从按下起算,
 // 物理按住 ~400ms 报 LONG,无感)。重读期间占住 button 定时器任务 ≤100ms,
 // 三键共享,首键重读时其余键判定顺延,可接受。
+// 修复三(2026-08-28 真机"一次长按响两次"取证): 上述防护只覆盖松开→低压
+// (防假按下)。按住→高压突变(假释放)不受防护: 长按期间 ADC 闪断为松开
+// 电平 → iot_button 判假松开(LONG_UP 停录)→ 恢复低压 → 重新按下 →
+// 300ms 后第二次 LONG(第二声滴)。用户实测: 一次长按(手未松)连续两声滴
+// <1 秒,与 35ms 去抖 + 300ms 重按合成间隔吻合;环取证 LONG_UP 时刻 mv
+// =2890(未松手却读成松开)。对称防护: 按住→高压同样持续重读,恢复低压
+// 即按按住处理;真实松开首样本即确认,延迟 ~2ms,节奏不变。
 // 抗腐蚀另一主力: sdkconfig CONFIG_BUTTON_DEBOUNCE_TICKS=7(35ms 连续低才
 // 判定按下)。SAMPLE_TIMES 保持 1(多采平均会把单样本腐蚀折算成 1445mV,
 // 恰好落进 OK 键窗口,已实测废弃)。
@@ -306,9 +313,20 @@ static uint32_t get_adc_voltage(adc_unit_t unit_id, uint8_t channel)
 #endif
     }
 
-    // 修复二: 松开态→低压突变,持续重读直到恢复或超上限(见文件头注释)
-    if ((uint32_t)voltage < RF_GUARD_LOW_MV && s_last_mv >= RF_GUARD_HIGH_MV) {
+    // 修复二: 松开态→低压突变,持续重读直到恢复或超上限(见文件头注释)。
+    // 修复三(2026-08-28 真机"一次长按响两次"取证): 按住态→高压突变同样
+    // 重读 —— 否则 ADC 闪断为松开电平 → iot_button 判假松开(LONG_UP 停录)
+    // → 恢复低压 → 重新按下 → 300ms 后第二次 LONG(第二声滴)。两次 LONG
+    // 最小间隔 ≈ debounce 35ms + 重按 300ms ≈ 0.34s,与用户描述"连续滴-滴
+    // (<1 秒)"吻合;现场 LONG_UP 时刻 mv=2890(用户未松手却读成松开)。
+    // 真实松开/按压: 重读首样本即确认,仅延迟 ~2ms,节奏不变。
+    const bool dip    = (uint32_t)voltage < RF_GUARD_LOW_MV
+                        && s_last_mv >= RF_GUARD_HIGH_MV;   // 松开→低:防假按下
+    const bool spike  = (uint32_t)voltage >= RF_GUARD_HIGH_MV
+                        && s_last_mv < RF_GUARD_LOW_MV;     // 按住→高:防假释放
+    if (dip || spike) {
         const uint64_t retry_t0 = esp_timer_get_time();
+        int low_confirm = 0;   // spike 方向连续低(恢复按住)确认计数
         while (esp_timer_get_time() - retry_t0 < (uint64_t)RF_GUARD_MAX_RETRY_MS * 1000) {
             vTaskDelay(pdMS_TO_TICKS(RF_GUARD_RETRY_MS));   // 让出 CPU,等射频窗过去
             uint32_t re_reading = 0;
@@ -328,12 +346,29 @@ static uint32_t get_adc_voltage(adc_unit_t unit_id, uint8_t channel)
                     if (adc_cali_raw_to_voltage(g_button.unit[unit_id].adc_cali_handle,
                                                 re_reading, &re_voltage) == ESP_OK) {
                         voltage = re_voltage;
-                        if ((uint32_t)voltage >= RF_GUARD_HIGH_MV) break;  // 恢复松开
+                        if (dip && (uint32_t)voltage >= RF_GUARD_HIGH_MV) break;  // 恢复松开
+                        if (spike) {
+                            // 修复四(2026-08-28 松开假按取证):spike 方向"恢复
+                            // 按住"必须连续 2 次低才确认 —— 单次 <150 会被射频
+                            // 腐蚀窗(采样读 0mV)误触发:松开态 s_last_mv 残留 0
+                            // (上次 dip 超时判按压退出)时,每 tick 采样 2890 →
+                            // spike → 重读撞腐蚀窗读 0 → 单次 break 判"恢复按住"
+                            // → iot_button 判 ACTIVE → 假 PRESS/LONG 风暴(环取证
+                            // 每会话后 0.14-1.6s 假按,回调 mv 全 2890)。真实按住
+                            // 是持续低压(可跨多个 2ms 重读),腐蚀是瞬态(单次)。
+                            // 一次高(2890)即重置计数 —— 真实松开不会误判按住。
+                            if ((uint32_t)voltage < RF_GUARD_LOW_MV) {
+                                if (++low_confirm >= 2) break;   // 恢复按住
+                            } else {
+                                low_confirm = 0;
+                            }
+                        }
                     }
                 }
             }
         }
-        // 超上限退出:持续低压 = 真实按压,voltage 保持低压,判定按下
+        // 超上限退出: dip   → 持续低压 = 真实按压(保持低压,判定按下);
+        //             spike → 持续高压 = 真实松开(保持高压,判定松开)。
     }
     s_last_mv = (uint32_t)voltage;
 
