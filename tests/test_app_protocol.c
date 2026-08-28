@@ -209,9 +209,14 @@ static void test_serialize(void) {
     assert(strstr(buf, "\"event\":\"device.hello\""));
     assert(strstr(buf, "\"proto\":1"));
 
-    n = app_protocol_voice_start(buf, sizeof(buf));
+    n = app_protocol_voice_start(buf, sizeof(buf), "ima_adpcm");
     assert(n > 0);
     assert(strstr(buf, "\"event\":\"voice.start\""));
+    assert(strstr(buf, "\"audio\":\"ima_adpcm\""));   // BLE:ADPCM block 流
+    n = app_protocol_voice_start(buf, sizeof(buf), "pcm");
+    assert(n > 0 && strstr(buf, "\"audio\":\"pcm\""));  // USB:PCM 直传
+    n = app_protocol_voice_start(buf, sizeof(buf), NULL);
+    assert(n > 0 && strstr(buf, "\"audio\":\"pcm\""));  // NULL 兜底 pcm
 
     n = app_protocol_voice_end(buf, sizeof(buf));
     assert(n > 0);
@@ -244,7 +249,7 @@ static void test_serialize_small_cap(void) {
     // cap < 2:返回 0(不得下溢成超大 memcpy)
     assert(app_protocol_device_hello(buf, 0, 1) == 0);
     assert(app_protocol_device_hello(buf, 1, 1) == 0);
-    assert(app_protocol_voice_start(buf, 1) == 0);
+    assert(app_protocol_voice_start(buf, 1, "ima_adpcm") == 0);
     // 小 cap:截断但仍以 \n 行分隔结尾、有 NUL
     size_t n = app_protocol_device_hello(buf, 16, 1);
     assert(n > 0 && n < 16);

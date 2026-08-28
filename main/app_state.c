@@ -163,10 +163,17 @@ static void abort_to_ready(app_state_t *s, uint64_t now_ms, const char *toast,
 static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
                        app_action_t *out, uint8_t *n, uint8_t max) {
     const uint8_t b = ev->u.key.btn;
-    const bool wake_only = !s->screen_on; // 息屏时任何键只唤醒
+    // 息屏 = 自动息屏的省电显示态(非锁定):按键先恢复显示,事件照常放行执行。
+    // 锁定态见下方 locked 门禁:操作照常放行但不亮屏(与自动息屏的唤醒是两回事)。
+    const bool screen_was_off = !s->screen_on;
+    // 诊断(2026-08-28):按键误触取证 —— "按 OK 后疯狂录音"定位;定位后删除。
+    printf("[KEYDBG] key btn=%u type=%u state=%u locked=%d screen=%d\n",
+           b, ev->type, (unsigned)s->state, s->locked, s->screen_on);
 
-    // 锁定态门禁:除 OK 长按解锁外,一切按键事件(PRESS/RELEASE/CLICK/DOUBLE/
-    // LONG/LONG_UP × UP/DOWN/OK)全部忽略 —— 不唤醒、不触发说话、不触发回车。
+    // 锁定态(2026-08-28 语义变更):长按 OK 解锁亮屏;其余按键照常执行但不
+    // 亮屏 —— 锁定 = 屏幕保持关闭的省电模式,不是输入锁(用户要求:息屏后仍
+    // 能长按说话/回车/清空,口袋盲操作)。渲染由 snapshot 门禁按 screen_on
+    // 跳过,操作产生的动作(语音/按键上行)照常出队。
     if (s->locked) {
         if (ev->type == APP_EV_KEY_LONG && b == APP_BTN_OK) {
             s->locked = false;
@@ -179,43 +186,54 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             emit(out, n, max, a);
             app_action_t r = { .type = APP_ACT_UI_REFRESH };
             emit(out, n, max, r);
+            return;
         }
-        return;
-    }
-
-    if (wake_only) {
-        if (ev->type == APP_EV_KEY_PRESS) {
-            if (!s->panel_on) {
-                s->panel_on = true;
-                app_action_t p = { .type = APP_ACT_UI_PANEL_ON };
-                emit(out, n, max, p);
+        // 其余事件放行:跳过下方唤醒与锁定入口,直接落到双击清空/状态机。
+        // 不亮屏不唤醒;锁定仅发生在 HOME/READY,盲操作开录进 LISTENING 后
+        // 再长按 OK 仍是解锁(上方分支先行),录音不受影响。
+    } else {
+        if (screen_was_off) {
+            if (ev->type == APP_EV_KEY_PRESS) {
+                if (!s->panel_on) {
+                    s->panel_on = true;
+                    app_action_t p = { .type = APP_ACT_UI_PANEL_ON };
+                    emit(out, n, max, p);
+                }
+                s->screen_on = true;
+                s->last_key_ms = now_ms;
+                s->wake_ms = now_ms;   // 唤醒时刻(OK_LONG_GUARD:防"唤醒即锁")
+                app_action_t a = { .type = APP_ACT_UI_SCREEN_ON };
+                emit(out, n, max, a);
+                app_action_t r = { .type = APP_ACT_UI_REFRESH };
+                emit(out, n, max, r);
             }
-            s->screen_on = true;
-            s->last_key_ms = now_ms;
-            s->wake_ms = now_ms;   // 唤醒时刻(OK_LONG_GUARD:防"唤醒即锁")
-            app_action_t a = { .type = APP_ACT_UI_SCREEN_ON };
-            emit(out, n, max, a);
-            app_action_t r = { .type = APP_ACT_UI_REFRESH };
-            emit(out, n, max, r);
+            // 不 return:事件继续放行到下方正常逻辑(锁定入口 → 双击清空 → 状态机)。
+            // 自动息屏只省显示,不吞按键事件(过修修正:息屏后 UP/DOWN 应唤醒并照常
+            // 执行)。放行安全性:
+            //  - PRESS 在状态机各态均无处理分支 → 无副作用;
+            //  - 息屏只可能发生在 HOME/READY(idle_state 限定;APPROVAL 常亮、
+            //    LISTENING 不超时)→ 放行事件只落到 HOME/READY 分支;
+            //  - 唤醒后 1s 内 OK LONG 被 OK_LONG_GUARD 挡(防"唤醒即锁");
+            //  - 无 PRESS 直接 CLICK(真实事件流不可达,iot_button 任何上报前必有
+            //    PRESS)不唤醒但照常执行动作 —— 仅测试可达,非真实交互路径。
         }
-        return;
-    }
 
-    // 锁定入口:亮屏的 HOME/READY 下长按 OK(0.5s 阈值)立即锁定息屏
-    // (背光灭 + 面板 SLPIN 断电,不等 60s 超时)。录音/转写/审批/Agent
-    // 运行中不可锁定;USB 模式手动锁定允许(显式操作,省电优先)。
-    if (ev->type == APP_EV_KEY_LONG && b == APP_BTN_OK &&
-        (s->state == APP_ST_HOME || s->state == APP_ST_READY) &&
-        s->screen_on && s->panel_on &&
-        now_ms - s->wake_ms > OK_LONG_GUARD_MS) {
-        s->locked = true;
-        s->screen_on = false;
-        s->panel_on = false;
-        app_action_t a = { .type = APP_ACT_UI_SCREEN_OFF };
-        emit(out, n, max, a);
-        app_action_t p = { .type = APP_ACT_UI_PANEL_OFF };
-        emit(out, n, max, p);
-        return;
+        // 锁定入口:亮屏的 HOME/READY 下长按 OK(0.5s 阈值)立即锁定息屏
+        // (背光灭 + 面板 SLPIN 断电,不等 60s 超时)。录音/转写/审批/Agent
+        // 运行中不可锁定;USB 模式手动锁定允许(显式操作,省电优先)。
+        if (ev->type == APP_EV_KEY_LONG && b == APP_BTN_OK &&
+            (s->state == APP_ST_HOME || s->state == APP_ST_READY) &&
+            s->screen_on && s->panel_on &&
+            now_ms - s->wake_ms > OK_LONG_GUARD_MS) {
+            s->locked = true;
+            s->screen_on = false;
+            s->panel_on = false;
+            app_action_t a = { .type = APP_ACT_UI_SCREEN_OFF };
+            emit(out, n, max, a);
+            app_action_t p = { .type = APP_ACT_UI_PANEL_OFF };
+            emit(out, n, max, p);
+            return;
+        }
     }
 
     // UP(音量加)双击 = 清空输入框(全局语义,各态统一)。
@@ -431,6 +449,17 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
     }
 
     case APP_EV_APPROVAL_REQUEST:
+        // 锁定态收到审批:强制解锁亮屏 —— 审批必须被看见,防口袋盲批
+        // (与"APPROVAL 常亮不熄屏"政策一致)。
+        if (s->locked) {
+            s->locked = false;
+            s->panel_on = true;
+            s->screen_on = true;
+            app_action_t p = { .type = APP_ACT_UI_PANEL_ON };
+            emit(out, out_n, max, p);
+            app_action_t sc = { .type = APP_ACT_UI_SCREEN_ON };
+            emit(out, out_n, max, sc);
+        }
         // 审批打断录音:必须先停流,否则管线永远泄漏(APPROVAL 下没有按键能停它)
         if (s->state == APP_ST_LISTENING) {
             app_action_t st = { .type = APP_ACT_STREAM_STOP };

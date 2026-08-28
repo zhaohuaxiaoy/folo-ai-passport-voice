@@ -20,11 +20,15 @@
 #include "bsp_i2c.h"
 #include "esp_console.h"
 #include "esp_log.h"
+#include "lvgl.h"                       // lv_obj_invalidate:面板唤醒后全屏重绘
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "driver/usb_serial_jtag.h"   // usb_serial_jtag_is_connected:REPL 启动门禁
 #include "nvs_flash.h"
+#include <stdio.h>
 #include <string.h>
 
 static const char *TAG = "main";
@@ -76,7 +80,7 @@ static void run_actions(const app_action_t *acts, uint8_t n)
         case APP_ACT_UI_PANEL_ON:
             break;                       // 渲染/背光/面板电源由主循环末尾统一做(快照驱动)
         case APP_ACT_SEND_VOICE_START:
-            len = app_protocol_voice_start(buf, sizeof(buf));
+            len = app_protocol_voice_start(buf, sizeof(buf), mode_audio_format());
             send_event_line_important(buf, len);   // 会话边界帧:不丢(审查 P2)
             break;
         case APP_ACT_SEND_VOICE_END:
@@ -145,6 +149,18 @@ static void run_actions(const app_action_t *acts, uint8_t n)
     }
 }
 
+// ---- 诊断(2026-08-28):最低优先级心跳任务 ----
+// 卡死取证:若此任务停 → CPU 被高优先级任务占满或中断屏蔽;若此任务还活而
+// app_task 停 → app_task 阻塞在锁/队列(高优先级正常)。诊断完删除。
+static void diag_low_prio_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        { volatile uint32_t *d = (volatile uint32_t *)0x50001E00; d[8] += 1; d[2] = 'O'; }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
 // ---- 按键回调(button 任务上下文):只投事件,零阻塞 ----
 static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user)
 {
@@ -176,6 +192,11 @@ static void app_task(void *arg)
     uint64_t now_ms = next_tick;
 
     for (;;) {
+        // 诊断(2026-08-28):RTC 取证标记 —— app 心跳计数 + 位置 ID。
+        // 卡死(中断屏蔽)时 esp_timer ISR 心跳停,此处计数停 → boot 对比定位。
+        volatile uint32_t *dbg = (volatile uint32_t *)0x50001E00;
+        dbg[4] += 1;      /* 0xE10: app_task 心跳计数 */
+        dbg[2] = 'A';     /* 0xE08: 最后位置 = app_task */
         app_event_t ev;
         app_action_t acts[APP_ACT_MAX];
         bool got = false;
@@ -245,6 +266,12 @@ static void app_task(void *arg)
             // 必须在渲染跳过判断之前:断电后渲染路径被跳过,此处不能跟着跳。
             if (snap.panel_on != s_ui_panel_on) {
                 bsp_display_power(snap.panel_on);
+                if (snap.panel_on) {
+                    // 唤醒重绘:SLPIN 断电清空面板 RAM,DISPON 后 LVGL 只重绘
+                    // 脏区域 —— 无变化时屏幕整片黑(背光亮但内容黑 = 不亮屏)。
+                    // 全屏标脏,等 LVGL task 下一轮渲染。
+                    lv_obj_invalidate(lv_screen_active());
+                }
                 s_ui_panel_on = snap.panel_on;
             }
             // 电量 I2C 读取移出 LVGL 锁(总线事务最长 100ms,不占锁;第 7 轮 F2)。
@@ -278,6 +305,22 @@ static void app_task(void *arg)
 // USB 模式不启动 REPL:USB 数据通道独占串口(驱动安装与 REPL 互斥);
 // 控制台功能由 SYS 命令面经数据协议下行覆盖(relay `!<命令>`)。boot 顺序
 // 第 8 步 mode_init 先于此步,可安全按模式门禁。
+//
+// 电池开机(无 USB 主机)时 REPL 必死:无主机 → 驱动读写快速失败 → linenoise
+// 空转循环,且空闲任务被饿死 → TWDT 5 秒复位循环(真机舞蹈 1-4 取证:
+// prev_rst=6、元凶=console_repl)。因此 REPL 延迟到 USB 主机出现(SOF)才启动;
+// 纯电池开机永不启动。插线开机时主机枚举在 boot 完成前,REPL 照常可用。
+static void repl_starter_task(void *arg)
+{
+    esp_console_repl_t *repl = (esp_console_repl_t *)arg;
+    while (!usb_serial_jtag_is_connected()) {
+        vTaskDelay(pdMS_TO_TICKS(250));   // 空闲任务照常运行,无饿死风险
+    }
+    ESP_LOGI(TAG, "检测到 USB 主机:启动 REPL");
+    esp_console_start_repl(repl);
+    vTaskDelete(NULL);
+}
+
 static void console_init(void)
 {
     if (mode_get() == APP_MODE_USB) {
@@ -295,12 +338,83 @@ static void console_init(void)
         return;
     }
     console_cmds_register();
-    esp_console_start_repl(repl);
+    if (usb_serial_jtag_is_connected()) {
+        esp_console_start_repl(repl);
+    } else {
+        ESP_LOGW(TAG, "无 USB 主机:REPL 延迟启动(电池开机防 TWDT 复位)");
+        xTaskCreate(repl_starter_task, "repl_start", 2048, repl, 1, NULL);
+    }
 }
 
 void app_main(void)
 {
+    // 日志级别不在代码里覆盖:交付版本用 sdkconfig 的 INFO。
+    // (抓 HCI 包时临时把 CONFIG_BT_NIMBLE_LOG_LEVEL 调到 DEBUG,别留在代码里——
+    //  NimBLE DEBUG 每个 HCI 字节一行,音频流期间会压满串口和 CPU。)
     ESP_LOGI(TAG, "AI Passport 固件启动");
+    // 复位原因诊断:无线自动重启定位用(1上电 2外部 4软件 5panic 6int_wdt
+    // 7task_wdt 8wdt 9深度睡眠 10brownout 掉电 11sdio)。重启循环时每次 boot
+    // 第一行即原因,插线抓滞留日志即可实锤电源/软件。
+    ESP_LOGI(TAG, "复位原因: %d", (int)esp_reset_reason());
+    // 读 panic.c 补丁(esp_system)写入 RTC slow mem 的 panic 现场摘要:
+    // 软复位(INT_WDT)保留 RTC 域,boot 第一时间打出,定位无线自动重启。
+    {
+        volatile uint32_t *rec = (volatile uint32_t *)0x50001F00;
+        if (rec[0] == 0x50414E49) {
+            ESP_LOGE(TAG, "上次 panic: 类型=%u 触发地址=0x%x mepc=0x%x core=%u",
+                     (unsigned)rec[1], (unsigned)rec[2], (unsigned)rec[3], (unsigned)rec[4]);
+            rec[0] = 0;   // 清除标记,避免下次 boot 重复报
+        }
+        // 卡死取证标记(esp_timer ISR 心跳 + 位置 ID + 计数;卡死时 ISR 停)。
+        // 位置 ID: T=timer ISR / A=app_task / E=flash erase / C=ADC / I=I2C读 / W=I2C写
+        //          F=LVGL flush / S=SPI tx / D=audio_worker / B=ble_worker / O=prio1任务
+        // dbg[7] = 本 boot 复位原因,留给下次 boot 打印 prev_rst:电池循环时插回线
+        // 的 USB 复位(11)会覆盖真实死因,取证区存的是"上一次"的原因,能还原它。
+        {
+            volatile uint32_t *dbg = (volatile uint32_t *)0x50001E00;
+            // 先读上一个 boot 存的复位原因再覆盖:本次开机(如插线 USB 复位)不是
+            // 上次死机的原因,先打印后写才能把电池循环的真实死因留给下个 boot。
+            uint32_t prev = dbg[7];
+            dbg[7] = (uint32_t)esp_reset_reason();   // 本 boot 原因,留给下个 boot
+            if (prev || dbg[1] || dbg[2] || dbg[3] || dbg[4] || dbg[5] || dbg[6] || dbg[8] || dbg[9]) {
+                ESP_LOGW(TAG, "卡死取证: prev_rst=%u timer=%u last=%c erase=%u app=%u flush=%u spi=%u prio1=%u aud=%u",
+                         (unsigned)prev, (unsigned)dbg[1], (int)(dbg[2] & 0xFF), (unsigned)dbg[3],
+                         (unsigned)dbg[4], (unsigned)dbg[5], (unsigned)dbg[6],
+                         (unsigned)dbg[8], (unsigned)dbg[9]);
+            }
+            // TWDT 元凶取证(task_wdt.c 补丁):触发瞬间占用 CPU 的任务名 + 被中断现场。
+            // 不主动清零:记录每次 TWDT 死亡自覆盖,中间的开机(串口不可见)不会吞掉它。
+            {
+                volatile uint32_t *tw = (volatile uint32_t *)0x50001E50;
+                if (tw[0] == 0x54574454) {
+                    ESP_LOGE(TAG, "TWDT 元凶: 任务=%s mepc=0x%x ra=0x%x sp=0x%x s0=0x%x",
+                             (const char *)(tw + 1), (unsigned)tw[5], (unsigned)tw[6],
+                             (unsigned)tw[7], (unsigned)tw[8]);
+                    char hex[160];
+                    size_t off = 0;
+                    for (int i = 0; i < 32 && off < sizeof(hex) - 12; i++) {
+                        off += (size_t)snprintf(hex + off, sizeof(hex) - off, "%08x ", (unsigned)tw[9 + i]);
+                    }
+                    ESP_LOGE(TAG, "TWDT 栈顶: %s", hex);
+                    // TWDT ISR 自身 CSR(task_wdt.c 补丁):mstatus.MPP=3 → 被抢占的是
+                    // 卡死的低层 ISR(栈顶字段属于更早被 ISR 打断的任务);MPP=0 → 直接抢占任务。
+                    volatile uint32_t *csr = (volatile uint32_t *)0x50001EA0;
+                    if (csr[0] || csr[1] || csr[2]) {
+                        ESP_LOGE(TAG, "TWDT CSR: mepc=0x%x mstatus=0x%x mcause=0x%x",
+                                 (unsigned)csr[0], (unsigned)csr[1], (unsigned)csr[2]);
+                    }
+                }
+                // esp_timer ISR 最后被中断的任务名(每个 alarm 覆盖;仅 TWDT 触发时可信)
+                volatile uint8_t *tp = (volatile uint8_t *)0x50001E40;
+                if (tw[0] == 0x54574454 && tp[0] != 0) {
+                    ESP_LOGW(TAG, "TWDT 前最后运行任务=%s", (const char *)tp);
+                }
+            }
+            dbg[0] = 0x44424732;   /* magic "DBG2" */
+            for (int i = 1; i <= 6; i++) dbg[i] = 0;   // 清零,等下一次卡死
+            dbg[8] = 0; dbg[9] = 0;                    // dbg[7] 保留:本 boot 原因留给下个 boot
+        }
+    }
 
     // 1. NVS(设置持久化)
     esp_err_t e = nvs_flash_init();
@@ -320,6 +434,8 @@ void app_main(void)
         ESP_LOGE(TAG, "显示/LVGL 初始化失败,终止");
         return;
     }
+    // 背光随显示初始化点亮(2026-08-28 曾尝试"首帧刷完再亮"消除底部黑条,
+    // 回退:点亮延迟会使异常/无线启动路径下整屏全黑 —— 黑条可接受,全黑不可)。
     bsp_display_backlight(100);
 
     // 3. 事件队列(先于一切生产者)
@@ -346,17 +462,37 @@ void app_main(void)
     if (audio_streamer_init() != ESP_OK) ESP_LOGW(TAG, "音频流管线初始化失败");
 
     // 7. BLE 音频服务(NimBLE 外设 + GATT 0xA2B0,host sync 后自动开广播)
+    // 2026-08-28 无线 INT_WDT 二分结论:临时禁用 BLE 后无线仍重启 → 与 radio 无关。
     if (ble_audio_init() != 0) ESP_LOGW(TAG, "BLE 音频服务初始化失败");
 
-    // 8. 多模式(Windows 移植):WiFi/WS/mDNS 按 NVS 模式按需建栈并启动射频;
-    //    BLE 冷启动不占 WiFi 栈,WiFi 模式关蓝牙,USB 模式射频保持(数据走 USB 线)。
-    //    射频切换会短暂阻塞(≤ 数百 ms),boot 期无并发,安全。
+    // 8. 模式(BLE/USB 双通道,按 NVS 持久化的模式初始化;BLE 冷启动不占栈,
+    //    USB 模式射频保持(数据走 USB 线))。射频切换会短暂阻塞(≤ 数百 ms),
+    //    boot 期无并发,安全。
     if (mode_init() != ESP_OK) ESP_LOGW(TAG, "模式初始化失败(按 NVS 兜底)");
 
-    // 9. 控制台与 app 任务(栈 5120:快照 ~250B + 动作 ~544B + TX 512B + LVGL 调用深度;
+    // 9. app 任务(栈 5120:快照 ~250B + 动作 ~544B + TX 512B + LVGL 调用深度;
     //    S3 后 START 音不再同步占栈,同步音 512B 余量转为保险)
+    // ⚠ 必须先于 console_init:按键/电量/UI 定时器在 console_init 期间就已在投递
+    //    重要事件,消费者未起来 → 队列满 → 每条等满 100ms
+    //    (真机日志 app_evt: 重要事件投递超时 ×3)。
+    // ⚠ 静态栈:堆紧张时动态 xTaskCreate 栈分配会失败(且历史上无返回值检查)
+    //    → 事件无人消费 + 全机无反应。静态栈 .bss 免疫。
+    //    注意:xTaskCreate 栈参数单位是字节,StackType_t 是 4B,数组元素按 4B 折算。
+    static StackType_t s_app_stack[5120 / sizeof(StackType_t)];
+    static StaticTask_t s_app_tcb;
+    if (!xTaskCreateStatic(app_task, "app_task", 5120, NULL, 4,
+                           s_app_stack, &s_app_tcb)) {
+        ESP_LOGE(TAG, "app_task 创建失败");
+    }
+
+    // 10. 控制台(REPL 走 USB-Serial-JTAG;失败只降级,不阻塞主流程)
     console_init();
-    xTaskCreate(app_task, "app_task", 5120, NULL, 4, NULL);
+
+    // 诊断(2026-08-28):最低优先级心跳任务(卡死取证,见函数注释)。诊断完删除。
+    static StackType_t s_diag_low_stack[1024 / sizeof(StackType_t)];
+    static StaticTask_t s_diag_low_tcb;
+    xTaskCreateStatic(diag_low_prio_task, "diag_prio1", 1024, NULL, 1,
+                      s_diag_low_stack, &s_diag_low_tcb);
 
     ESP_LOGI(TAG, "就绪:按键=%s 提示音=%s 电量=%s",
              btn_ok == ESP_OK ? "ok" : "fail",

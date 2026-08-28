@@ -172,9 +172,16 @@ size_t app_protocol_device_hello(char *buf, size_t cap, int proto) {
     return n;
 }
 
-size_t app_protocol_voice_start(char *buf, size_t cap) {
+size_t app_protocol_voice_start(char *buf, size_t cap, const char *audio_format) {
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "event", "voice.start");
+    // 音频格式(App 据此分发):ima_adpcm = 每帧一个独立 IMA ADPCM block
+    // (4B 首部 [int16 predictor][uint8 index][rsv] + 800B 4bit 数据 = 804B,
+    // 100ms/帧 → 8KB/s),App 解回 16kHz PCM 后走既有 pcm ASR 通道;
+    // pcm = 3200B PCM 块直传(USB 带宽充裕,不压缩)。
+    // 未知格式 App 侧按 pcm 兜底,换编解码器(如退 ulaw)不需要改协议。
+    if (!audio_format) audio_format = "pcm";
+    cJSON_AddStringToObject(o, "audio", audio_format);
     size_t n = serialize(o, buf, cap);
     cJSON_Delete(o);
     return n;

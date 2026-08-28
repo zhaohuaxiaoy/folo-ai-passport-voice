@@ -117,7 +117,11 @@ def parse_server(raw):
 
 
 def build_full_request(cfg=None):
-    """full client request。cfg 可选(volcano_model / volcano_enable_nonstream)。"""
+    """full client request。cfg 可选(volcano_model / volcano_enable_nonstream)。
+
+    音频格式恒 pcm(ADPCM 压缩块在 relay 重组层已解回 16 kHz PCM;
+    cfg["audio_format"] 由 relay 恒设为 "pcm")。
+    """
     cfg = cfg or {}
     req = {
         "model_name": cfg.get("volcano_model", "bigmodel"),
@@ -126,9 +130,10 @@ def build_full_request(cfg=None):
     }
     if cfg.get("volcano_enable_nonstream"):
         req["enable_nonstream"] = True
+    audio = {"format": "pcm", "rate": 16000, "bits": 16, "channel": 1}
     return {
         "user": {"uid": "ai-passport"},
-        "audio": {"format": "pcm", "rate": 16000, "bits": 16, "channel": 1},
+        "audio": audio,
         "request": req,
     }
 
@@ -149,10 +154,8 @@ def load_config():
     cfg.setdefault("volcano_resource_id", "volc.bigasr.sauc.duration")
     cfg.setdefault("volcano_model", DEFAULT_MODEL)
     cfg.setdefault("volcano_enable_nonstream", DEFAULT_NONSTREAM)
-    # Windows 移植(P4+):通道/WS 服务器/注入参数, 缺省保持 macOS 现有行为
-    cfg.setdefault("channel", "ble")            # "ble" | "wifi"(无蓝牙 Windows 电脑走 WiFi 通道)
-    cfg.setdefault("ws_port", 8765)             # WiFi 通道:本机 WS server 端口(设备 STA 主动连)
-    cfg.setdefault("ws_connect_timeout", 120)   # WiFi 通道:等设备连上 WS 的超时(秒)
+    # Windows 移植(P4+):通道/注入参数, 缺省保持 macOS 现有行为
+    cfg.setdefault("channel", "ble")            # "ble" | "usb"
     cfg.setdefault("inject_focus_delay", 2.0)   # Windows 注入:等用户切到目标窗口的秒数
     # FRE 向导 + 注入双策略(P7): unicode(键盘事件, 不碰剪贴板) / clipboard / auto
     cfg.setdefault("inject_mode", "auto")

@@ -485,7 +485,8 @@ static void test_approval(void) {
 
 // ---- 两级息屏/唤醒 ----
 // 20s 无键 → 关背光(screen_on=false, 面板仍通电);60s → 面板 SLPIN 断电;
-// PRESS 任意键 → 面板上电 + 背光亮。
+// PRESS 任意键 → 面板上电 + 背光亮。自动息屏只是省电显示态:唤醒后事件
+// 照常放行执行(不吞按键;锁定态的全键忽略见锁屏用例,两回事)。
 static void test_screen_off_wake(void) {
     reset();
     const uint64_t t0 = now;   // 息屏计时基准(= last_key_ms;reduce 会改 now,须先取)
@@ -509,18 +510,15 @@ static void test_screen_off_wake(void) {
     assert(has_action(APP_ACT_UI_PANEL_ON));
     assert(has_action(APP_ACT_UI_SCREEN_ON));
 
-    // 唤醒后的同一事件流:CLICK 应被忽略(不产生状态跳转)
+    // 自动息屏只省显示,不吞按键(过修修正):PRESS 唤醒后事件照常放行执行。
+    // 真实事件流 CLICK 前必有 PRESS,设备在 CLICK 到达时已亮屏。
     s.screen_on = false;
     s.panel_on = true;
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);    // 息屏时 CLICK 不唤醒
-    assert(s.state == APP_ST_HOME);
-    assert(s.screen_on == false);
-    // 背光灭但面板还通电(20-60s 区间):PRESS 只恢复背光,不再发 PANEL_ON
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 20);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 10);    // PRESS:恢复背光
     assert(s.screen_on == true);
-    assert(!has_action(APP_ACT_UI_PANEL_ON));
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 30);
-    assert(s.state == APP_ST_READY);
+    assert(!has_action(APP_ACT_UI_PANEL_ON));              // 面板已通电,不发 PANEL_ON
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 20);    // 同一次按键的 CLICK
+    assert(s.state == APP_ST_READY);                       // 照常执行:HOME ● 单击 → READY
 }
 
 // ---- transcript:注入已迁 Mac 端,设备只更新显示(任意状态);final 区分预览/定稿 ----
@@ -733,33 +731,73 @@ static void test_ok_long_locks(void) {
     assert(s.panel_on == false);
 }
 
-// 锁定态全键忽略:息屏后长按 UP 不再触发说话(核心回归),回车/清空/唤醒全失效
-static void test_locked_ignores_all_keys(void) {
+// 锁定态按键照常执行但不亮屏(2026-08-28 语义变更:锁定=省电模式,不是输入锁)
+// 长按说话/回车/清空全部照常;任何按键不唤醒(口袋盲操作);仅 OK 长按解锁亮屏
+static void test_locked_keys_operate_screen_off(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);    // → READY
     reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 20);     // 锁定
     assert(s.locked == true);
+    assert(s.screen_on == false);
 
-    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 30);     // 长按 UP(说话)
-    assert(on == 0);
-    assert(!has_action(APP_ACT_SEND_VOICE_START));
-    assert(s.state == APP_ST_READY);                       // 不被带进 LISTENING
-
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 40);    // UP 单击
-    assert(on == 0);
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 50);    // UP PRESS(不唤醒)
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 30);    // UP PRESS(不唤醒)
     assert(on == 0);
     assert(s.screen_on == false);                          // 保持息屏
-    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 60);   // 双击(不清空)
+    assert(s.panel_on == false);
+
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 40);   // 双击:照常清空
+    app_action_t *a = find_action(APP_ACT_SEND_KEY_ACTION);
+    assert(a && a->u.key_action.action == APP_KEY_CLEAR);
+    assert(s.screen_on == false);                          // 执行但不亮屏
+
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 50);  // DOWN 单击:照常回车
+    a = find_action(APP_ACT_SEND_KEY_ACTION);
+    assert(a && a->u.key_action.action == APP_KEY_ENTER);
+    assert(s.screen_on == false);
+
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 60);    // UP 单击(READY 无分支)
     assert(on == 0);
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 70);  // DOWN 回车
-    assert(on == 0);
-    assert(!has_action(APP_ACT_SEND_KEY_ACTION));
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 80);    // OK 单击(不解锁)
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 70);    // OK 单击(READY 无分支)
     assert(on == 0);
     assert(s.locked == true);
     assert(s.screen_on == false);
+
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 80);     // 长按 UP:照常开录
+    assert(s.state == APP_ST_LISTENING);
+    assert(has_action(APP_ACT_SEND_VOICE_START));
+    assert(s.screen_on == false);                          // 口袋说话,屏幕仍关
+
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 90);     // 长按 OK:解锁亮屏
+    assert(s.locked == false);
+    assert(s.screen_on == true);
+    assert(s.panel_on == true);
+    assert(s.state == APP_ST_LISTENING);                   // 录音态不受解锁影响
+}
+
+// 锁定态收到审批请求:强制解锁亮屏(防口袋盲批;与"APPROVAL 常亮"政策一致)
+static void test_locked_approval_forces_wake(void) {
+    reset();
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 10);     // 锁定
+    assert(s.locked == true);
+    assert(s.screen_on == false);
+
+    app_event_t ev = { .type = APP_EV_APPROVAL_REQUEST,
+                       .u.approval = { .task_id = "t1", .title = "Deploy",
+                                       .target = "app.js", .diff_summary = "+1",
+                                       .risk = APP_RISK_MEDIUM } };
+    app_state_reduce(&s, &ev, now + 20, out, &on);
+    assert(s.state == APP_ST_APPROVAL);
+    assert(s.locked == false);
+    assert(s.screen_on == true);
+    assert(s.panel_on == true);
+    assert(has_action(APP_ACT_UI_SCREEN_ON));
+    assert(has_action(APP_ACT_UI_PANEL_ON));
+
+    // 解锁后 OK 单击照常批准(锁定遗留不吞按键)
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 30);
+    app_action_t *a = find_action(APP_ACT_SEND_AGENT_ACTION);
+    assert(a && a->u.agent_action.decision == APP_ACTION_APPROVE);
 }
 
 // 锁定态长按 OK 解锁:亮屏 + 全屏重绘,state 保持原值
@@ -802,6 +840,54 @@ static void test_wake_no_relock(void) {
     assert(s.locked == false);                                // guard 挡住:不锁定
     assert(s.screen_on == true);                              // 保持亮屏
     assert(on == 0);                                          // LONG 零动作
+}
+
+// ---- 息屏后按键放行(过修修正 2026-08-28):自动息屏只是省电显示态 ----
+// 息屏(超时 tick 驱动)后按键应唤醒并照常执行操作,不再被吞;锁定态的
+// "照常执行但不亮屏"由 locked 门禁负责(见 test_locked_keys_operate_screen_off)。
+static void test_screen_off_keys_pass_through(void) {
+    // a. ▼ DOWN 单击(息屏):唤醒 + APP_KEY_ENTER 上行
+    reset();
+    reduce(APP_EV_TICK, now + APP_IDLE_BACKLIGHT_OFF_MS + 1);   // 20s 无键:关背光
+    assert(s.screen_on == false);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_DOWN, now + 10);       // 按下:唤醒
+    assert(s.screen_on == true);
+    assert(has_action(APP_ACT_UI_SCREEN_ON));
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 20);       // 单击:照常回车
+    app_action_t *a = find_action(APP_ACT_SEND_KEY_ACTION);
+    assert(a && a->u.key_action.action == APP_KEY_ENTER);
+
+    // b. ▲ UP 长按(READY,息屏):唤醒 + start_ptt 进 LISTENING
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);         // → READY
+    reduce(APP_EV_TICK, s.last_key_ms + APP_IDLE_BACKLIGHT_OFF_MS + 1); // 息屏
+    assert(s.screen_on == false);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 10);         // 按下:唤醒
+    assert(s.screen_on == true);
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 500);         // 0.5s 长按判定:开录
+    assert(s.state == APP_ST_LISTENING);
+    assert(has_action(APP_ACT_SEND_VOICE_START));
+
+    // c. ● OK 长按(息屏):PRESS 唤醒后 1s 内 LONG 被 OK_LONG_GUARD 挡,不锁定
+    reset();
+    reduce(APP_EV_TICK, now + APP_IDLE_BACKLIGHT_OFF_MS + 1);   // 息屏
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, now + 10);         // 按下:唤醒
+    assert(s.screen_on == true);
+    assert(s.wake_ms == now);                                   // 唤醒时刻已记录
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 500);         // 500ms 后 LONG
+    assert(s.locked == false);                                  // 防"唤醒即锁"
+    assert(s.screen_on == true);
+    assert(on == 0);                                            // LONG 零动作
+
+    // d. ▲ UP 双击(息屏):唤醒 + 清空上行
+    reset();
+    reduce(APP_EV_TICK, now + APP_IDLE_BACKLIGHT_OFF_MS + 1);   // 息屏
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 10);         // 双击第一按:唤醒
+    assert(s.screen_on == true);
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 20);        // DOUBLE:清空
+    a = find_action(APP_ACT_SEND_KEY_ACTION);
+    assert(a && a->u.key_action.action == APP_KEY_CLEAR);
 }
 
 // 重复锁定/解锁循环:解锁后(距唤醒 >1s)再长按 OK 正常锁定
@@ -1076,9 +1162,11 @@ int main(void) {
     test_screen_off_wake();
     test_screen_off_ready();
     test_ok_long_locks();
-    test_locked_ignores_all_keys();
+    test_locked_keys_operate_screen_off();
+    test_locked_approval_forces_wake();
     test_ok_long_unlocks();
     test_wake_no_relock();
+    test_screen_off_keys_pass_through();
     test_relock_cycle();
     test_lock_guards_listening_approval();
     test_transcript_display();

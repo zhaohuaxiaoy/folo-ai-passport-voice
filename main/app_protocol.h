@@ -24,7 +24,7 @@ void app_protocol_dispatch_event(const app_event_t *ev);
 
 // 设备→Mac 序列化。返回写入字节数(不含 NUL);失败返回 0。
 size_t app_protocol_device_hello(char *buf, size_t cap, int proto);
-size_t app_protocol_voice_start(char *buf, size_t cap);
+size_t app_protocol_voice_start(char *buf, size_t cap, const char *audio_format);
 size_t app_protocol_voice_end(char *buf, size_t cap);
 // 上行按键动作(enter/clear,PC client 执行注入;见 key-remap 任务)
 size_t app_protocol_key_action(char *buf, size_t cap, app_key_action_t action);

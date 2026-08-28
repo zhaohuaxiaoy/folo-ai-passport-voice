@@ -23,7 +23,7 @@ static esp_err_t i2s_full_duplex_init(void) {
         .id = BSP_I2S_PORT,
         .role = I2S_ROLE_MASTER,
         .dma_desc_num = 6,
-        .dma_frame_num = 240,
+        .dma_frame_num = 64,    // 240→64:环 1.5KB——heap 极限下每字节都让给 ble_worker 16384 编码栈;8ms DMA 缓冲,CPU 略增可接受
         .auto_clear_after_cb = true,
         .auto_clear_before_cb = false,
         .intr_priority = 0,

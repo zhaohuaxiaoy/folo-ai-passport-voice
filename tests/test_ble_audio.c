@@ -200,7 +200,7 @@ static void test_event_chunks(void) {
     char line[EVENT_LINE_MAX];
     size_t n;
 
-    n = app_protocol_voice_start(line, sizeof(line));
+    n = app_protocol_voice_start(line, sizeof(line), "ima_adpcm");
     assert_reassembly_line(line, n, 247);
     assert_reassembly_line(line, n, 23);     // 最小 MTU 下跨多片
 

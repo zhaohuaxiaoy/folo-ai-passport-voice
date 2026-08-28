@@ -9,8 +9,10 @@
 //     │                                   重组,设备端写回调只做 app_protocol_parse→投事件,零阻塞)
 //     ├─ 0xA2B2 EVENT NOTIFY             设备→Mac:JSON 行 ≤512B(app_protocol_* 序列化;
 //     │                                   单行跨包 → 应用层分片,末片带行分隔 '\n')
-//     └─ 0xA2B3 AUDIO NOTIFY             设备→Mac:3200B 裸 PCM 帧(100ms @16kHz/16bit/mono;
-//                                        等上一片 NOTIFY_TX 完成再发下一片,见 design.md 吞吐工程)
+//     └─ 0xA2B3 AUDIO NOTIFY             设备→Mac:一帧 = 100ms 音频。BLE 上是 804B
+//                                        IMA ADPCM block(4B 首部+800B),USB 是 3200B PCM。
+//                                        每片带 2B 帧头 [块序号][片序号|0x80 末片]:片级
+//                                        丢失只损坏该块,后续块不失步(见 design.md §4 D4/D11)
 //   ATT 载荷上限 = MTU-3(1 字节 opcode + 2 字节 handle),下行 WRITE 同此开销。
 #pragma once
 
@@ -25,6 +27,12 @@ extern "C" {
 // ---- 常量 ----
 #define ATT_MTU_MIN        23     // BLE 规范最小 ATT MTU(低于此值非法)
 #define PAYLOAD_OVERHEAD   3      // ATT 载荷开销(opcode 1 + handle 2);载荷上限 = MTU-3
+// AUDIO 分片帧头:[uint8 块序号(每帧 ++)][uint8 片序号 0..127 | 0x80 末片标志]。
+// 为什么需要:重组按字节对齐,中间少一片会让此后所有块错位(静默毁掉整个会话)。
+// 有帧头后 Mac 端能识别缺片、只丢该块并在下一块重新对齐,才敢"只丢片不丢帧"。
+#define AUDIO_CHUNK_HDR    2
+#define AUDIO_CHUNK_LAST   0x80   // 片序号字节的末片标志位
+#define AUDIO_CHUNK_IDX_MASK 0x7F // 片序号取模 128(重组端同样按 128 取模比对)
 #define AUDIO_FRAME_BYTES  3200   // 100ms @ 16kHz/16bit/mono(与 audio_streamer CHUNK_BYTES 对齐)
 #define EVENT_LINE_MAX     512    // 事件行上限(与 APP_PROTO_TX_CAP 对齐)
 #define AUDIO_SVC_UUID     0xA2B0 // GATT 服务 128-bit 基 UUID 的 16 位前缀

@@ -30,6 +30,10 @@ static adc_cali_handle_t         s_cali;
 // 每个按键把"哪个键"随回调带回来。button 组件的回调签名固定,故用 usr_data 传索引。
 static void on_event(void *arg, void *usr_data, bsp_btn_ev_t ev) {
     (void)arg;
+    // 诊断(2026-08-28):按键误触取证 —— 判定键 + 判定瞬间 ADC 电压。
+    // "按 OK 后疯狂录音"定位用;定位后删除。
+    ESP_LOGI("KEYDBG", "ev=%d btn=%d mv=%d", ev, (int)(intptr_t)usr_data,
+             bsp_button_read_mv());
     if (!s_cb) return;
     s_cb((bsp_btn_t)(intptr_t)usr_data, ev, s_user);
 }
@@ -62,15 +66,15 @@ esp_err_t bsp_button_init(bsp_btn_cb_t cb, void *user) {
             .min          = BTN_MV[i][0],
             .max          = BTN_MV[i][1],
         };
-        // OK 长按 = 手动锁定息屏(0.5s 判定):锁定态再长按 OK 解锁。
-        // 启用后进入长按态松开的 OK 只报 BUTTON_LONG_PRESS_UP 而不报
-        // SINGLE_CLICK —— 单击语义(HOME 进 READY / APPROVAL 批准)只覆盖
-        // <0.5s 的短按,长按不再误触发。
-        // UP 键(音量加)长按 = 说话:0.5s(50 ticks)判定,长按态松开上报
-        // BUTTON_LONG_PRESS_UP → BSP_BTN_LONG_UP 带出"说话结束"。
+        // OK 长按 = 手动锁定息屏(0.5s 判定;与 UP 的 0.3s 区分,避免误触):
+        // 锁定态再长按 OK 解锁。启用后进入长按态松开的 OK 只报
+        // BUTTON_LONG_PRESS_UP 而不报 SINGLE_CLICK —— 单击语义(HOME 进
+        // READY / APPROVAL 批准)只覆盖 <0.5s 的短按,长按不再误触发。
+        // UP 键(音量加)长按 = 说话(PTT 已从 OK 移师 UP 键):0.3s 判定,
+        // 长按态松开上报 BUTTON_LONG_PRESS_UP → BSP_BTN_LONG_UP 带出"说话结束"。
         button_config_t bc = { 0 };
         if (i == BSP_BTN_OK) bc.long_press_time = 500;      // 0.5s 判定锁定(与 UP 区分)
-        if (i == BSP_BTN_UP) bc.long_press_time = 500;      // 0.5s 判定长按说话
+        if (i == BSP_BTN_UP) bc.long_press_time = 300;      // 0.3s 判定长按说话(用户指定)
         esp_err_t e = iot_button_new_adc_device(&bc, &ac, &s_btn[i]);
         if (e != ESP_OK || !s_btn[i]) {
             ESP_LOGE(TAG, "按键 %d 创建失败 (%s) —— 检查 GPIO%d 的 ADC 配置与分压电阻",
@@ -104,6 +108,8 @@ esp_err_t bsp_button_init(bsp_btn_cb_t cb, void *user) {
 }
 
 int bsp_button_read_mv(void) {
+    // 诊断(2026-08-28):RTC 取证标记 —— ADC 读位置。
+    { volatile uint32_t *dbg = (volatile uint32_t *)0x50001E00; dbg[2] = 'C'; }
     // 读的是 bsp_button_init() 建好、并与 iot_button 共用的那一路 ADC。
     // 单次采样与组件的按键轮询互不干扰(oneshot 内部自带锁)。
     if (!s_adc || !s_cali) return -1;
