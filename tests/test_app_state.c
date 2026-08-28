@@ -708,6 +708,152 @@ static void test_screen_off_ready(void) {
     assert(s.state == APP_ST_READY);                        // 只唤醒,不离开 READY
 }
 
+// ---- 长按 OK 锁定息屏 ----
+// 锁定:亮屏 HOME/READY 下长按 OK(0.5s 阈值)→ locked + 背光灭 + 面板 SLPIN 断电
+static void test_ok_long_locks(void) {
+    reset();
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 10);    // 长按 OK 锁定
+    assert(s.locked == true);
+    assert(s.screen_on == false);
+    assert(s.panel_on == false);
+    assert(has_action(APP_ACT_UI_SCREEN_OFF));
+    assert(has_action(APP_ACT_UI_PANEL_OFF));
+    app_ui_snapshot_t snap;
+    app_state_snapshot(&s, now, &snap);
+    assert(snap.screen_on == false);
+    assert(snap.panel_on == false);
+
+    // READY 态同样可锁定(单击 OK 先进 READY)
+    reset();
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    assert(s.state == APP_ST_READY);
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 20);
+    assert(s.locked == true);
+    assert(s.screen_on == false);
+    assert(s.panel_on == false);
+}
+
+// 锁定态全键忽略:息屏后长按 UP 不再触发说话(核心回归),回车/清空/唤醒全失效
+static void test_locked_ignores_all_keys(void) {
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);    // → READY
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 20);     // 锁定
+    assert(s.locked == true);
+
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 30);     // 长按 UP(说话)
+    assert(on == 0);
+    assert(!has_action(APP_ACT_SEND_VOICE_START));
+    assert(s.state == APP_ST_READY);                       // 不被带进 LISTENING
+
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 40);    // UP 单击
+    assert(on == 0);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 50);    // UP PRESS(不唤醒)
+    assert(on == 0);
+    assert(s.screen_on == false);                          // 保持息屏
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 60);   // 双击(不清空)
+    assert(on == 0);
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 70);  // DOWN 回车
+    assert(on == 0);
+    assert(!has_action(APP_ACT_SEND_KEY_ACTION));
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 80);    // OK 单击(不解锁)
+    assert(on == 0);
+    assert(s.locked == true);
+    assert(s.screen_on == false);
+}
+
+// 锁定态长按 OK 解锁:亮屏 + 全屏重绘,state 保持原值
+static void test_ok_long_unlocks(void) {
+    reset();
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);    // → READY
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 20);     // 锁定
+    assert(s.locked == true);
+    assert(s.state == APP_ST_READY);                       // 锁定不切走状态
+
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 30);     // 再长按解锁
+    assert(s.locked == false);
+    assert(s.screen_on == true);
+    assert(s.panel_on == true);
+    assert(has_action(APP_ACT_UI_PANEL_ON));
+    assert(has_action(APP_ACT_UI_SCREEN_ON));
+    assert(has_action(APP_ACT_UI_REFRESH));
+    assert(s.state == APP_ST_READY);                       // state 仍为原状态
+    app_ui_snapshot_t snap;
+    app_state_snapshot(&s, now, &snap);
+    assert(snap.screen_on == true);
+    assert(snap.panel_on == true);
+}
+
+// 唤醒防误锁:自动息屏 → OK PRESS 唤醒 → 1s 内 OK LONG 不锁定(防"唤醒即锁")
+static void test_wake_no_relock(void) {
+    reset();
+    const uint64_t t0 = now;
+    reduce(APP_EV_TICK, t0 + APP_IDLE_BACKLIGHT_OFF_MS + 1);  // 20s 关背光
+    assert(s.screen_on == false);
+    reduce(APP_EV_TICK, t0 + APP_IDLE_PANEL_OFF_MS + 1);      // 60s 面板断电
+    assert(s.panel_on == false);
+
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_OK, t0 + APP_IDLE_PANEL_OFF_MS + 2); // 长按唤醒的 PRESS
+    assert(s.screen_on == true);
+    assert(s.panel_on == true);
+    assert(s.wake_ms == now);                                 // 唤醒时刻已记录
+
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 500);       // 500ms 后 LONG 到达
+    assert(s.locked == false);                                // guard 挡住:不锁定
+    assert(s.screen_on == true);                              // 保持亮屏
+    assert(on == 0);                                          // LONG 零动作
+}
+
+// 重复锁定/解锁循环:解锁后(距唤醒 >1s)再长按 OK 正常锁定
+static void test_relock_cycle(void) {
+    reset();
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 10);        // 锁定
+    assert(s.locked == true);
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 20);        // 解锁
+    assert(s.locked == false);
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 30);        // 再锁定
+    assert(s.locked == true);
+    assert(s.screen_on == false);
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 40);        // 再解锁
+    assert(s.locked == false);
+    assert(s.screen_on == true);
+    assert(s.panel_on == true);
+    assert(s.state == APP_ST_HOME);                           // 状态自始至终不变
+}
+
+// 回归:LISTENING 中长按 OK 不锁定;APPROVAL 中 OK 单击仍批准、长按不锁定
+static void test_lock_guards_listening_approval(void) {
+    // LISTENING(录音中):长按 OK 不锁定,录音不受影响
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);       // → READY
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);        // 开录
+    assert(s.state == APP_ST_LISTENING);
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 30);
+    assert(s.locked == false);
+    assert(s.screen_on == true);
+    assert(s.state == APP_ST_LISTENING);
+
+    // APPROVAL:OK 长按不锁定;OK 单击仍批准
+    reset();
+    s.state = APP_ST_AGENT_RUNNING;
+    s.state_since_ms = now;
+    app_event_t ev = { .type = APP_EV_APPROVAL_REQUEST,
+                       .u.approval = { .task_id = "t1", .title = "Deploy",
+                                       .target = "app.js", .diff_summary = "+1",
+                                       .risk = APP_RISK_MEDIUM } };
+    app_state_reduce(&s, &ev, now, out, &on);
+    assert(s.state == APP_ST_APPROVAL);
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 100);
+    assert(s.locked == false);
+    assert(s.state == APP_ST_APPROVAL);                       // 不锁定不切换
+    assert(s.screen_on == true);                              // 审批常亮保持
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 200);      // 批准
+    app_action_t *a = find_action(APP_ACT_SEND_AGENT_ACTION);
+    assert(a && a->u.agent_action.decision == APP_ACTION_APPROVE);
+    assert(s.state == APP_ST_AGENT_RUNNING);
+}
+
 // ---- APPROVAL 无超时(安全审批必须等物理按键) ----
 static void test_approval_no_timeout(void) {
     reset();
@@ -929,6 +1075,12 @@ int main(void) {
     test_approval_during_listening();
     test_screen_off_wake();
     test_screen_off_ready();
+    test_ok_long_locks();
+    test_locked_ignores_all_keys();
+    test_ok_long_unlocks();
+    test_wake_no_relock();
+    test_relock_cycle();
+    test_lock_guards_listening_approval();
     test_transcript_display();
     test_ble_link_down();
     test_ble_disconnect_transcribing();

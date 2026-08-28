@@ -19,6 +19,11 @@
 // 假事件;超窗后正常。
 #define BLE_CONNECT_PTT_GUARD_MS 1000
 
+// 唤醒防误锁窗口:息屏后长按 OK 唤醒时,PRESS 唤醒瞬间起 1s 内的 OK LONG
+// 不触发锁定 —— 否则"唤醒"会立刻变成"再锁"(PRESS 后 ~500ms 即到 LONG)。
+// LONG 长按期间只报一次,guard 只挡第一次;松手后再次长按 OK 正常锁定。
+#define OK_LONG_GUARD_MS 1000
+
 static const char *const AGENT_STATE_NAMES[APP_AGENT_COUNT] = {
     [APP_AGENT_READY]    = "ready",
     [APP_AGENT_THINKING] = "thinking",
@@ -37,6 +42,8 @@ void app_state_init(app_state_t *s) {
     s->ble_connected = false;
     s->link_up = false;
     s->link_channel = 0;           // 缺省 BLE
+    s->locked = false;             // 开机未锁定
+    s->wake_ms = 0;                // 无唤醒史 → 首个 OK LONG 不受 guard 限制
 }
 
 static void emit(app_action_t *out, uint8_t *n, uint8_t max, app_action_t a) {
@@ -158,6 +165,24 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
     const uint8_t b = ev->u.key.btn;
     const bool wake_only = !s->screen_on; // 息屏时任何键只唤醒
 
+    // 锁定态门禁:除 OK 长按解锁外,一切按键事件(PRESS/RELEASE/CLICK/DOUBLE/
+    // LONG/LONG_UP × UP/DOWN/OK)全部忽略 —— 不唤醒、不触发说话、不触发回车。
+    if (s->locked) {
+        if (ev->type == APP_EV_KEY_LONG && b == APP_BTN_OK) {
+            s->locked = false;
+            s->panel_on = true;
+            s->screen_on = true;
+            s->last_key_ms = now_ms;   // 解锁后息屏计时重新开始
+            app_action_t p = { .type = APP_ACT_UI_PANEL_ON };
+            emit(out, n, max, p);
+            app_action_t a = { .type = APP_ACT_UI_SCREEN_ON };
+            emit(out, n, max, a);
+            app_action_t r = { .type = APP_ACT_UI_REFRESH };
+            emit(out, n, max, r);
+        }
+        return;
+    }
+
     if (wake_only) {
         if (ev->type == APP_EV_KEY_PRESS) {
             if (!s->panel_on) {
@@ -167,11 +192,29 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             }
             s->screen_on = true;
             s->last_key_ms = now_ms;
+            s->wake_ms = now_ms;   // 唤醒时刻(OK_LONG_GUARD:防"唤醒即锁")
             app_action_t a = { .type = APP_ACT_UI_SCREEN_ON };
             emit(out, n, max, a);
             app_action_t r = { .type = APP_ACT_UI_REFRESH };
             emit(out, n, max, r);
         }
+        return;
+    }
+
+    // 锁定入口:亮屏的 HOME/READY 下长按 OK(0.5s 阈值)立即锁定息屏
+    // (背光灭 + 面板 SLPIN 断电,不等 60s 超时)。录音/转写/审批/Agent
+    // 运行中不可锁定;USB 模式手动锁定允许(显式操作,省电优先)。
+    if (ev->type == APP_EV_KEY_LONG && b == APP_BTN_OK &&
+        (s->state == APP_ST_HOME || s->state == APP_ST_READY) &&
+        s->screen_on && s->panel_on &&
+        now_ms - s->wake_ms > OK_LONG_GUARD_MS) {
+        s->locked = true;
+        s->screen_on = false;
+        s->panel_on = false;
+        app_action_t a = { .type = APP_ACT_UI_SCREEN_OFF };
+        emit(out, n, max, a);
+        app_action_t p = { .type = APP_ACT_UI_PANEL_OFF };
+        emit(out, n, max, p);
         return;
     }
 
@@ -271,7 +314,10 @@ static void handle_tick(app_state_t *s, uint64_t now_ms, app_action_t *out, uint
     // 20s → 关背光(渲染跳过,面板冻结最后一帧);60s → 面板 SLPIN 断电(μA 级)。
     // 背光关后 tick 仍需走到面板判定,故不提前 return。
     // USB 模式(有线)不熄屏:屏幕常亮,省电只针对无线场景(用户需求)。
+    // 锁定息屏为显式操作(locked 时 screen_on/panel_on 已 false,超时分支
+    // 本不会触发),此处防御性排除使意图明确。
     const bool idle_state = (mode_get() != APP_MODE_USB) &&
+                            !s->locked &&
                             (s->state == APP_ST_HOME ||
                              s->state == APP_ST_READY);
     if (idle_state) {

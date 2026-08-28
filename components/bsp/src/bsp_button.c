@@ -62,13 +62,14 @@ esp_err_t bsp_button_init(bsp_btn_cb_t cb, void *user) {
             .min          = BTN_MV[i][0],
             .max          = BTN_MV[i][1],
         };
-        // OK 键(PTT 键)必须禁用长按:iot_button 进入长按态后,松开时只上报
-        // BUTTON_LONG_PRESS_UP 而不上报 PRESS_UP/SINGLE_CLICK —— 按住说话
-        // 必然超过长按时长,"松开结束"会永远不触发。禁掉后松开永远产生 PRESS_UP。
+        // OK 长按 = 手动锁定息屏(0.5s 判定):锁定态再长按 OK 解锁。
+        // 启用后进入长按态松开的 OK 只报 BUTTON_LONG_PRESS_UP 而不报
+        // SINGLE_CLICK —— 单击语义(HOME 进 READY / APPROVAL 批准)只覆盖
+        // <0.5s 的短按,长按不再误触发。
         // UP 键(音量加)长按 = 说话:0.5s(50 ticks)判定,长按态松开上报
         // BUTTON_LONG_PRESS_UP → BSP_BTN_LONG_UP 带出"说话结束"。
         button_config_t bc = { 0 };
-        if (i == BSP_BTN_OK) bc.long_press_time = 60000;    // 60s,远超 PTT 按压,等效禁用(uint16_t)
+        if (i == BSP_BTN_OK) bc.long_press_time = 500;      // 0.5s 判定锁定(与 UP 区分)
         if (i == BSP_BTN_UP) bc.long_press_time = 500;      // 0.5s 判定长按说话
         esp_err_t e = iot_button_new_adc_device(&bc, &ac, &s_btn[i]);
         if (e != ESP_OK || !s_btn[i]) {

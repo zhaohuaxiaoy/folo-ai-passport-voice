@@ -14,10 +14,12 @@ typedef struct {
     bool           net_busy;
     bool           screen_on;
     bool           panel_on;      // 面板供电(20s 背光灭后 60s 级 SLPIN 断电)
+    bool           locked;        // 锁定息屏(仅 OK 长按解锁;叠加态,state 保持原值)
     bool           ble_connected; // BLE 连接已建立(与 link_up 区别:连接但未订阅)
     uint8_t        link_channel;  // 0=BLE / 2=USB(link_up 时是当前通道;断后保留供横幅显示)
     uint64_t       last_key_ms;     // 最近按键时刻(息屏计时)
     uint64_t       state_since_ms;  // 进入当前状态的时刻(超时计时)
+    uint64_t       wake_ms;         // 最近一次息屏唤醒时刻(OK_LONG_GUARD:防"唤醒即锁")
     uint64_t       ptt_end_ms;      // PTT 松开时刻(过滤松开回弹误判的双击)
     uint64_t       ble_connect_ms;  // BLE 连接时刻(连接握手期密集射频 → 假长按,抑制 PTT)
     uint64_t       toast_until_ms;
