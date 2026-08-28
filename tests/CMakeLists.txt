@@ -58,10 +58,16 @@ add_test(NAME time_sync COMMAND test_time_sync)
 #     注入 200ms(默认即 200,注入保持显式)) ---
 find_package(Threads REQUIRED)
 add_executable(test_audio_streamer test_audio_streamer.c ${MAIN_DIR}/audio_streamer.c
-               ${FAKE_DIR}/fake_rtos.c)
+               ${MAIN_DIR}/adpcm.c ${FAKE_DIR}/fake_rtos.c)
 target_include_directories(test_audio_streamer PRIVATE
     ${MAIN_DIR} ${FAKE_DIR} ${BSP_DIR})
 target_compile_definitions(test_audio_streamer PRIVATE
-    WORKER_EXIT_TIMEOUT_MS=200 CANCEL_DRAIN_TIMEOUT_MS=200)
+    WORKER_EXIT_TIMEOUT_MS=200)
 target_link_libraries(test_audio_streamer PRIVATE Threads::Threads)
 add_test(NAME audio_streamer COMMAND test_audio_streamer)
+
+# --- IMA ADPCM 编解码(纯函数;往返 SNR + 块独立性 + 越界防护,见 PRD 验收) ---
+add_executable(test_adpcm test_adpcm.c ${MAIN_DIR}/adpcm.c)
+target_include_directories(test_adpcm PRIVATE ${MAIN_DIR})
+target_link_libraries(test_adpcm PRIVATE m)
+add_test(NAME adpcm COMMAND test_adpcm)

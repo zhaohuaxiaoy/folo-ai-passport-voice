@@ -5,6 +5,11 @@
 #include "app_state.h"
 #include "fake_mode.h"
 
+// 存储语义回归:mode 枚举只删中间值不重排(BLE=0/USB=2,值 1 已废弃)。
+// 旧 NVS 存 2(USB)的设备升级后仍为 USB;值 1 解析为越界 → 回退 BLE。
+_Static_assert(APP_MODE_BLE == 0, "APP_MODE_BLE must be 0 (NVS storage semantics)");
+_Static_assert(APP_MODE_USB == 2, "APP_MODE_USB must be 2 (NVS storage semantics)");
+
 static uint64_t now = 1000000;              // 单调递增假时钟
 static app_state_t s;
 static app_action_t out[APP_ACT_MAX];
@@ -243,8 +248,8 @@ static void test_listening_release_sends(void) {
     assert(has_action(APP_ACT_STREAM_STOP));
     assert(has_action(APP_ACT_SEND_VOICE_END));
     assert_action_order(APP_ACT_STREAM_STOP, APP_ACT_SEND_VOICE_END);
-    app_action_t *t = find_action(APP_ACT_PLAY_TONE);
-    assert(t && t->u.tone == APP_TONE_SEND);
+    // 转写期静音(用户需求 2026-08-28):松开不再播发送音
+    assert(!has_action(APP_ACT_PLAY_TONE));
 }
 
 // ---- UP(音量加)双击 = 清空输入框;OK 双击已移除(录音松开已发送,DOUBLE 全局处理)----
@@ -340,8 +345,8 @@ static void test_up_long_ptt(void) {
     assert(has_action(APP_ACT_STREAM_STOP));
     assert(has_action(APP_ACT_SEND_VOICE_END));
     assert_action_order(APP_ACT_STREAM_STOP, APP_ACT_SEND_VOICE_END);
-    t = find_action(APP_ACT_PLAY_TONE);
-    assert(t && t->u.tone == APP_TONE_SEND);               // 发送音保留
+    // 转写期静音(用户需求 2026-08-28):松开不再播发送音
+    assert(!has_action(APP_ACT_PLAY_TONE));
 
     // 离线:长按 UP 被拒,error 音 + toast,不进 LISTENING
     reset();
@@ -430,10 +435,10 @@ static void test_agent_status_flow(void) {
     ev = (app_event_t){ .type = APP_EV_AGENT_STATUS,
                         .u.agent_status = { .state = APP_AGENT_DONE, .message = "24 passed" } };
     app_state_reduce(&s, &ev, now, out, &on);
-    // 无 DONE 页:done 直接回 READY 待命(用户:不要 done 提示),成功音保留
+    // 无 DONE 页:done 直接回 READY 待命(用户:不要 done 提示),
+    // 成功音一并取消(用户要求转写→ready 静音,2026-08-28)
     assert(s.state == APP_ST_READY);
-    app_action_t *t = find_action(APP_ACT_PLAY_TONE);
-    assert(t && t->u.tone == APP_TONE_SUCCESS);
+    assert(!has_action(APP_ACT_PLAY_TONE));
 }
 
 // ---- 审批闭环 ----
@@ -791,59 +796,7 @@ static void test_snapshot_link_up(void) {
     assert(snap.ble_connected == false);
 }
 
-// ---- WiFi/WS 通道(Windows 移植):WS_CONNECTED = 链路通(与 BLE 对等) ----
-static void test_ws_link_up(void) {
-    reset();
-    fake_mode_set(APP_MODE_WIFI);           // 链路事件通道门禁:WS 事件仅 WiFi 模式生效
-    app_event_t c = { .type = APP_EV_WS_CONNECTED };
-    app_state_reduce(&s, &c, now, out, &on);
-    assert(s.link_up == true);
-    assert(s.ble_connected == false);                      // 非 BLE 通道,图标保持灰
-    app_ui_snapshot_t snap;
-    app_state_snapshot(&s, now, &snap);
-    assert(strcmp(snap.link_name, "WiFi") == 0);           // 横幅按通道渲染
-
-    // WiFi 链路下 PTT 可用(HOME 单击进 READY,再按下开录)
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    assert(s.state == APP_ST_READY);
-    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);
-    assert(s.state == APP_ST_LISTENING);
-    assert(has_action(APP_ACT_SEND_VOICE_START));
-}
-
-// ---- WS 断开:停流回 READY + 触发 mDNS 重查 + 通道名保留 ----
-static void test_ws_link_down(void) {
-    reset();
-    fake_mode_set(APP_MODE_WIFI);           // 链路事件通道门禁:WS 事件仅 WiFi 模式生效
-    s.link_up = true;
-    s.link_channel = 1;
-    s.state = APP_ST_LISTENING;
-    s.state_since_ms = now;
-    app_event_t ev = { .type = APP_EV_WS_DISCONNECTED };
-    app_state_reduce(&s, &ev, now, out, &on);
-    assert(s.link_up == false);
-    assert(s.state == APP_ST_READY);
-    assert(has_action(APP_ACT_STREAM_CANCEL));             // 兜底停流,同 BLE 断连
-    assert(!has_action(APP_ACT_SEND_VOICE_END));           // 会话中止,不发 end
-    assert(has_action(APP_ACT_RESOLVE_SERVICE));           // mDNS 重查,Companion 重启自动重连
-    assert(strstr(s.toast, "offline"));
-
-    // APPROVAL 下断开:保持状态等待重连,但也要重查
-    reset();
-    s.link_up = true;
-    s.link_channel = 1;
-    s.state = APP_ST_APPROVAL;
-    app_state_reduce(&s, &ev, now, out, &on);
-    assert(s.state == APP_ST_APPROVAL);
-    assert(has_action(APP_ACT_RESOLVE_SERVICE));
-
-    // 快照横幅名:BLE 默认 → WiFi 断线后仍显示 WiFi
-    app_ui_snapshot_t snap;
-    app_state_snapshot(&s, now, &snap);
-    assert(strcmp(snap.link_name, "WiFi") == 0);
-}
-
-// ---- USB 有线通道(第三通道):USB_CONNECTED = 链路通(与 BLE/WS 对等) ----
+// ---- USB 有线通道:USB_CONNECTED = 链路通(与 BLE 对等) ----
 static void test_usb_link_up(void) {
     reset();
     fake_mode_set(APP_MODE_USB);            // 链路事件通道门禁:USB 事件仅 USB 模式生效
@@ -863,7 +816,7 @@ static void test_usb_link_up(void) {
     assert(has_action(APP_ACT_SEND_VOICE_START));
 }
 
-// ---- USB 断开:停流回 READY + 通道名保留(BLE/WS 断连同路径) ----
+// ---- USB 断开:停流回 READY + 通道名保留(与 BLE 断连同路径) ----
 static void test_usb_link_down(void) {
     reset();
     fake_mode_set(APP_MODE_USB);            // 链路事件通道门禁:USB 事件仅 USB 模式生效
@@ -891,46 +844,6 @@ static void test_usb_link_down(void) {
     app_ui_snapshot_t snap;
     app_state_snapshot(&s, now, &snap);
     assert(strcmp(snap.link_name, "USB") == 0);
-}
-
-// ---- WiFi 失败 toast 按 reason 去重;链路恢复后允许再报 ----
-static void test_wifi_fail_dedup(void) {
-    reset();
-    app_event_t a = { .type = APP_EV_WIFI_CONNECT_FAIL, .u.wifi_fail = { .reason = 15 } };
-    app_state_reduce(&s, &a, now, out, &on);
-    assert(strstr(s.toast, "WiFi disconnected"));
-    const char *t1 = s.toast;
-
-    app_state_reduce(&s, &a, now + 10, out, &on);          // 同因重连风暴:不再重复
-    assert(strcmp(s.toast, t1) == 0);
-
-    app_event_t b = { .type = APP_EV_WIFI_CONNECT_FAIL, .u.wifi_fail = { .reason = 201 } };
-    app_state_reduce(&s, &b, now + 20, out, &on);          // 不同原因:允许再报
-    assert(strstr(s.toast, "WiFi disconnected"));
-
-    // 链路恢复(WS 连上)后清位:同因新片段允许再报
-    reset();
-    app_state_reduce(&s, &a, now, out, &on);
-    app_event_t c = { .type = APP_EV_WS_CONNECTED };
-    app_state_reduce(&s, &c, now + 10, out, &on);
-    app_state_reduce(&s, &a, now + 20, out, &on);
-    assert(strstr(s.toast, "WiFi disconnected"));
-}
-
-// ---- mDNS 发现新目标:产出 WS_RETARGET 动作(带 URL) ----
-static void test_ws_target_found(void) {
-    reset();
-    app_event_t ev = { .type = APP_EV_WS_TARGET_FOUND };
-    strcpy(ev.u.ws_target.url, "ws://10.0.0.8:8765");
-    app_state_reduce(&s, &ev, now, out, &on);
-    app_action_t *rt = find_action(APP_ACT_WS_RETARGET);
-    assert(rt != NULL);
-    assert(strcmp(rt->u.ws_target.url, "ws://10.0.0.8:8765") == 0);
-    // 仅改运行时目标,不置链路状态(WS 尚未连接)
-    assert(s.link_up == false);
-    app_ui_snapshot_t snap;
-    app_state_snapshot(&s, now, &snap);
-    assert(strcmp(snap.link_name, "BLE") == 0);
 }
 
 // ---- 校时下行:透传动作,状态不变(与链路状态正交) ----
@@ -992,7 +905,7 @@ static void test_link_event_gate(void) {
     // 窗口外:非本模式事件仍被挡(防御)
     fake_mode_set(APP_MODE_BLE);
     s.link_up = true;
-    app_event_t wd = { .type = APP_EV_WS_DISCONNECTED };
+    app_event_t wd = { .type = APP_EV_USB_DISCONNECTED };
     app_state_reduce(&s, &wd, now, out, &on);
     assert(s.link_up == true);
 }
@@ -1027,12 +940,8 @@ int main(void) {
     test_ble_events();
     test_snapshot_agent_name();
     test_snapshot_link_up();
-    test_ws_link_up();
-    test_ws_link_down();
     test_usb_link_up();
     test_usb_link_down();
-    test_wifi_fail_dedup();
-    test_ws_target_found();
     test_time_set();
     test_bounded();
     test_link_event_gate();
