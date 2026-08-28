@@ -88,6 +88,11 @@ def build(app_name):
     if sys.platform == "darwin":
         for m in COLLECT_ALL_DARWIN:
             cmd += ["--collect-all", m]
+    else:
+        # Windows 缺省 onedir 输出 dist/AI Passport/(目录),Stage 步骤找不到
+        # 单 exe → CI 上传失败。--onefile 产出 dist/AI Passport.exe 单文件
+        # (发布下载体验:用户拿一个 exe 即可;代价是启动时解压到临时目录)。
+        cmd += ["--onefile"]
     cmd.append(ENTRY)
     p = _run(cmd)
     if p.returncode != 0:
