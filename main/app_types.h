@@ -66,17 +66,11 @@ typedef enum {
     APP_EV_AUDIO_ERROR,     // 采集硬件错误
     APP_EV_TONE_DONE,       // START 提示音播放完成(异步开流的信号,见 design)
     APP_EV_TICK,            // 100ms 心跳,驱动超时/息屏
-    // ---- WiFi/WS 通道(Windows 移植:无蓝牙 PC 走 WiFi,见 design.md)----
-    APP_EV_WIFI_CONNECTED,  // STA 拿到 IP(→ mDNS 解析 + WS 启动)
-    APP_EV_WIFI_CONNECT_FAIL, // STA 断线/连不上(按 reason 去重)
-    APP_EV_WS_CONNECTED,    // WS 通道通(link_up 的 WiFi 侧充分条件)
-    APP_EV_WS_DISCONNECTED, // WS 通道断(断连/停止)
-    APP_EV_WS_TARGET_FOUND, // mDNS 发现 Companion 地址(与缓存不同才投)
     APP_EV_MODE_SWITCH,     // 射频模式切换请求(不进归约器:main.c 排空循环直接执行)
-    // ---- USB 有线通道(第三通道:USB-Serial-JTAG,见 design.md)----
+    // ---- USB 有线通道(USB-Serial-JTAG,见 design.md)----
     APP_EV_USB_CONNECTED,   // USB 会话通(收到 PC 握手 ping;link_up 的 USB 侧充分条件)
     APP_EV_USB_DISCONNECTED, // USB 会话断(拔线:is_connected 翻转)
-    APP_EV_TIME_SET,         // 校时下行(epoch 秒 UTC;三通道共用:CTRL/WS time.set 行 + SYS time set)
+    APP_EV_TIME_SET,         // 校时下行(epoch 秒 UTC;双通道共用:CTRL time.set 行 + SYS time set)
 } app_event_type_t;
 
 // Agent 状态(与协议字符串互转在 app_protocol.c)
@@ -119,7 +113,6 @@ typedef enum {
 // 显示通道:须 ≥ APP_TRANSCRIPT_MAX,保证 relay 按 128B 切分的转写行完整落屏
 #define APP_AGENT_MSG_MAX     APP_TRANSCRIPT_MAX
 #define APP_TOAST_MAX         64
-#define APP_WS_URL_MAX        128
 
 // 事件(定长结构,入队拷贝,union 保小)
 typedef struct {
@@ -142,9 +135,7 @@ typedef struct {
             uint8_t inject_mode;                        // app_inject_mode_t(协议兼容保留)
             bool final;                                 // false=预览态(未定稿);true=定稿落定
         } transcript;                                   // TRANSCRIPT
-        struct { uint16_t reason; } wifi_fail;          // WIFI_CONNECT_FAIL
-        struct { char url[APP_WS_URL_MAX]; } ws_target; // WS_TARGET_FOUND
-        struct { uint8_t target; } mode_switch;         // MODE_SWITCH(0=BLE/1=WiFi)
+        struct { uint8_t target; } mode_switch;         // MODE_SWITCH(0=BLE/2=USB)
         struct { int64_t epoch; } time_set;             // TIME_SET(UTC 秒,int64 对齐 8,union 仍 ≤228B)
     } u;
 } app_event_t;
@@ -165,8 +156,6 @@ typedef enum {
     APP_ACT_STREAM_STOP,
     APP_ACT_STREAM_CANCEL,   // 取消/断链:停采集 + 清空 ring + 丢弃在途帧(与 STOP 区别:不排空发送)
     APP_ACT_PLAY_TONE,
-    APP_ACT_WS_RETARGET,     // ws_client_retarget(运行时 URL,不写 NVS;mDNS 发现结果)
-    APP_ACT_RESOLVE_SERVICE, // mdns_resolver_request(触发 mDNS 重查)
     APP_ACT_TIME_SET,        // time_sync_set_epoch(校时落地)
 } app_action_type_t;
 
@@ -181,7 +170,6 @@ typedef struct {
             char task_id[APP_TASK_ID_MAX];
             uint8_t decision;                           // app_approval_decision_t
         } agent_action;                                 // SEND_AGENT_ACTION
-        struct { char url[APP_WS_URL_MAX]; } ws_target; // WS_RETARGET
         struct { int64_t epoch; } time_set;             // TIME_SET
     } u;
 } app_action_t;
@@ -194,7 +182,7 @@ typedef struct {
     bool           panel_on;      // 面板供电(SLPIN 断电后 false)
     bool           net_busy;      // 音频丢帧中 → BUSY 横幅
     bool           ble_connected; // BLE 连接是否建立(未订阅时图标灰色)
-    char           link_name[8];  // 当前链路通道名:"BLE"/"WiFi"(断线横幅按此渲染)
+    char           link_name[8];  // 当前链路通道名:"BLE"/"USB"(断线横幅按此渲染)
     bool           battery_available;
     uint8_t        battery_soc;   // 0..100
     char           agent_message[APP_AGENT_MSG_MAX];

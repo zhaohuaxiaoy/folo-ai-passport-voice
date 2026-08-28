@@ -1,5 +1,5 @@
 // main/time_sync.c —— wall-clock 校时(校时源仅电脑客户端)。
-// 三通道下发统一入口:BLE/WS 协议行 time.set、USB SYS 命令 time set、REPL 手动。
+// 三通道下发统一入口:BLE 协议行 time.set、USB SYS 命令 time set、REPL 手动。
 // 状态:重启后未校时(valid=false);set_epoch 置位后本会话有效。
 // 时区:仅小时偏移,NVS 键 tz_hour(int8,默认 +8,±12 校验),不引入 TZ env。
 #include "time_sync.h"

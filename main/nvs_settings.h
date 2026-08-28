@@ -2,8 +2,6 @@
 #pragma once
 
 #include "esp_err.h"
-#include <stdbool.h>
-#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -12,17 +10,8 @@ extern "C" {
 
 esp_err_t nvs_settings_init(void);
 
-esp_err_t nvs_settings_get_wifi(char *ssid, size_t ssid_sz, char *pass, size_t pass_sz);
-esp_err_t nvs_settings_set_wifi(const char *ssid, const char *pass);
-
-esp_err_t nvs_settings_get_ws_url(char *url, size_t sz);
-esp_err_t nvs_settings_set_ws_url(const char *url);
-
-// WS 目标策略:true=auto(mDNS 自动发现,缺省)/ false=static(显式 URL 优先)
-esp_err_t nvs_settings_get_ws_mode(bool *auto_mode);
-esp_err_t nvs_settings_set_ws_mode(bool auto_mode);
-
-// 射频模式:0=BLE(缺省)/ 1=WiFi。factory reset 回 BLE。
+// 射频模式存储语义:0=BLE(缺省)/ 2=USB(值 1 已废弃,不重排;越界值按 BLE
+// 兜底)。NVS 中既存的旧通道键不清理(新固件不再读取)。factory reset 回 BLE。
 esp_err_t nvs_settings_get_mode(uint8_t *mode);
 esp_err_t nvs_settings_set_mode(uint8_t mode);
 

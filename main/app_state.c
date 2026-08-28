@@ -13,6 +13,12 @@
 // 400-600ms,300ms 窗口覆盖不住,故取 700ms。
 #define PTT_REBOUND_GUARD_MS 700
 
+// 连接握手期(~0.4-1s:参数协商/DLE/PHY 更新)密集射频会把按键 ADC 整段
+// 腐蚀成 0mV → 假 UP 长按 → 自动开录音(真机实测: 连接后 130s 内自动触发
+// 19 次 PTT 录音)。真实用户连接后 1s 内按住说话的概率极低,此窗口只吞
+// 假事件;超窗后正常。
+#define BLE_CONNECT_PTT_GUARD_MS 1000
+
 static const char *const AGENT_STATE_NAMES[APP_AGENT_COUNT] = {
     [APP_AGENT_READY]    = "ready",
     [APP_AGENT_THINKING] = "thinking",
@@ -31,7 +37,6 @@ void app_state_init(app_state_t *s) {
     s->ble_connected = false;
     s->link_up = false;
     s->link_channel = 0;           // 缺省 BLE
-    s->wifi_fail_reason = 0;
 }
 
 static void emit(app_action_t *out, uint8_t *n, uint8_t max, app_action_t a) {
@@ -58,8 +63,7 @@ void app_state_snapshot(const app_state_t *s, uint64_t now_ms, app_ui_snapshot_t
     snap->net_busy         = s->net_busy;
     snap->ble_connected    = s->ble_connected;
     str_cpy(snap->link_name, sizeof(snap->link_name),
-            s->link_channel == 1 ? "WiFi"
-            : s->link_channel == 2 ? "USB"
+            s->link_channel == 2 ? "USB"
             : "BLE");
     snap->elapsed_ms       = (uint32_t)(now_ms - s->state_since_ms);
     snap->battery_available = true; // 由主循环在快照后补真实值,见 app_ui
@@ -116,16 +120,14 @@ static void start_ptt(app_state_t *s, uint64_t now_ms,
     }
 }
 
-// PTT 结束(音量加长按松开):停流 → voice.end → 发送音 → 转写。
+// PTT 结束(音量加长按松开):停流 → voice.end → 转写。
+// 不播发送音:用户要求转写期静音(2026-08-28)。
 static void end_ptt(app_state_t *s, uint64_t now_ms,
                     app_action_t *out, uint8_t *n, uint8_t max) {
     app_action_t st = { .type = APP_ACT_STREAM_STOP };
     emit(out, n, max, st);
     app_action_t v = { .type = APP_ACT_SEND_VOICE_END };
     emit(out, n, max, v);
-    app_action_t t = { .type = APP_ACT_PLAY_TONE };
-    t.u.tone = APP_TONE_SEND;
-    emit(out, n, max, t);
     s->state = APP_ST_TRANSCRIBING;
     s->state_since_ms = now_ms;
     s->agent_state_name[0] = '\0';   // 新会话开始,清除旧 agent 状态
@@ -201,8 +203,12 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
             send_key_action(s, APP_KEY_ENTER, out, n, max);
         } else if (ev->type == APP_EV_KEY_LONG && b == APP_BTN_UP) {
-            // 音量加长按 ≥0.5s = 说话(滴声只在长按判定时响,双击不会走到这里)。
+            // 音量加长按 ≥0.3s = 说话(滴声只在长按判定时响,双击不会走到这里)。
             // OK 键已退出 PTT:按住/松开不再开录音。
+            // 连接握手期假长按抑制:密集射频腐蚀 → 假 UP 长按,窗口内吞掉。
+            if (s->ble_connected && now_ms - s->ble_connect_ms < BLE_CONNECT_PTT_GUARD_MS) {
+                break;
+            }
             start_ptt(s, now_ms, out, n, max);
         }
         break;
@@ -363,12 +369,9 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
                 s->state_since_ms = now_ms;
             } else if (st == APP_AGENT_DONE) {
                 // 无 DONE 页:识别完成直接回 READY 待命(用户:不要 done 提示),
-                // 成功音保留作反馈
+                // 成功音一并取消(用户要求转写→ready 静音,2026-08-28)
                 s->state = APP_ST_READY;
                 s->state_since_ms = now_ms;
-                app_action_t t = { .type = APP_ACT_PLAY_TONE };
-                t.u.tone = APP_TONE_SUCCESS;
-                emit(out, out_n, max, t);
             } else if (st == APP_AGENT_ERROR) {
                 abort_to_ready(s, now_ms, "Agent error", out, out_n, max);
             }
@@ -433,8 +436,9 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
     case APP_EV_BLE_CONNECTED:
         // 语义:EVENT 特征已订阅(链路通,PTT 可用)。
         // 通道门禁(审查 P1):非 BLE 模式下手机连入只更新图标,不写 link_up ——
-        // USB/WiFi 音频会话不被 BLE 事件翻转;mode_switching 窗口放行切换期
+        // USB 音频会话不被 BLE 事件翻转;mode_switching 窗口放行切换期
         // 投递的收束事件(见 mode.h)。
+        s->ble_connect_ms = now_ms;   // 握手期假长按抑制计时起点(见 handle_key)
         if (mode_get() != APP_MODE_BLE && !mode_switching()) {
             s->ble_connected = true;
             {
@@ -504,54 +508,7 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         }
         break;
 
-    // ---- WiFi/WS 通道(Windows 移植:无蓝牙 PC 走 WiFi,语义与 BLE 对等)----
-
-    case APP_EV_WIFI_CONNECTED:
-        // 拿到 IP 只是链路半程:WS 尚未连上,link_up 仍由 WS_CONNECTED 置位。
-        // 无动作 —— 仅信息事件(WS 断开后的自动重连链由 wifi_app 驱动)。
-        break;
-
-    case APP_EV_WIFI_CONNECT_FAIL:
-        // 按 reason 去重:重连风暴中同一原因只 toast 一次;不同原因(或链路已恢复
-        // 后的新失败,见 WS_CONNECTED 清位)允许再次提示。
-        if (s->wifi_fail_reason != ev->u.wifi_fail.reason) {
-            s->wifi_fail_reason = ev->u.wifi_fail.reason;
-            set_toast(s, now_ms, "WiFi disconnected");
-            app_action_t r = { .type = APP_ACT_UI_REFRESH };
-            emit(out, out_n, max, r);
-        }
-        break;
-
-    case APP_EV_WS_CONNECTED:
-        // 与 BLE_CONNECTED 同构:WS 通道通 = 链路通,PTT 可用。
-        // 通道门禁:非 WiFi 模式(USB 模式射频保持、WS 可能连上)不写链路状态;
-        // mode_switching 窗口放行切换期收束事件(见 mode.h)。
-        if (mode_get() != APP_MODE_WIFI && !mode_switching()) break;
-        s->link_channel = 1;
-        s->link_up = true;
-        s->wifi_fail_reason = 0;   // 链路已恢复:后续新失败允许再次 toast
-        {
-            app_action_t b = { .type = APP_ACT_UI_REFRESH };
-            emit(out, out_n, max, b);
-        }
-        break;
-
-    case APP_EV_WS_DISCONNECTED:
-        // 通道门禁:非 WiFi 模式忽略(USB 模式 WS 断开不影响 USB 链路);
-        // mode_switching 窗口放行切换期收束事件。
-        if (mode_get() != APP_MODE_WIFI && !mode_switching()) break;
-        s->link_up = false;
-        s->wifi_fail_reason = 0;   // 新的失败片段:允许再 toast
-        // 状态收束与 BLE 断连同路径(停流/回 READY/审批保持);toast 文案区分通道
-        handle_link_down(s, now_ms, "Companion offline", out, out_n, max);
-        {
-            // 触发 mDNS 重查:Companion 重启后自动重连(auto 模式)
-            app_action_t rs = { .type = APP_ACT_RESOLVE_SERVICE };
-            emit(out, out_n, max, rs);
-        }
-        break;
-
-    // ---- USB 有线通道(第三通道:语义与 BLE/WS 对等)----
+    // ---- USB 有线通道(语义与 BLE 对等)----
 
     case APP_EV_USB_CONNECTED:
         // 通道门禁:非 USB 模式忽略(仅 USB 模式有 usb_link 任务,防御性);
@@ -573,15 +530,6 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         s->link_up = false;
         // 状态收束与 BLE 断连同路径;toast 文案区分通道
         handle_link_down(s, now_ms, "USB disconnected", out, out_n, max);
-        break;
-
-    case APP_EV_WS_TARGET_FOUND:
-        {
-            // 新目标 ≠ 缓存目标(去重在 mdns_resolver 内部),交给执行器 retarget
-            app_action_t rt = { .type = APP_ACT_WS_RETARGET };
-            str_cpy(rt.u.ws_target.url, sizeof(rt.u.ws_target.url), ev->u.ws_target.url);
-            emit(out, out_n, max, rt);
-        }
         break;
 
     case APP_EV_MODE_SWITCH:

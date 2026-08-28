@@ -10,11 +10,9 @@
 #include "audio_streamer.h"
 #include "ble_audio.h"
 #include "console_cmds.h"
-#include "mdns_resolver.h"
 #include "mode.h"
 #include "nvs_settings.h"
 #include "time_sync.h"
-#include "ws_client.h"
 #include "bsp_audio.h"
 #include "bsp_battery.h"
 #include "bsp_button.h"
@@ -44,7 +42,7 @@ static uint64_t s_last_render_ms = 0;    // 上次渲染时刻(S1 降频:非计�
 #define APP_EVENT_BATCH_MAX 16
 
 // 经当前链路通道上行一行(序列化已完成,含 '\n')。异步:BLE 走 event_worker 串行
-// 发送,WiFi 走 WS 文本帧;失败由通道层计数/记日志,此处仅警告。
+// 发送,USB 走 SYS 帧;失败由通道层计数/记日志,此处仅警告。
 static void send_event_line(char *buf, size_t len)
 {
     if (len == 0) return;
@@ -125,16 +123,6 @@ static void run_actions(const app_action_t *acts, uint8_t n)
         case APP_ACT_TIME_SET:
             // 校时落地:写系统时间 + 置校时标志(app_task 上下文,单写点)
             time_sync_set_epoch(a->u.time_set.epoch);
-            break;
-        case APP_ACT_WS_RETARGET:
-            // mDNS 发现新目标:运行时改 WS URL(不写 NVS,auto 模式语义)
-            if (ws_client_retarget(a->u.ws_target.url) != ESP_OK) {
-                ESP_LOGW(TAG, "WS retarget 失败: %s", a->u.ws_target.url);
-            }
-            break;
-        case APP_ACT_RESOLVE_SERVICE:
-            // WS 断开后触发 mDNS 重查(节流/退避在 mdns_resolver 内部)
-            mdns_resolver_request();
             break;
         case APP_ACT_PLAY_TONE:
             // S3:START 改异步播放,开流由 sound_worker 播完后的 TONE_DONE 事件驱动

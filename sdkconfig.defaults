@@ -32,21 +32,6 @@ CONFIG_FREERTOS_HZ=1000
 # st 控制台命令的全任务栈高水位枚举需要(F3 内存观测)。
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 
-# --- WiFi/WS 通道(Windows 移植:无蓝牙 PC 走 WiFi;双栈共存单射频活)---
-# 软件共存:BLE 与 WiFi 控制器分时(单射频芯片必需)。
-CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
-# 动态缓冲:发送按需分配整帧缓冲(3200B 音频帧一次发出,不被固定缓冲拆片)。
-# 注:IDF 5.5 registry 版无 CONFIG_ESP_WEBSOCKET_CLIENT_BUFFER_SIZE_TX/RX
-# (旧符号静默失效,实际固定缓冲仅 1024B → 帧被拆 4 条消息,审查 P1)。
-# 下行(RX)保持默认 1024B:JSON 控制行 <1KB,现状可用。
-CONFIG_ESP_WS_CLIENT_ENABLE_DYNAMIC_BUFFER=y
-# lwIP 套接字上限:WiFi 栈 + WS + mDNS + SNTP 预留。
-CONFIG_LWIP_MAX_SOCKETS=6
-# WPA3 关闭:兼容旧路由器,减少 RAM 占用。
-CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=n
-# AMPDU TX 关闭:C3 仅需小吞吐音频,省 RAM 与功耗。
-CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=n
-
 # --- Bluetooth LE / NimBLE(BLE 直连音频外设)---
 # 参考 origin/demo/claude-buddy-port 已验证的 NimBLE 配置。
 CONFIG_BT_ENABLED=y
@@ -74,3 +59,11 @@ CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=517
 # 静默失效,审查 P1);实际池行为真机验证(NOT RUN)。
 CONFIG_BT_NIMBLE_MSYS_2_BLOCK_SIZE=640
 CONFIG_BT_NIMBLE_MSYS_2_BLOCK_COUNT=4
+# 日志级别锁在生产值 INFO。NimBLE DEBUG 会把每个 HCI 字节打成一行,
+# 音频流期间压吞吐并抬 CPU(2026-08-27 串口实抓)。抓包时临时改,别提交。
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_BT_NIMBLE_LOG_LEVEL_INFO=y
+# MSYS_1(256B 块)是音频分片的在途上限:一片 ≤253B 占一块。默认 4 块 → 一帧
+# 804B(5 片)第 5 片就分配不到 mbuf,配合旧代码"首片失败即整帧作废",实测
+# 40 帧只到 3 帧(design.md §3)。24 块 = 6KB 静态 RAM,换来 24 片在途余量。
+CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=24

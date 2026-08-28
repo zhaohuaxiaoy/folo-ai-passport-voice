@@ -1,5 +1,5 @@
 // main/app_events.h —— 全局应用事件队列(唯一事件通道)。
-// 按键回调/WS 回调/音频 worker 都只往这里投递,app_task 唯一消费。
+// 按键回调/链路回调/音频 worker 都只往这里投递,app_task 唯一消费。
 #pragma once
 
 #include "app_types.h"

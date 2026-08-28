@@ -1,5 +1,5 @@
 // main/console_cmds.c —— esp_console 命令实现。
-// USB-Serial-JTAG 控制台:配置模式/Wi-Fi/WS 目标、查看系统状态、重启与出厂复位。
+// USB-Serial-JTAG 控制台:配置模式、查看系统状态、重启与出厂复位。
 // 输出统一走 out()(emit hook,缺省 stdout):REPL 路径行为不变;SYS 命令面
 // (USB 模式)经 console_cmds_set_emit 切换为捕获缓冲,输出进 SYS_RESP 帧。
 // console_cmds.c 是 main/ 下唯一用 printf 的文件 —— 重构面即全部命令函数。
@@ -10,12 +10,11 @@
 #include "time_sync.h"
 #include "ble_audio.h"
 #include "audio_streamer.h"
-#include "mdns_resolver.h"
 #include "usb_link.h"
-#include "wifi_app.h"
-#include "ws_client.h"
 #include "bsp_battery.h"
 #include "esp_console.h"
+#include "host/ble_gap.h"   // bt scan 诊断:ble_gap_disc 主动扫描
+#include "host/ble_dtm.h"   // bt dtx 诊断:controller 直接测试模式
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"  // IDF >= 5.5: esp_restart 声明移入 esp_system.h
@@ -65,13 +64,6 @@ static int cmd_mode(int argc, char **argv)
         out("switching to BLE...\n");
         return 0;
     }
-    if (argc == 2 && strcmp(argv[1], "wifi") == 0) {
-        if (mode_get() == APP_MODE_WIFI) { out("already WiFi\n"); return 0; }
-        app_event_t e = { .type = APP_EV_MODE_SWITCH, .u.mode_switch = { .target = APP_MODE_WIFI } };
-        app_event_post(&e);
-        out("switching to WiFi...\n");
-        return 0;
-    }
     if (argc == 2 && strcmp(argv[1], "usb") == 0) {
         if (mode_get() == APP_MODE_USB) { out("already USB\n"); return 0; }
         app_event_t e = { .type = APP_EV_MODE_SWITCH, .u.mode_switch = { .target = APP_MODE_USB } };
@@ -79,42 +71,117 @@ static int cmd_mode(int argc, char **argv)
         out("switching to USB (reboot)...\n");
         return 0;
     }
-    out("usage: mode | mode ble | mode wifi | mode usb\n");
+    out("usage: mode | mode ble | mode usb\n");
     return 1;
 }
 
-// ---- wifi ----
-static int cmd_wifi(int argc, char **argv)
+// ---- bt scan:射频诊断(BLE RX 前端验证)----
+// BLE 广播不可见时区分"RX 坏"与"TX 坏":主动扫描周边广播——
+// 扫到设备(Mac/手机/耳机)则天线+晶振+射频 RX 全好,问题锁 TX/adv;
+// 扫不到则射频前端/天线/晶振硬件实锤。扫描期间设备自身广播暂停。
+#define BT_SCAN_DURATION_MS 8000
+#define BT_SCAN_MAX_NAME 24
+
+static volatile int s_bt_seen;      // host task 回调写,命令线程读(单核,无锁)
+static volatile bool s_bt_done;
+static char s_bt_names[3][BT_SCAN_MAX_NAME + 1];
+static int8_t s_bt_rssi[3];
+
+static int bt_scan_listener(struct ble_gap_event *event, void *arg)
 {
-    if (argc == 1) {
-        char ssid[64] = "", pass[64] = "";
-        if (nvs_settings_get_wifi(ssid, sizeof(ssid), pass, sizeof(pass)) != ESP_OK) {
-            out("stored ssid: (unreadable)\n");
-        } else {
-            out("stored ssid: %s\n", ssid[0] ? ssid : "(none)");
+    if (event->type == BLE_GAP_EVENT_DISC) {
+        if (s_bt_seen < 3) {
+            struct ble_hs_adv_fields f;
+            int i = s_bt_seen;
+            s_bt_names[i][0] = '\0';
+            if (ble_hs_adv_parse_fields(&f, event->disc.data,
+                                        event->disc.length_data) == 0 &&
+                f.name != NULL) {
+                int n = f.name_len < BT_SCAN_MAX_NAME ? f.name_len : BT_SCAN_MAX_NAME;
+                memcpy(s_bt_names[i], f.name, n);
+                s_bt_names[i][n] = '\0';
+            }
+            s_bt_rssi[i] = event->disc.rssi;
         }
-        out("connected: %s\n", wifi_app_connected() ? "yes" : "no");
-        out("ip: %s\n", wifi_app_ip());
-        return 0;
+        s_bt_seen++;
+    } else if (event->type == BLE_GAP_EVENT_DISC_COMPLETE) {
+        s_bt_done = true;
     }
-    if (strcmp(argv[1], "set") == 0 && argc == 4) {
-        // 密码只写 NVS,绝不回显到控制台(SYS_RESP 同样不回显)
-        esp_err_t e = wifi_app_set_credentials(argv[2], argv[3]);
-        out("wifi set: %s\n", e == ESP_OK ? "ok" : esp_err_to_name(e));
-        return 0;
+    return 0;
+}
+
+static int cmd_bt_dtx(int argc, char **argv);   // 定义在下方(bt scan 之后)
+
+static int cmd_bt(int argc, char **argv)
+{
+    if (argc >= 2 && strcmp(argv[1], "dtx") == 0) {
+        return cmd_bt_dtx(argc, argv);
     }
-    if (strcmp(argv[1], "get") == 0) {
-        char ssid[64] = "", pass[64] = "";
-        if (nvs_settings_get_wifi(ssid, sizeof(ssid), pass, sizeof(pass)) != ESP_OK) {
-            out("ssid: (unreadable)\n");
-            return 0;
-        }
-        out("ssid: %s pass: %s\n", ssid[0] ? ssid : "(none)",
-            pass[0] ? "***" : "(none)");
-        return 0;
+    if (argc >= 2 && strcmp(argv[1], "scan") != 0) {
+        out("usage: bt scan | bt dtx [ch]\n");
+        return 1;
     }
-    out("usage: wifi set <ssid> <pass> | wifi get | wifi status\n");
-    return 1;
+    uint8_t own;
+    int rc = ble_hs_id_infer_auto(0, &own);
+    if (rc != 0) { out("bt: infer addr fail %d\n", rc); return 1; }
+    s_bt_seen = 0;
+    s_bt_done = false;
+    struct ble_gap_disc_params p = {
+        .filter_duplicates = 1,   // 每设备一次 DISC 事件
+        .passive = 0,             // 主动扫描:收 scan response,名字更全
+        .itvl = 0, .window = 0,   // 0 = NimBLE 默认扫描间隔
+        .filter_policy = 0, .limited = 0,
+    };
+    rc = ble_gap_disc(own, BT_SCAN_DURATION_MS, &p, bt_scan_listener, NULL);
+    if (rc != 0) {
+        out("bt: disc start fail %d\n", rc);
+        return 1;
+    }
+    out("bt scanning %ds...\n", BT_SCAN_DURATION_MS / 1000);
+    int waited = 0;
+    while (!s_bt_done && waited < BT_SCAN_DURATION_MS + 3000) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        waited += 100;
+    }
+    ble_gap_disc_cancel();
+    out("bt seen: %d\n", s_bt_seen);
+    for (int i = 0; i < 3 && i < s_bt_seen; i++) {
+        out("  %s rssi %d\n", s_bt_names[i][0] ? s_bt_names[i] : "(unnamed)",
+            s_bt_rssi[i]);
+    }
+    return 0;
+}
+
+// ---- bt dtx:射频诊断(controller 直接测试模式,绕过 host 层强制发射)----
+// ble_gap_adv_start rc=0 但空中无广播时,用 LE Transmitter Test 裁决:
+// controller 在固定信道持续发射测试包(非 adv,普通扫描器不显示),
+// 成功且 stop 报大量包 → controller 发射路径正常,问题在 host adv 层;
+// start/stop 失败 → controller 层 TX 路径异常。
+#define BT_DTM_DURATION_MS 10000
+
+static int cmd_bt_dtx(int argc, char **argv)
+{
+    int channel = 37;   // 默认 2402MHz(adv 三信道之一,扫频仪/另一板收包用)
+    if (argc >= 2) channel = atoi(argv[1]);
+    if (channel < 0 || channel > 39) {
+        out("bt dtx: channel 0-39\n");
+        return 1;
+    }
+    struct ble_dtm_tx_params tx = {
+        .channel = (uint8_t)channel,
+        .test_data_len = 37,   // 标准 DTM 长度
+        .payload = 0x00,       // PRBS9
+        .phy = 1,              // LE 1M
+    };
+    int rc = ble_dtm_tx_start(&tx);
+    if (rc != 0) { out("bt dtx: start fail %d\n", rc); return 1; }
+    out("bt dtx: 信道 %d 发射 %ds,旁边设备收包中...\n", channel,
+        BT_DTM_DURATION_MS / 1000);
+    vTaskDelay(pdMS_TO_TICKS(BT_DTM_DURATION_MS));
+    uint16_t packets = 0;
+    rc = ble_dtm_stop(&packets);
+    out("bt dtx: stop rc=%d 发射包数=%u\n", rc, packets);
+    return 0;
 }
 
 // ---- time:wall-clock 校时(校时源仅电脑客户端;SYS `time set` 供 USB 模式)----
@@ -148,44 +215,6 @@ static int cmd_time(int argc, char **argv)
     }
     out("usage: time | time set <epoch> | time tz <±hh>\n");
     return 1;
-}
-
-// ---- ws ----
-static int cmd_ws(int argc, char **argv)
-{
-    if (argc == 1 || strcmp(argv[1], "status") == 0) {
-        char url[128] = "";
-        bool auto_mode;
-        nvs_settings_get_ws_url(url, sizeof(url));
-        nvs_settings_get_ws_mode(&auto_mode);
-        out("url: %s\n", url);
-        out("mode: %s\n", auto_mode ? "auto (mDNS)" : "static");
-        out("connected: %s\n", ws_client_connected() ? "yes" : "no");
-        return 0;
-    }
-    if (strcmp(argv[1], "set") == 0 && argc == 3) {
-        if (strcmp(argv[2], "auto") == 0) {
-            // 切回自动发现:mDNS 可覆盖运行时 URL(不写回 NVS URL)
-            esp_err_t e = nvs_settings_set_ws_mode(true);
-            out("ws mode: %s\n", e == ESP_OK ? "auto (mDNS)" : esp_err_to_name(e));
-            return 0;
-        }
-        nvs_settings_set_ws_mode(false);   // 显式 URL → static(用户显式优先)
-        esp_err_t e = ws_client_reinit(argv[2]);
-        out("ws set: %s\n", e == ESP_OK ? "ok" : esp_err_to_name(e));
-        return 0;
-    }
-    out("usage: ws set <url> | ws set auto | ws status\n");
-    return 1;
-}
-
-// ---- mdns:手动触发解析 ----
-static int cmd_mdns(int argc, char **argv)
-{
-    (void)argc; (void)argv;
-    mdns_resolver_request();
-    out("mDNS 解析已触发(auto 模式);目标变化时自动重连 WS\n");
-    return 0;
 }
 
 // ---- log:导出 USB 模式日志环(REPL 模式下日志直接上屏,环为空) ----
@@ -239,9 +268,6 @@ static int cmd_st(int argc, char **argv)
     }
     out("--- link ---\n");
     out("mode: %s link: %s\n", mode_name(mode_get()), mode_link_up() ? "up" : "down");
-    out("wifi: %s ip: %s\n", wifi_app_connected() ? "connected" : "disconnected",
-        wifi_app_ip()[0] ? wifi_app_ip() : "(none)");
-    out("ws: %s\n", ws_client_connected() ? "connected" : "disconnected");
     out("usb: session %s\n", usb_link_session_active() ? "up" : "down");
     out("--- ble ---\n");
     out("connected: %s event_subscribed: %s mtu: %u\n",
@@ -257,6 +283,16 @@ static int cmd_st(int argc, char **argv)
     int soc = bsp_battery_soc();
     int mv = bsp_battery_mv();
     out("soc: %d%% mv: %d\n", soc < 0 ? -1 : soc, mv < 0 ? -1 : mv);
+    return 0;
+}
+
+// ---- rst:复位原因(无线自动重启诊断用) ----
+static int cmd_rst(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    // 枚举:1未知 2上电 3外部 4软件 5panic 6中断WDT 7任务WDT
+    // 8WDT 9深度睡眠 10brownout(掉电) 11SDIO。
+    out("复位原因: %d\n", (int)esp_reset_reason());
     return 0;
 }
 
@@ -281,12 +317,10 @@ static int cmd_factory(int argc, char **argv)
 // ---- 命令表(REPL 注册与 SYS 执行共用)----
 static const struct { const char *name; esp_console_cmd_func_t fn; } s_cmds[] = {
     { "mode",    cmd_mode },
-    { "wifi",    cmd_wifi },
-    { "ws",      cmd_ws },
-    { "mdns",    cmd_mdns },
     { "log",     cmd_log },
     { "time",    cmd_time },
     { "st",      cmd_st },
+    { "rst",     cmd_rst },
     { "reboot",  cmd_reboot },
     { "factory", cmd_factory },
 };
@@ -365,12 +399,11 @@ static void reg(const char *name, const char *help, const char *hint,
 
 esp_err_t console_cmds_register(void)
 {
-    reg("mode", "射频模式:mode | mode ble | mode wifi | mode usb(切换需几秒,期间链路中断)", NULL, cmd_mode);
-    reg("wifi", "Wi-Fi 配置:wifi status | wifi get | wifi set <ssid> <pass>", NULL, cmd_wifi);
-    reg("ws", "WS 目标:ws status | ws set <url> | ws set auto", NULL, cmd_ws);
-    reg("mdns", "手动触发 mDNS 解析", NULL, cmd_mdns);
+    reg("mode", "射频模式:mode | mode ble | mode usb(切换需几秒,期间链路中断)", NULL, cmd_mode);
+    reg("bt", "BT 射频诊断:bt scan | bt dtx [ch](直接测试模式强制发射)", NULL, cmd_bt);
     reg("log", "导出 USB 模式日志环(REPL 模式下为空)", NULL, cmd_log);
     reg("st", "系统状态一览(模式/双链路/MTU/掉帧/堆)", NULL, cmd_st);
+    reg("rst", "复位原因(无线自动重启诊断)", NULL, cmd_rst);
     reg("time", "校时:time | time set <epoch> | time tz <±hh>", NULL, cmd_time);
     reg("reboot", "重启设备", NULL, cmd_reboot);
     reg("factory", "清空 NVS 并重启", NULL, cmd_factory);

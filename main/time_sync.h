@@ -1,4 +1,4 @@
-// main/time_sync.h —— wall-clock 校时(校时源仅电脑客户端,三通道 BLE/WiFi/USB)。
+// main/time_sync.h —— wall-clock 校时(校时源仅电脑客户端,双通道 BLE/USB)。
 // 设计要点(见 design.md):
 //   - s_epoch(单调缓存)为唯一真源:settimeofday 顺带同步系统时间(供未来日志
 //     时间戳选项),UI/格式化一律读缓存 —— 宿主测试零系统时间副作用;

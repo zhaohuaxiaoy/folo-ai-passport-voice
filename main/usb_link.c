@@ -40,7 +40,7 @@ static const char *TAG = "usb_link";
 #define USB_RESP_MAX          2048    /* SYS_RESP 载荷上限 */
 
 /* USB 驱动保持安装(卸载 = 可能阻断读任务并造成悬空 UB),但协议工作缓冲只在
- * USB 模式生命周期内存在。BLE/WiFi 模式不再永久占用这块约 11.5KB 的 RAM。 */
+ * USB 模式生命周期内存在。BLE 模式不再永久占用这块约 11.5KB 的 RAM。 */
 static volatile bool s_running;            /* 离开 USB 模式置 false,读任务 ≤500ms 内自删 */
 static volatile bool s_session_up;         /* 收到 ping → true;跨任务读写,单核无撕裂,volatile 显式化 */
 static bool s_connected;                   /* is_connected 上次采样 */
@@ -232,7 +232,7 @@ static void handle_sys(const char *line, size_t len)
     s_sys_cmd[len] = '\0';
 
     if (strcmp(s_sys_cmd, "ping") == 0) {
-        // 握手:会话 up + 断连恢复事件 + pong + hello(对齐 ws_client 的 hello 时序)
+        // 握手:会话 up + 断连恢复事件 + pong + hello
         if (!s_session_up) {
             s_session_up = true;
             app_event_t c = { .type = APP_EV_USB_CONNECTED };

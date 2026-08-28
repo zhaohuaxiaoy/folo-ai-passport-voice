@@ -368,7 +368,7 @@ void app_ui_render(const app_ui_snapshot_t *snap)
     }
 
     // 横幅互斥:OFFLINE(通道断线)> BUSY(同位置 BANNER_Y)
-    // 文案按当前链路通道渲染(BLE/WiFi;Windows 移植:WiFi 通道断线显示 WiFi 字样)
+    // 文案按当前链路通道渲染(BLE/USB;断线横幅显示 link_name 字样)
     label_set_fmt_if_changed(s_offline_text, "%s DISCONNECTED - reconnecting...",
                              snap->link_name);
     label_set_fmt_if_changed(s_netbusy_text, "%s BUSY - dropping frames",

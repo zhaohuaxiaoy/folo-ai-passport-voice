@@ -10,16 +10,16 @@ extern "C" {
 
 typedef struct {
     app_stage_t    state;
-    bool           link_up;       // 当前通道已通(BLE:EVENT 已订阅 / WiFi:WS 已连);false → 禁 PTT + OFFLINE
+    bool           link_up;       // 当前通道已通(BLE:EVENT 已订阅 / USB:会话已 up);false → 禁 PTT + OFFLINE
     bool           net_busy;
     bool           screen_on;
     bool           panel_on;      // 面板供电(20s 背光灭后 60s 级 SLPIN 断电)
     bool           ble_connected; // BLE 连接已建立(与 link_up 区别:连接但未订阅)
-    uint8_t        link_channel;  // 0=BLE / 1=WiFi(link_up 时是当前通道;断后保留供横幅显示)
-    uint16_t       wifi_fail_reason; // 已 toast 的 WiFi 失败 reason(0=无;同因去重)
+    uint8_t        link_channel;  // 0=BLE / 2=USB(link_up 时是当前通道;断后保留供横幅显示)
     uint64_t       last_key_ms;     // 最近按键时刻(息屏计时)
     uint64_t       state_since_ms;  // 进入当前状态的时刻(超时计时)
     uint64_t       ptt_end_ms;      // PTT 松开时刻(过滤松开回弹误判的双击)
+    uint64_t       ble_connect_ms;  // BLE 连接时刻(连接握手期密集射频 → 假长按,抑制 PTT)
     uint64_t       toast_until_ms;
     bool           stream_started;  // 本会话采集是否已开(START 音播完后 TONE_DONE 驱动)
     char           toast[APP_TOAST_MAX];

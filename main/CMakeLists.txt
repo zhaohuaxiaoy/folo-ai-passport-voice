@@ -8,12 +8,11 @@ idf_component_register(
          "app_sound.c"
          "app_ui.c"
          "nvs_settings.c"
+         "adpcm.c"
          "audio_streamer.c"
          "ble_audio.c"
+         "ble_dtm.c"      # 自 ESP-IDF 5.5.3 拷入:host 层 DTM API 未编入 libbt.a
          "console_cmds.c"
-         "wifi_app.c"
-         "ws_client.c"
-         "mdns_resolver.c"
          "time_sync.c"
          "mode.c"
          "usb_link.c"
@@ -24,10 +23,5 @@ idf_component_register(
              nvs_flash
              console  # IDF >= 5.5: esp_console 组件已重命名为 console
              bt
-             esp_wifi
-             esp_netif
-             esp_event
-             mdns
-             esp_websocket_client
              esp_driver_usb_serial_jtag
 )

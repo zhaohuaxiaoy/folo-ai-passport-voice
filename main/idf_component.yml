@@ -1,5 +1,3 @@
-# IDF >= 5.5: mdns / esp_websocket_client 已移入 Component Manager 注册表,
-# 需在此声明, 由 idf.py 自动下载到 managed_components/。
-dependencies:
-  espressif/mdns: "*"
-  espressif/esp_websocket_client: "*"
+# 组件依赖(Component Manager 注册表,由 idf.py 自动解析)。
+# 旧通道栈组件已随通道删除,不再需要注册表依赖;bsp 是项目本地组件
+# (components/bsp),由构建系统自动发现。

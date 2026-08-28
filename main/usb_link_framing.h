@@ -1,6 +1,6 @@
 // main/usb_link_framing.h —— USB 有线通道字节流分帧协议(纯 C,零 IDF 依赖)。
 // 设计要点:
-//   - USB 是字节流(无 WS 的帧类型、无 BLE 的 GATT 特征天然分帧),统一二进制帧:
+//   - USB 是字节流(无帧类型、无 BLE 的 GATT 特征天然分帧),统一二进制帧:
 //       [magic 2B: 0xA5 0x5A][type 1B][payload_len 2B LE][payload][checksum 1B]
 //     总帧长 = 6 + len;checksum = 帧头+payload 全部字节和 mod 256(与硬件 CRC 互补)。
 //   - 失同步恢复:两端同构滑动重扫状态机,任何一步非法立即重扫且当前字节重新
