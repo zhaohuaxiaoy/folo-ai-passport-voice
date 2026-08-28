@@ -10,6 +10,11 @@ on:
     tags:
       - "v*"
 
+# softprops/action-gh-release 需要创建/更新 Release 的权限
+# (默认 GITHUB_TOKEN 无 release 写权限,报 Resource not accessible)
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
