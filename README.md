@@ -92,6 +92,17 @@ Release 由 GitHub Actions 双平台自动构建（`v*` tag 触发，见 `.githu
 
 首次启动进入 5 步向导：欢迎 → 自动发现设备（BLE → USB）→ 火山 ASR Key 配置 → 系统授权引导（macOS）→ 状态页；连接后驻留系统托盘。首次运行自动生成 `companion/config.local.json`（火山 API Key，**不入 git**）。
 
+### 获取火山 API Key
+
+语音识别依赖火山引擎流式 ASR，需在 [火山引擎控制台](https://console.volcengine.com/speech/new/setting/apikeys) 申请 API Key：
+
+1. 注册/登录[火山引擎](https://console.volcengine.com)并完成实名认证
+2. 打开 [API Key 管理页](https://console.volcengine.com/speech/new/setting/apikeys)（语音技术 → 概览 → API Key 管理）
+3. 点击"新建 API Key"，选择 `大模型语音识别` 业务，复制生成的 Key（UUID 格式）
+4. 在桌面端 5 步向导的"火山 ASR Key"页粘贴（零音频握手测试，不会回显密钥），或写入 `companion/config.local.json` 的 `volcano_api_key` 字段；也可用环境变量 `VOLCANO_API_KEY` 覆盖
+
+> **安全**：API Key 只存于 `companion/config.local.json`（已被 .gitignore 忽略）或向导本地配置，**严禁提交进 git**。Key 泄露可在控制台随时吊销重建。
+
 > **自构建**：Mac 上 `companion/.venv/bin/python companion/build/pack.py --dmg`；Windows 需在 Windows 构建机运行 `python build/pack.py`（产物 `dist/AI Passport.exe`）。
 
 **从源码运行（开发）**：

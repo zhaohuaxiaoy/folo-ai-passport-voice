@@ -92,6 +92,17 @@ Releases are built automatically for both platforms by GitHub Actions (`v*` tag 
 
 On first launch the 5-step wizard opens: welcome → auto-discover the device (BLE → USB) → Volcano ASR key config → system permission guide (macOS) → status page; the app then stays in the system tray. First run writes `companion/config.local.json` (Volcano API key, **never committed**).
 
+### Getting the Volcano API key
+
+Speech recognition uses the Volcano Engine streaming ASR. Get an API key from the [API key management page](https://console.volcengine.com/speech/new/setting/apikeys):
+
+1. Register/sign in to the [Volcano Engine console](https://console.volcengine.com) and complete real-name verification
+2. Open the [API key page](https://console.volcengine.com/speech/new/setting/apikeys) (Speech Technology → Overview → API Key Management)
+3. Click "Create API Key", select the `LLM Speech Recognition` business, and copy the generated key (UUID format)
+4. Paste it into the "Volcano ASR Key" step of the 5-step wizard (zero-audio handshake test, never echoes the key), or write it into `volcano_api_key` in `companion/config.local.json`; the `VOLCANO_API_KEY` environment variable also overrides it
+
+> **Security**: the key lives only in `companion/config.local.json` (gitignored) or the wizard's local config — **never commit it**. If leaked, revoke and recreate it from the console.
+
 **Run from source (development)**:
 
 ```bash
