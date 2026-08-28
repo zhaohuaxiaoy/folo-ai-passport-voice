@@ -1,13 +1,12 @@
-// main/mode.h —— 射频模式与链路抽象(按模式启停射频)。
-// 职责:
-//   1. 模式状态机:boot 按 NVS 启动对应射频;mode_switch 切换时按模式启停射频
-//      (BLE ↔ USB 双模式;USB 模式射频保持,数据走 USB 线)。
-//   2. 链路抽象:link_up / send_event_line / send_audio —— main.c 执行器、audio_streamer、
-//      UI 不再感知模式(音频帧发送经 audio_streamer_set_sender 按模式注册)。
-//   3. NimBLE host 常驻 + controller 启停:enable 后 on_sync 触发 → 广播自动恢复。
+// main/mode.h —— 链路通道抽象(双通道常开架构)。
+// 2026-08-28 架构变更:BLE 与 USB 同时常开,旧"互斥模式 + NVS 持久化 + 重启
+// 切换"整体退役。本模块只做两件事:
+//   1. 链路聚合:link_up = 任一通道通(BLE 订阅 || USB 会话);
+//   2. 按会话通道路由:事件行/音频上行、音频格式、发送器注册都跟链路通道走
+//      (通道常量见 app_types.h APP_CHAN_*,取值 0=BLE / 2=USB)。
 #pragma once
 
-#include "esp_err.h"
+#include "app_types.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -16,47 +15,33 @@
 extern "C" {
 #endif
 
-// 存储语义(BLE=0 / USB=2,与旧 NVS 值兼容):值 1 已废弃(旧通道),解析为
-// 越界 → 回退 BLE。只删中间值不重排 —— 旧 NVS 存 2(USB)的设备升级后仍为 USB。
-typedef enum {
-    APP_MODE_BLE = 0,   // 缺省:BLE 直连(macOS/Windows 蓝牙)
-    APP_MODE_USB = 2,   // USB 有线通道(USB-Serial-JTAG;射频保持,数据走 USB)
-    APP_MODE_COUNT = 3, // 保留空洞:值 1 已废弃(旧通道),不得重排枚举
-} app_mode_t;
-
-// boot 阶段调用(须在 ble_audio_init 之后):读 NVS 模式,按模式启动当前射频,
-// 并注册对应音频发送函数。射频切换会短暂阻塞(controller 启停,≤ 数百 ms)
-// —— boot 期无并发,安全。
-esp_err_t mode_init(void);
-
-app_mode_t mode_get(void);
-const char *mode_name(app_mode_t m);   // "BLE" / "USB"
-// 会话音频格式(voice.start 上报,App 据此分发解析):BLE → "ima_adpcm"
-// (每帧一个独立 IMA ADPCM block,4B 首部 + 800B 数据 = 804B);
-// USB → "pcm"(3200B PCM 块直传)。
-const char *mode_audio_format(void);
-
-// 是否处于 mode_switch 切换窗口(仅 app_task 上下文,切换期间置位)。
-// 供链路事件门禁使用:mode_switch 在切换前投递"旧通道断连事件"(app_task
-// 消费时 mode_get() 已是新模式),切换窗口内放行该事件,状态机才能收束。
-bool mode_switching(void);
-
-// 当前通道链路是否已通(BLE:EVENT 已订阅;USB:USB 会话已 up)。
+// 链路是否可用(任一通道通)。PTT 门禁用。
 bool mode_link_up(void);
 
-// 事件行上行(BLE:notify EVENT;USB:SYS/EVENT 帧)。返回 0 = 已入队/已发。
-int mode_send_event_line(const char *line, size_t len);
+// 指定通道是否已通(BLE:EVENT 特征已订阅;USB:ping 握手完成)。断链收束
+// 判断"另一通道是否还在"用。
+bool mode_channel_up(uint8_t chan);
 
-// 会话边界帧的可靠上行(voice.start/end):BLE 通道走阻塞入队(满等 ≤timeout_ms,
-// 审查 P2:边界帧丢失 → Mac 端会话状态悬挂);USB 发送本就同步阻塞,无差别。
-int mode_send_event_line_important(const char *line, size_t len, uint32_t timeout_ms);
+// 事件行上行到指定通道(序列化已完成,含 '\n')。返回 0 = 已发送。
+// chan 非法/通道未通时发送失败,与旧语义一致(调用方记日志,不重试)。
+int mode_send_event_line(uint8_t chan, const char *line, size_t len);
 
-// 切换模式(仅 app_task 上下文调用):
-//   1) 先投当前通道断连事件(状态机幂等收束:停流/回 READY/审批保持)
-//   2) NVS 写模式(失败中止并回报,射频不动)
-//   3) 射频切换:关旧射频 → 启新射频 → 注册新音频发送函数
-// 真机风险(NOT RUN):NimBLE controller 启停后 host re-sync 需真机验证。
-esp_err_t mode_switch(app_mode_t target);
+// 会话边界帧(voice.start/end):阻塞式投递,防 Mac 端会话状态悬挂
+// (BLE 走 event_worker 队列,≤timeout_ms;USB 写驱动本就阻塞,语义已"重要")。
+int mode_send_event_line_important(uint8_t chan, const char *line, size_t len,
+                                   uint32_t timeout_ms);
+
+// 会话音频格式(voice.start 上报,App 据此分发):BLE 压缩(ima_adpcm),
+// USB 带宽充裕走原始 PCM。取值必须与实际载荷一致。
+const char *mode_audio_format(uint8_t chan);
+
+// 按会话通道注册音频发送器 + 压缩开关。在每次开流(STREAM_START)前调用,
+// 由 app_task 串行执行,与 audio_worker 的 token 闸门共同保证切换安全。
+void mode_select_audio_sender(uint8_t chan);
+
+// USB 主机是否在位(SOF 检测,驱动无关的寄存器读):有线供电 = 不自动息屏
+// 的门禁;主机在场即真(含已连但未 ping 握手)。
+bool mode_wired(void);
 
 #ifdef __cplusplus
 }

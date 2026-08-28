@@ -4,12 +4,11 @@
 ● 说话 → 本程序收音频流 → 火山转写 → 设备屏幕实时预览（下行 TRANSCRIPT
 帧）→ 定稿文本注入当前聚焦输入框。
 
-双通道：
+双通道常开（2026-08-28 起设备端 BLE/USB 同时可用，不再有 mode 切换命令）：
 - `"ble"`（缺省）：BLE 直连，macOS / 有蓝牙的 Windows 通用；
-- `"usb"`：USB 有线直连（设备 `mode usb` 后经 USB 线连电脑，蓝牙保持
-  开启——USB 供电无省电需求，数据传输走 USB 线）。USB 模式无设备控制台
-  ——relay 提供 stdin 交互 `!<命令>`（`!mode usb` / `!log` / `!st` 等）经
-  SYS 命令面下行，替代控制台查状态。
+- `"usb"`：USB 有线直连（设备经 USB 线连电脑即可，蓝牙保持开启——USB
+  供电无省电需求，数据传输走 USB 线）。relay 提供 stdin 交互 `!<命令>`
+  （`!st` / `!log` / `!rst` / `!reboot` 等）经 SYS 命令面下行查状态。
 
 通道与注入参数见 `config.local.json` 的 `channel` 等字段（`usb_port`
 非空 = USB 直连端口，留空自动扫描）。**Windows 安装、防火墙、
@@ -94,7 +93,7 @@ companion/.venv/bin/python companion/tests/test_inject_win.py
 - `test_serial_transport.py`：`os.openpty` 假设备侧 —— 握手 ping/pong /
   超时 / 订阅前缓冲 / EVENT+AUDIO 分发 / CTRL 到达 / SYS 往返 / 拔线断连。
 - `test_serial_relay.py`：pty 假设备 + relay 集成全流程（hello → voice.start
-  → 音频帧 → voice.end → 注入 + 下行预览/定稿 → `!mode` syscmd 往返 → 断连收束）。
+  → 音频帧 → voice.end → 注入 + 下行预览/定稿 → `!st` syscmd 往返 → 断连收束）。
 - `test_inject_win.py`（Mac 可跑，不触碰 win32）：dry_run 跨平台 / 平台与
   pywin32 缺失指引 / 前台护栏判定。真实粘贴为 Windows 真机项（见 WINDOWS.md）。
 

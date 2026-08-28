@@ -2,7 +2,9 @@
 // 驱动部分用 #ifdef ESP_PLATFORM 包裹:帧编解码已在 usb_link_framing(纯 C)独立,
 // 宿主测试不编本文件。
 // 设计要点:
-//   - 仅 boot USB 模式初始化(REPL 门禁跳过):驱动安装与 REPL 互斥,无二次安装冲突;
+//   - 待命自动接入(双通道常开,2026-08-28):usb_wait 任务 60ms 稳定采样 +
+//     250ms 轮询 SOF,主机出现即 usb_link_init —— 无线开机零 RAM 开销,
+//     插线中途接入无需重启;驱动从此独占 USB-Serial-JTAG(REPL 已移除);
 //   - 单读任务:阻塞 read_bytes(≤500ms) → 帧状态机逐字节分发;拔线由
 //     usb_serial_jtag_is_connected()(SOF 检测)轮询,翻转 → 会话 down + 断连事件;
 //   - 会话:PC 握手 ping → up(投 USB_CONNECTED)+ pong + device.hello;
@@ -15,7 +17,6 @@
 #include "app_protocol.h"
 #include "app_types.h"
 #include "console_cmds.h"
-#include "mode.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -35,13 +36,12 @@ static const char *TAG = "usb_link";
 #define USB_POLL_INTERVAL_MS  500     /* 拔线轮询周期(read_bytes 阻塞上限) */
 #define USB_TX_TIMEOUT_EVENT  pdMS_TO_TICKS(20)
 #define USB_TX_TIMEOUT_AUDIO  pdMS_TO_TICKS(100)
-#define USB_SHUTDOWN_TIMEOUT_MS 700
 #define USB_SYS_LINE_MAX      128     /* SYS 命令文本上限(帧协议契约) */
 #define USB_RESP_MAX          2048    /* SYS_RESP 载荷上限 */
 
-/* USB 驱动保持安装(卸载 = 可能阻断读任务并造成悬空 UB),但协议工作缓冲只在
- * USB 模式生命周期内存在。BLE 模式不再永久占用这块约 11.5KB 的 RAM。 */
-static volatile bool s_running;            /* 离开 USB 模式置 false,读任务 ≤500ms 内自删 */
+/* USB 驱动接入后保持安装(卸载 = 可能阻断读任务并造成悬空 UB)。接入前的
+ * 待命期不占驱动/缓冲/读任务任何内存(仅 usb_wait 任务 2KB 栈)。 */
+static volatile bool s_running;            /* 已接入(驱动已装)置 true;幂等判定 */
 static volatile bool s_session_up;         /* 收到 ping → true;跨任务读写,单核无撕裂,volatile 显式化 */
 static bool s_connected;                   /* is_connected 上次采样 */
 static SemaphoreHandle_t s_tx_mux;         /* 发送互斥:串行化三发送方对 s_tx_buf 的组帧+写 */
@@ -64,7 +64,6 @@ static portMUX_TYPE s_log_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static void release_buffers(void)
 {
-    char *log_ring;
     heap_caps_free(s_fr_payload);
     heap_caps_free(s_tx_buf);
     heap_caps_free(s_sys_cmd);
@@ -73,17 +72,8 @@ static void release_buffers(void)
     s_tx_buf = NULL;
     s_sys_cmd = NULL;
     s_sys_resp = NULL;
-
-    /* esp_log may have an in-flight call when restore_log switches vprintf.
-     * Detach the ring under the same critical section used by ring_write so it
-     * cannot be freed while a logger still holds the old pointer. */
-    portENTER_CRITICAL(&s_log_mux);
-    log_ring = s_log_ring;
-    s_log_ring = NULL;
-    s_log_w = 0;
-    s_log_n = 0;
-    portEXIT_CRITICAL(&s_log_mux);
-    heap_caps_free(log_ring);
+    /* s_log_ring 不随本函数回收:日志环由 usb_link_log_early() 提前建,
+     * 生命周期 = 进程(拔线期记录,插线后经 SYS log 取回)。 */
 }
 
 static esp_err_t alloc_buffers(void)
@@ -93,8 +83,9 @@ static esp_err_t alloc_buffers(void)
                                 MALLOC_CAP_8BIT);
     s_sys_cmd = heap_caps_malloc(USB_SYS_LINE_MAX + 1, MALLOC_CAP_8BIT);
     s_sys_resp = heap_caps_malloc(USB_RESP_MAX, MALLOC_CAP_8BIT);
-    s_log_ring = heap_caps_malloc(USB_LOG_RING_CAP, MALLOC_CAP_8BIT);
-    if (!s_fr_payload || !s_tx_buf || !s_sys_cmd || !s_sys_resp || !s_log_ring) {
+    // s_log_ring 不在此分配:日志环由 usb_link_log_early() 提前建(拔线期
+    // 也要记录,见头文件注释),生命周期 = 进程,不随本函数回收。
+    if (!s_fr_payload || !s_tx_buf || !s_sys_cmd || !s_sys_resp) {
         release_buffers();
         return ESP_ERR_NO_MEM;
     }
@@ -124,6 +115,21 @@ static int usb_log_vprintf(const char *fmt, va_list args)
     if ((size_t)n >= sizeof(buf)) n = (int)sizeof(buf) - 1;
     ring_write(buf, (size_t)n);
     return n;
+}
+
+void usb_link_log_early(void)
+{
+    // 拔线(电池)开机也记录日志:问题发生在无线态时,事后插线即可经 SYS
+    // "log" 取回现场(2026-08-28:拔线期假按键日志全丢,无法定位)。环容量
+    // 16KB(USB_LOG_RING_CAP),生命周期 = 进程,不随 usb_link 释放。
+    if (s_log_ring) return;   // 幂等
+    s_log_ring = heap_caps_malloc(USB_LOG_RING_CAP, MALLOC_CAP_8BIT);
+    if (!s_log_ring) {
+        // 分配失败:日志照常走原 vprintf(串口),不阻塞启动。
+        ESP_LOGE(TAG, "日志环分配失败,日志不隔离");
+        return;
+    }
+    esp_log_set_vprintf(usb_log_vprintf);
 }
 
 size_t usb_link_dump_log_at(char *buf, size_t cap, size_t offset)
@@ -159,20 +165,7 @@ size_t usb_link_dump_log(char *buf, size_t cap)
 
 bool usb_link_session_active(void)
 {
-    return s_session_up && mode_get() == APP_MODE_USB;
-}
-
-// 离开 USB 模式:停读任务(≤500ms 内自删,释放 2KB 任务栈)+ 会话 down。
-// shutdown 只在读任务确认退出后才允许 restore_log 回收专用缓冲。
-void usb_link_shutdown(void)
-{
-    s_running = false;
-    s_session_up = false;
-    if (s_read_exit_sem && !s_read_exited) {
-        if (xSemaphoreTake(s_read_exit_sem, pdMS_TO_TICKS(USB_SHUTDOWN_TIMEOUT_MS)) != pdTRUE) {
-            ESP_LOGW(TAG, "USB 读任务退出超时,保留专用缓冲避免并发释放");
-        }
-    }
+    return s_session_up;
 }
 
 // ---- 发送 ----
@@ -337,6 +330,8 @@ static void usb_read_task(void *arg)
 
 esp_err_t usb_link_init(void)
 {
+    if (s_running) return ESP_OK;   // 已接入(幂等;read 任务已在跑)
+
     esp_err_t e = alloc_buffers();
     if (e != ESP_OK) {
         ESP_LOGE(TAG, "USB 专用缓冲分配失败");
@@ -361,8 +356,8 @@ esp_err_t usb_link_init(void)
     }
     s_running = true;
     s_read_exited = false;
-    s_log_w = 0;
-    s_log_n = 0;
+    // s_log_w/s_log_n 不清零:日志环由 usb_link_log_early() 提前建(拔线期
+    // 记录),插线接入后继续写入,历史现场保留可导。
     usb_serial_jtag_driver_config_t cfg = {
         .tx_buffer_size = 4096,   // 一次 write_bytes 容整 3200B 音频帧
         .rx_buffer_size = 4096,
@@ -383,8 +378,8 @@ esp_err_t usb_link_init(void)
     s_session_up = false;
     s_connected = usb_serial_jtag_is_connected();
 
-    // 日志隔离:esp_log → RAM 环(数据帧独占物理口;经 console `log` 取回)
-    esp_log_set_vprintf(usb_log_vprintf);
+    // 日志隔离已由 usb_link_log_early() 提前安装(esp_log → RAM 环),此处
+    // 无需重复;数据帧独占物理口的行为自早期起一致。
 
     // 栈 4096(对齐 ESP_CONSOLE_REPL_CONFIG_DEFAULT):SYS 命令面在
     // usb_read_task 里执行 console_cmds_run_line(sprintf 格式化/校时路径),
@@ -404,18 +399,29 @@ esp_err_t usb_link_init(void)
     return ESP_OK;
 }
 
-void usb_link_restore_log(void)
+// ---- 待命自动接入 ----
+
+static void usb_wait_task(void *arg)
 {
-    esp_log_set_vprintf(vprintf);
-    if (!s_read_exited) return;
-    release_buffers();
-    if (s_read_exit_sem) {
-        vSemaphoreDelete(s_read_exit_sem);
-        s_read_exit_sem = NULL;
+    (void)arg;
+    // SOF 判定初始为"假设连接",需 3 个无 SOF tick 才判离线 —— boot 早期立即
+    // 读恒为 true。先等 60ms 稳定再采样:有线 = 恒 true → 立即接入;无线/充电
+    // 头(无 SOF)= 3ms 内 false → 进入轮询等待。
+    vTaskDelay(pdMS_TO_TICKS(60));
+    while (!usb_serial_jtag_is_connected()) {
+        vTaskDelay(pdMS_TO_TICKS(250));   // 低耗轮询:空闲任务照常运行
     }
-    if (s_tx_mux) {
-        vSemaphoreDelete(s_tx_mux);
-        s_tx_mux = NULL;
+    ESP_LOGI(TAG, "检测到 USB 主机:接入有线通道");
+    if (usb_link_init() != ESP_OK) {
+        ESP_LOGE(TAG, "USB 通道接入失败(本次开机不再重试,重启恢复)");
+    }
+    vTaskDelete(NULL);
+}
+
+void usb_link_auto_start(void)
+{
+    if (xTaskCreate(usb_wait_task, "usb_wait", 2048, NULL, 3, NULL) != pdPASS) {
+        ESP_LOGW(TAG, "USB 待命任务创建失败(有线通道不可用)");
     }
 }
 

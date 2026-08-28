@@ -18,15 +18,11 @@ static const char *TAG = "bsp_batt";
 static i2c_master_dev_handle_t s_dev;
 
 static int cw_read(uint8_t reg, uint8_t *buf, size_t n) {
-    // 诊断(2026-08-28):RTC 取证标记 —— I2C 读位置。
-    { volatile uint32_t *dbg = (volatile uint32_t *)0x50001E00; dbg[2] = 'I'; }
     if (!s_dev) return -1;
     return i2c_master_transmit_receive(s_dev, &reg, 1, buf, n, 100) == ESP_OK ? 0 : -1;
 }
 
 static int cw_write(uint8_t reg, uint8_t val) {
-    // 诊断(2026-08-28):RTC 取证标记 —— I2C 写位置。
-    { volatile uint32_t *dbg = (volatile uint32_t *)0x50001E00; dbg[2] = 'W'; }
     if (!s_dev) return -1;
     uint8_t b[2] = { reg, val };
     return i2c_master_transmit(s_dev, b, 2, 100) == ESP_OK ? 0 : -1;

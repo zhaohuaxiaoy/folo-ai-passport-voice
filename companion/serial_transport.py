@@ -109,7 +109,7 @@ class SerialTransport:
         cands = self._candidates()
         if not cands:
             print("[usb] 未找到 AI Passport 设备(VID 0x303A PID 0x1001);"
-                  "请确认:设备已 mode usb 且 USB 线已连接", file=sys.stderr)
+                  "请确认:设备 USB 线已连接(双通道常开,插线即用)", file=sys.stderr)
             return None
         if len(cands) > 1:
             print(f"[usb] 发现 {len(cands)} 个候选端口:", file=sys.stderr)

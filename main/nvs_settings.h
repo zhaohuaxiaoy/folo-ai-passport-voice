@@ -10,10 +10,8 @@ extern "C" {
 
 esp_err_t nvs_settings_init(void);
 
-// 射频模式存储语义:0=BLE(缺省)/ 2=USB(值 1 已废弃,不重排;越界值按 BLE
-// 兜底)。NVS 中既存的旧通道键不清理(新固件不再读取)。factory reset 回 BLE。
-esp_err_t nvs_settings_get_mode(uint8_t *mode);
-esp_err_t nvs_settings_set_mode(uint8_t mode);
+// 注:rf_mode 键已随双通道常开架构退役(2026-08-28,不再有互斥模式),
+// get/set_mode 已删除;旧键残留 NVS 无读取方,无害。
 
 // 时区偏移小时(int8,±12;缺省 8)
 esp_err_t nvs_settings_get_tz_hour(int8_t *hour);

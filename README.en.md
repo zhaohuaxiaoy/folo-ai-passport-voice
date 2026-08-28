@@ -7,7 +7,7 @@
 In one sentence: it moves AI from the browser to your desktop input box, and puts the AI's **ears** (voice input), **eyes** (state visualization) and **handbrake** (physical approval) into a device you hold.
 
 ```text
-Hold OK to talk ──► device records ──► desktop relay ──► Volcano streaming ASR
+Hold VOL+ to talk ──► device records ──► desktop relay ──► Volcano streaming ASR
                         │  over BLE / USB
                         ▼  live partials
             Floating window shows candidates
@@ -41,11 +41,12 @@ Data flow: the device captures 16 kHz audio → streams 100 ms frames up over **
 
 ### Device firmware
 
-- **Push-to-talk**: hold OK in READY state to record (start beep), release to send — no cancel window, no timeout residue
+- **Push-to-talk**: hold **VOL+** in READY state to record (start beep), release to send — no cancel window, no timeout residue
+- **Exit transcribing**: click VOL+ in TRANSCRIBING to exit back to READY immediately; late recognition results are not shown
 - **LISTENING page**: microphone icon + elapsed timer while recording (replaces the classic REC dot / level bar)
 - **Agent workflow visualization**: THINKING / RUNNING / DONE states, task echo, offline banner — see what the AI is doing
 - **Physical approval**: agent approval requests show on-device — OK approve / UP reject / DOWN view diff (disabled in the GUI by default)
-- **Three-button interaction**: OK hold-to-talk, DOWN = Enter, OK double-click clears the input box (global)
+- **Three-button interaction**: VOL+ hold-to-talk, VOL+ click exits transcribing, DOWN = Enter, OK double-click clears the input box (global)
 - **Full state machine**: HOME → READY → LISTENING → TRANSCRIBING → AGENT_RUNNING → APPROVAL → DONE
 - **Tones**: start / send / approval / success / reject / error
 - **Dual-channel transport**: BLE / USB-Serial-JTAG (full console command surface)
@@ -67,13 +68,16 @@ Data flow: the device captures 16 kHz audio → streams 100 ms frames up over **
 
 | Button | Context | Action |
 | --- | --- | --- |
-| OK **hold** | READY | Start recording (PTT), release to send |
+| **VOL+ hold** | READY | Start recording (PTT, start beep), release to send |
+| **VOL+ click** | TRANSCRIBING | Exit the transcribing scene, back to READY (late results dropped) |
 | OK **double-click** | anywhere | Clear all text in the input box |
 | DOWN click | HOME / READY | Press Enter in the input box (submit) |
 | OK click | HOME | Enter READY (workflow ready) |
 | OK click | APPROVAL | Approve the agent request |
 | UP click | APPROVAL | Reject the agent request |
 | DOWN click | APPROVAL | View diff details |
+
+> Long-press thresholds: VOL+ 300 ms starts recording; OK 500 ms locks/unlocks the screen (locked = power-saving off-screen; keys still execute but do not wake the display).
 
 ## Quick start
 
@@ -124,7 +128,7 @@ partitions.csv           Custom partition table (factory 4 MB)
 
 ## How it works
 
-1. Hold OK in READY → start beep → `voice.start` → 3200-byte/100 ms audio frames stream up over BLE (GATT NOTIFY) / WS / USB
+1. Hold VOL+ in READY → start beep → `voice.start` → 3200-byte/100 ms audio frames stream up over BLE (GATT NOTIFY) / WS / USB
 2. The desktop relay streams frames into the Volcano Engine ASR (`bigmodel_async`; every result packet carries the **full accumulated text**)
 3. Partial results → the floating window updates live (120 ms frame merging; with the GUI attached, the device no longer previews candidates)
 4. Release OK → `voice.end` → final result → **injected into the focused input box once** (clipboard + Cmd+V) → window closes

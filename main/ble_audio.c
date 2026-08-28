@@ -440,8 +440,6 @@ static void start_advertising(void) {
     adv.name = (uint8_t *)DEVICE_NAME;
     adv.name_len = strlen(DEVICE_NAME);
     adv.name_is_complete = 1;
-    ESP_LOGI(TAG, "adv 诊断: name_len=%d(期望11) name=%.*s", (int)adv.name_len,
-             (int)adv.name_len, adv.name);
     int rc = ble_gap_adv_set_fields(&adv);
     if (rc != 0) { ESP_LOGE(TAG, "adv set_fields 失败 %d", rc); return; }
 
@@ -499,19 +497,11 @@ static void nimble_host_task(void *param) {
 // ==================== 对外接口 ====================
 
 int ble_audio_init(void) {
-    // 内存侦查(临时):编码器 38.5KB 提前拿走 + controller 内存池后,剩余 heap
-    // 是否够 event_worker/host 任务栈分配。真机复现 host 静默消失后定位用。
-    ESP_LOGI(TAG, "heap 侦查: init前 free=%d largest=%d",
-             (int)esp_get_free_heap_size(),
-             (int)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     esp_err_t err = nimble_port_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "nimble_port_init 失败: %s", esp_err_to_name(err));
         return -1;
     }
-    ESP_LOGI(TAG, "heap 侦查: nimble_port_init后 free=%d largest=%d",
-             (int)esp_get_free_heap_size(),
-             (int)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 
     s_tx_mutex = xSemaphoreCreateMutex();
     if (!s_tx_mutex) { ESP_LOGE(TAG, "TX 互斥锁创建失败"); return -1; }
@@ -552,9 +542,6 @@ int ble_audio_init(void) {
     // 与上游 bleprph 同时序。
 
     nimble_port_freertos_init(nimble_host_task);
-    ESP_LOGI(TAG, "heap 侦查: freertos_init后 free=%d largest=%d",
-             (int)esp_get_free_heap_size(),
-             (int)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     ESP_LOGI(TAG, "BLE 音频服务就绪(0xA2B0),等待 host sync 后广播 %s", DEVICE_NAME);
     return 0;
 }

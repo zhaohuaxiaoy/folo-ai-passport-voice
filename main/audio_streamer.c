@@ -322,11 +322,6 @@ void audio_streamer_drain(uint32_t ms) {
 static void audio_worker(void *arg) {
     (void)arg;
     for (;;) {
-#ifdef CONFIG_IDF_TARGET_ESP32C3
-        // 诊断(2026-08-28):RTC 取证 —— audio worker 心跳。
-        // (仅真机构建;host 测试无 MMIO 映射,SEGFAULT)
-        { volatile uint32_t *d = (volatile uint32_t *)0x50001E00; d[9] += 1; d[2] = 'D'; }
-#endif
         xSemaphoreTake(s_sem, portMAX_DELAY);    // 等待 start 信号
         s_worker_busy = true;
         while (s_active) {
@@ -377,10 +372,6 @@ static void audio_worker(void *arg) {
 static void ble_worker(void *arg) {
     (void)arg;
     for (;;) {
-#ifdef CONFIG_IDF_TARGET_ESP32C3
-        // 诊断(2026-08-28):RTC 取证 —— ble worker 心跳。
-        { volatile uint32_t *d = (volatile uint32_t *)0x50001E00; d[2] = 'B'; }
-#endif
         size_t len = 0;
         // NOSPLIT:整 item 语义,len 恒等于写入长度(不会像 BYTEBUF 那样短读)
         void *item = xRingbufferReceive(s_ring, &len, pdMS_TO_TICKS(100));

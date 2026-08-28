@@ -8,38 +8,14 @@
 static const char *TAG = "settings";
 #define APP_NS "app"
 
-static const char *K_MODE      = "rf_mode";
+// 注:rf_mode 键已随双通道常开架构退役(2026-08-28,不再有互斥模式);旧键
+// 残留于 NVS 无读取方,无害(factory 清空可除)。
 static const char *K_TZ_HOUR   = "tz_hour";
 
 esp_err_t nvs_settings_init(void) {
     nvs_handle_t h;
     esp_err_t e = nvs_open(APP_NS, NVS_READWRITE, &h);
     if (e == ESP_OK) nvs_close(h);
-    return e;
-}
-
-// 模式映射(存储语义 0=BLE/2=USB,见 mode.h):旧 NVS 值 1(已废弃)与
-// 其他越界值一律按 BLE 兜底 —— 只删中间值不重排,存 2 的设备升级后仍为 USB。
-esp_err_t nvs_settings_get_mode(uint8_t *mode) {
-    nvs_handle_t h;
-    esp_err_t e = nvs_open(APP_NS, NVS_READONLY, &h);
-    if (e != ESP_OK) { if (mode) *mode = 0; return ESP_OK; }  // 打不开按 BLE 兜底
-    uint8_t v = 0;   // 缺省 BLE
-    e = nvs_get_u8(h, K_MODE, &v);
-    nvs_close(h);
-    if (e == ESP_ERR_NVS_NOT_FOUND) v = 0;   // 首次使用:BLE
-    if (mode) *mode = (v == 2) ? 2 : 0;      // 2→USB;旧值 1(已废弃)/其他 → BLE
-    return ESP_OK;
-}
-
-esp_err_t nvs_settings_set_mode(uint8_t mode) {
-    nvs_handle_t h;
-    esp_err_t e = nvs_open(APP_NS, NVS_READWRITE, &h);
-    if (e != ESP_OK) return e;
-    e = nvs_set_u8(h, K_MODE, mode);         // 原样存三值(旧实现"非零写 1",v3 改为原样)
-    if (e == ESP_OK) e = nvs_commit(h);
-    nvs_close(h);
-    ESP_LOGI(TAG, "rf_mode = %d", (int)mode);
     return e;
 }
 

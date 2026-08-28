@@ -55,8 +55,8 @@ INJECT_LABELS = {"unicode": "Unicode 键盘注入", "clipboard": "剪贴板",
 
 # 诊断页快捷命令(设备 console 命令表, 与 main/console_cmds.c 对齐):
 # (按钮名, 命令, 需确认?)  前两项需确认: 恢复出厂 / 重启
+# 注:mode 命令已随双通道常开架构退役(2026-08-28,无需再切换通道)
 DIAG_QUICK = (
-    ("Mode", "mode", False),
     ("Logs", "log", False),
     ("System", "st", False),
     ("Factory Reset", "factory", True),

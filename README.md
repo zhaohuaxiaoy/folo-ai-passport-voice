@@ -41,17 +41,18 @@
 
 ### 设备端（固件）
 
-- **按住说话**：READY 态按住 OK 开始录音（滴声提示），松开自动发送；无取消窗口、无超时残留
+- **按住说话**：READY 态按住**音量+**开始录音（滴声提示），松开自动发送；无取消窗口、无超时残留
+- **转写中退出**：TRANSCRIBING 态单击音量+ 立即退出转写场景回 READY，迟到的识别文本不上屏
 - **LISTENING 页**：录音中显示麦克风图标 + 计时，替代传统 REC 红点/音量条
 - **Agent 工作流可视化**：THINKING / RUNNING / DONE 状态、任务回显、离线横幅——AI 在做什么，屏幕上看得到
 - **物理审批**：Agent 审批请求进入审批页，OK 批准 / UP 拒绝 / DOWN 看 Diff 详情（桌面端默认关闭审批）
-- **三键交互**：UP/DOWN/OK —— 按住说话、DOWN 回车、OK 双击清空输入框（全局语义）
+- **三键交互**：UP/DOWN/OK —— 按住说话、转写中单击退出、DOWN 回车、OK 双击清空输入框（全局语义）
 - **完整状态机**：HOME → READY → LISTENING → TRANSCRIBING → AGENT_RUNNING → APPROVAL → DONE
 - **提示音**：开始 / 发送 / 审批提醒 / 完成 / 拒绝 / 错误六种
 - **双通道传输**：BLE / USB-Serial-JTAG（含完整控制台命令面）
 - **低资源音频管线**：3200B/100ms 帧、静态环形缓冲、源端丢帧不整段缓存、掉帧对账
 - **两级息屏**：20s 无操作关背光 / 60s 面板 SLPIN 断电 / 任意键唤醒；审批态常亮
-- **控制台命令**：`st`（堆/栈水位、连接、掉帧统计）、`mode`（ble/usb）、`logs`、`system`、`factory reset`、`reboot`
+- **控制台命令**：`st`（堆/栈水位、连接、掉帧统计）、`log [offset]`（日志环导出）、`rst`（复位原因）、`time`（校时）、`bt scan/dtx`（射频诊断）、`reboot`、`factory`（清 NVS）
 
 ### 桌面端（companion/，macOS + Windows）
 
@@ -67,13 +68,16 @@
 
 | 按键 | 语境 | 动作 |
 | --- | --- | --- |
-| OK **按住** | READY | 开始录音（PTT），松开发送 |
+| **UP（音量+）按住** | READY | 开始录音（PTT，滴声提示），松开自动发送转写 |
+| **UP（音量+）单击** | TRANSCRIBING | 退出转写场景，立即回 READY（迟到的识别结果不上屏） |
 | OK **双击** | 任意 | 清空当前输入框全部文字 |
 | DOWN 单击 | HOME / READY | 输入框回车（提交） |
 | OK 单击 | HOME | 进入 READY（工作流就绪） |
 | OK 单击 | APPROVAL | 批准 Agent 请求 |
 | UP 单击 | APPROVAL | 拒绝 Agent 请求 |
 | DOWN 单击 | APPROVAL | 查看 Diff 详情 |
+
+> 长按阈值：UP 长按 300ms 触发录音；OK 长按 500ms 锁屏/解锁（锁定 = 省电息屏，按键照常执行但不亮屏）。
 
 ## 快速开始
 
@@ -99,16 +103,44 @@ macOS 首次使用需授予**辅助功能**权限（注入剪贴板+Cmd+V 必需
 
 ### 固件（ESP32-C3）
 
-需要 ESP-IDF 5.5.x（已知环境 5.5.3）：
+需要 ESP-IDF 5.5.x（已知环境 5.5.3）+ Python 3.10+（本机 `.venv` 在 `companion/`）。
+
+**首次构建**（会经 Component Manager 拉取 LVGL、`esp_lvgl_port`、`button`、`esp_codec_dev` 等依赖）：
 
 ```bash
+git clone <repo-url> && cd ai-passport
+python3 -m venv companion/.venv && companion/.venv/bin/pip install -r companion/requirements.txt
 source "$HOME/esp/esp-idf-v5.5.3/export.sh"   # 或你的安装路径
 idf.py set-target esp32c3
 idf.py build
-idf.py flash monitor
 ```
 
-首次构建会经 Component Manager 拉取 LVGL、`esp_lvgl_port`、`button`、`esp_codec_dev` 等依赖。烧录后控制台为 USB-Serial-JTAG（GPIO18/19；UART0 默认 TX GPIO21 与本板背光冲突）。
+**刷机与日志**（设备用 USB 线连电脑，`/dev/cu.usbmodem*` 按实际端口替换）：
+
+```bash
+idf.py -p /dev/cu.usbmodem1101 flash         # 烧录 + 自动复位
+idf.py -p /dev/cu.usbmodem1101 monitor       # 串口日志（REPL 控制台）
+```
+
+烧录后控制台为 USB-Serial-JTAG（GPIO18/19；UART0 默认 TX GPIO21 与本板背光冲突）。
+
+**主机逻辑测试**（固件状态机/协议/音频分片，纯 C，无需硬件）：
+
+```bash
+cd tests && cmake -B build && cmake --build build && ctest --test-dir build
+```
+
+**USB 控制台命令**（`idf.py monitor` 的 REPL，或桌面端诊断页经 SYS 帧下发）：
+
+| 命令 | 作用 |
+| --- | --- |
+| `st` | 系统状态：堆/栈水位、BLE/USB 连接、MTU、掉帧、电池 |
+| `log [offset]` | 导出日志环（有 USB 主机时日志进 16KB RAM 环）；环超 2048B 时按 `log 2048` / `log 4096` 分段取全量 |
+| `rst` | 复位原因（1 上电 / 4 软件 / 11 USB-flash） |
+| `time` / `time set <epoch>` | 查看 / 设置 wall-clock（校时源仅电脑客户端） |
+| `bt scan` / `bt dtx [ch]` | 射频诊断：主动扫描周边广播 / 固定信道强制发射 |
+| `reboot` | 软件重启 |
+| `factory` | 清空 NVS 并重启（出厂复位） |
 
 ## 仓库结构
 
@@ -124,10 +156,10 @@ partitions.csv           自定义分区表(factory 4MB)
 
 ## 工作原理
 
-1. 设备 READY 态按住 OK → 滴声 → `voice.start` → 3200B/100ms 音频帧经 BLE（GATT NOTIFY）/ USB 上行
+1. 设备 READY 态按住**音量+** → 滴声 → `voice.start` → 3200B/100ms 音频帧经 BLE（GATT NOTIFY）/ USB 上行
 2. 桌面端 relay 把音频帧流式送入火山引擎 ASR（`bigmodel_async`，每包结果携带**全量累计文本**）
 3. 中间结果（partial）→ 悬浮窗实时显示（120ms 帧合并节流；GUI 挂接时设备端不再预览候选字）
-4. 松开 OK → `voice.end` → ASR 定稿 → **注入当前输入框一次**（剪贴板 + Cmd+V）→ 悬浮窗消失
+4. 松开音量+ → `voice.end` → ASR 定稿 → **注入当前输入框一次**（剪贴板 + Cmd+V）→ 悬浮窗消失；转写中单击音量+ 可随时退出场景
 5. 定稿文本同时回显设备屏幕；Agent 状态（THINKING / RUNNING / DONE）与审批请求下行到设备
 6. 审批请求 → 设备进入审批页 → OK/UP 物理按键裁决 → 结果上行 → Agent 继续执行
 
@@ -136,7 +168,7 @@ partitions.csv           自定义分区表(factory 4MB)
 ## 设计决策
 
 - **为什么双通道**：BLE 覆盖有蓝牙的 Mac；USB 是调试器兼最后保底——任何单一链路失效都可用另一条继续工作，断线事件统一收束，不残留半开会话。
-- **为什么状态机是纯 C 归约器**：`state + event → action` 的归约模式让全部转移逻辑**零硬件依赖**，7 组 ctest 直接覆盖状态转移、协议编解码、音频分片、UI 像素计算；UI 按快照差异渲染，加页面不加状态耦合。
+- **为什么状态机是纯 C 归约器**：`state + event → action` 的归约模式让全部转移逻辑**零硬件依赖**，8 组 ctest 直接覆盖状态转移、协议编解码、音频分片、UI 像素计算；UI 按快照差异渲染，加页面不加状态耦合。
 - **为什么音频管线做静态环形缓冲**：ESP32-C3 只有 400KB SRAM，动态分配 + 整段缓存一次长录音会直接爆内存。3200B/100ms 帧、源端丢帧、掉帧对账，是"入门级 MCU 也能当 AI 输入设备"的关键。
 - **为什么物理审批**：AI 自动改文件、执行命令是有风险的——审批不放通知栏，放设备屏幕，按实体键才算数，且审批态永不熄屏。
 - **为什么两级息屏**：20s 关背光（省的是背光 LED 的 mA 级），60s 面板 SLPIN（省的是内部振荡器 + 驱动，μA 级）——分级是因为省电目标不同，唤醒体验一致：任意键瞬亮、内容免重绘（ST7789 DRAM 睡眠期间保留）。
@@ -161,7 +193,7 @@ companion/.venv/bin/python -m pytest companion/tests/ -q -o asyncio_mode=auto
 
 ### 真机验收状态
 
-设备到货后的完整验收清单见 [`docs/ON_DEVICE.md`](docs/ON_DEVICE.md)。当前状态：**Build PASS、Host tests PASS、Device tests NOT RUN（待真机）**。重点验证项：悬浮窗真实会话（长按 PTT → 实时候选 → 松手注入一次）、Windows 焦点不抢占、连说十几秒无丢字（如丢字可调 `companion/relay.py` 的 `AUDIO_Q_MAX` 20→30-40）、BLE 吞吐/掉帧率、USB 拔线恢复、电池读数、两级息屏时序与唤醒后内容恢复。
+设备到货后的完整验收清单见 [`docs/ON_DEVICE.md`](docs/ON_DEVICE.md)。当前状态：**Build PASS、Host tests PASS（8/8）、真机连续实测 PASS**。已真机验证：按住说话多次会话、连续快速长按无丢键、松手后无假滴声/假录音、转写中单击退出、双通道传输、休眠唤醒。仍待重点验收：Windows 焦点不抢占、长句连续十几秒无丢字（如丢字可调 `companion/relay.py` 的 `AUDIO_Q_MAX` 20→30-40）、USB 拔线恢复、电池读数。
 
 ## 扩展性
 

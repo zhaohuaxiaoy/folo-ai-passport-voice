@@ -49,32 +49,6 @@ static void out(const char *fmt, ...)
     else fwrite(buf, 1, (size_t)n, stdout);
 }
 
-// ---- mode:射频模式(手动切换;NVS 持久化)----
-static int cmd_mode(int argc, char **argv)
-{
-    if (argc == 1) {
-        out("mode: %s\n", mode_name(mode_get()));
-        out("link: %s\n", mode_link_up() ? "up" : "down");
-        return 0;
-    }
-    if (argc == 2 && strcmp(argv[1], "ble") == 0) {
-        if (mode_get() == APP_MODE_BLE) { out("already BLE\n"); return 0; }
-        app_event_t e = { .type = APP_EV_MODE_SWITCH, .u.mode_switch = { .target = APP_MODE_BLE } };
-        app_event_post(&e);
-        out("switching to BLE...\n");
-        return 0;
-    }
-    if (argc == 2 && strcmp(argv[1], "usb") == 0) {
-        if (mode_get() == APP_MODE_USB) { out("already USB\n"); return 0; }
-        app_event_t e = { .type = APP_EV_MODE_SWITCH, .u.mode_switch = { .target = APP_MODE_USB } };
-        app_event_post(&e);
-        out("switching to USB (reboot)...\n");
-        return 0;
-    }
-    out("usage: mode | mode ble | mode usb\n");
-    return 1;
-}
-
 // ---- bt scan:射频诊断(BLE RX 前端验证)----
 // BLE 广播不可见时区分"RX 坏"与"TX 坏":主动扫描周边广播——
 // 扫到设备(Mac/手机/耳机)则天线+晶振+射频 RX 全好,问题锁 TX/adv;
@@ -218,21 +192,34 @@ static int cmd_time(int argc, char **argv)
 }
 
 // ---- log:导出 USB 模式日志环(REPL 模式下日志直接上屏,环为空) ----
+// 可选 <offset>:SYS_RESP 载荷上限 2048B(USB_RESP_MAX),环(16KB)超限时
+// 首块恰在中间截断。`log 2048` / `log 4096` … 按游标分多次取回全量 ——
+// 2026-08-28 "长按响两次" 排查:首块在 RELEASE 行截断,第二次 LONG(第二声
+// 滴)恰在截断点之后,无 offset 则永远看不到尾部。
 static int cmd_log(int argc, char **argv)
 {
-    (void)argc; (void)argv;
-    // 分块导出:日志环最大 4096B,而本命令在 2048B 栈的 usb_read_task 中执行,
+    size_t start = 0;
+    if (argc > 1) {
+        char *end = NULL;
+        unsigned long v = strtoul(argv[1], &end, 10);
+        if (end == argv[1] || *end != '\0') {
+            out("usage: log [offset]\n");
+            return 1;
+        }
+        start = (size_t)v;
+    }
+    // 分块导出:日志环最大 16KB,而本命令在 2048B 栈的 usb_read_task 中执行,
     // 声明整段栈数组必爆栈(审查 P0)。512B 小缓冲循环经 s_emit 透传。
     char buf[512];
-    size_t off = 0;
-    size_t n;
+    size_t off = start;
+    size_t n = 0;
     while ((n = usb_link_dump_log_at(buf, sizeof(buf), off)) > 0) {
         if (s_emit) s_emit(buf, n);   // 原样透传(含换行),不进 out 的截断缓冲
         else fwrite(buf, 1, n, stdout);
         off += n;
         if (n < sizeof(buf) - 1) break;   // 末块(不足一满块),避免尾帧死循环
     }
-    if (off == 0) out("(log ring empty)\n");
+    if (n == 0) out(start == 0 ? "(log ring empty)\n" : "(end of ring)\n");
     return 0;
 }
 
@@ -267,8 +254,11 @@ static int cmd_st(int argc, char **argv)
         free(sts);
     }
     out("--- link ---\n");
-    out("mode: %s link: %s\n", mode_name(mode_get()), mode_link_up() ? "up" : "down");
-    out("usb: session %s\n", usb_link_session_active() ? "up" : "down");
+    // 双通道常开:聚合链路 + 两通道独立状态。会话路由 = 最近连接/使用通道。
+    out("link: %s\n", mode_link_up() ? "up" : "down");
+    out("ble: subscribed %s  usb: session %s\n",
+        ble_audio_event_subscribed() ? "yes" : "no",
+        usb_link_session_active() ? "up" : "down");
     out("--- ble ---\n");
     out("connected: %s event_subscribed: %s mtu: %u\n",
         ble_audio_connected() ? "yes" : "no",
@@ -315,8 +305,8 @@ static int cmd_factory(int argc, char **argv)
 }
 
 // ---- 命令表(REPL 注册与 SYS 执行共用)----
+// 注:模式切换命令(mode)已随双通道常开架构退役(2026-08-28)。
 static const struct { const char *name; esp_console_cmd_func_t fn; } s_cmds[] = {
-    { "mode",    cmd_mode },
     { "log",     cmd_log },
     { "time",    cmd_time },
     { "st",      cmd_st },
@@ -370,8 +360,7 @@ int console_cmds_run_line(const char *line, char *out_buf, size_t out_cap)
         return 1;   // 未知命令:调用方(SYS)回 "unknown command"
     }
 
-    // 输出捕获进调用方缓冲;执行完恢复(REPL 线程与 USB 读任务互斥 ——
-    // REPL 存在时 USB 驱动未装、usb_link 读任务不存在,反之亦然)
+    // 输出捕获进调用方缓冲;执行完恢复(SYS 帧在 usb_link 读任务上下文执行)
     s_cap_buf = out_buf;
     s_cap_len = 0;
     s_cap_cap = out_cap;
@@ -399,10 +388,9 @@ static void reg(const char *name, const char *help, const char *hint,
 
 esp_err_t console_cmds_register(void)
 {
-    reg("mode", "射频模式:mode | mode ble | mode usb(切换需几秒,期间链路中断)", NULL, cmd_mode);
     reg("bt", "BT 射频诊断:bt scan | bt dtx [ch](直接测试模式强制发射)", NULL, cmd_bt);
-    reg("log", "导出 USB 模式日志环(REPL 模式下为空)", NULL, cmd_log);
-    reg("st", "系统状态一览(模式/双链路/MTU/掉帧/堆)", NULL, cmd_st);
+    reg("log", "导出日志环(有 USB 主机时日志进 RAM 环)", NULL, cmd_log);
+    reg("st", "系统状态一览(双链路/MTU/掉帧/堆)", NULL, cmd_st);
     reg("rst", "复位原因(无线自动重启诊断)", NULL, cmd_rst);
     reg("time", "校时:time | time set <epoch> | time tz <±hh>", NULL, cmd_time);
     reg("reboot", "重启设备", NULL, cmd_reboot);
