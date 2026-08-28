@@ -258,6 +258,16 @@ esp_err_t button_adc_del(button_driver_t *button_driver)
 static uint32_t s_last_good_voltage;   // 上次有效读数(RAW);全失败时沿用
 static uint32_t s_last_mv = 3000;      // 上次返回电压(松开态初始,首读低压即重读)
 
+// 补丁 2026-08-28(面板上电瞬态): 解锁/唤醒触发 PANEL_ON 后,面板 SLPOUT+
+// DISPON+LVGL 刷新期 SPI 活动窗与 ADC1_CH0 硬件耦合,ADC 持续读 ~0mV →
+// UP 假按 → 300ms 假 LONG → PTT 开录(真机 KEYDBG 取证: 解锁后 25963ms
+// UP PRESS_DOWN mv=598,面板稳定后 27098ms 恢复,PTT 自动停)。
+// bsp_display_power(true) 入口调用 button_adc_set_ignore_until() 设置窗口;
+// 窗口内 get_key_level 直接返回 INACTIVE —— 状态机当"松开"处理,不吞回调、
+// 不污染 LONG 态(组件升版会覆盖此补丁,须同步移植)。
+static int64_t s_ignore_until_us;
+void button_adc_set_ignore_until(int64_t until_us) { s_ignore_until_us = until_us; }
+
 static uint32_t get_adc_voltage(adc_unit_t unit_id, uint8_t channel)
 {
     uint32_t adc_reading = 0;
@@ -342,6 +352,12 @@ uint8_t button_adc_get_key_level(button_driver_t *button_driver)
 
     int ch_index = find_channel(adc_btn->unit_id, ch);
     ESP_RETURN_ON_FALSE(ch_index >= 0, 0, TAG, "The button_index is not init");
+
+    // 面板上电 SPI 窗(见文件头 button_adc_set_ignore_until 注释):判定直接
+    // 返回 INACTIVE,ADC 读数在窗内不可信。
+    if (esp_timer_get_time() < s_ignore_until_us) {
+        return BUTTON_INACTIVE;
+    }
 
     /** It starts only when the elapsed time is more than 1ms */
     if ((esp_timer_get_time() - g_button.unit[adc_btn->unit_id].ch[ch_index].last_time) > 1000) {

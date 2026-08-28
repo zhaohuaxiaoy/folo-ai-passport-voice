@@ -30,3 +30,8 @@ esp_err_t bsp_button_init(bsp_btn_cb_t cb, void *user);
 // ★ 换了分压/上拉阻值后,用它测出自己的三档电压,再改 bsp_pins.h 的 BSP_BTN_MV_TABLE。
 // 读取失败返回 -1。
 int bsp_button_read_mv(void);
+
+// 面板上电瞬态抑制:bsp_display_power(true) 入口调用。SLPOUT+DISPON+LVGL
+// 刷新期 SPI 活动与 ADC1_CH0 耦合,ADC 持续读 ~0mV → UP 假按 → 假 PTT
+// (真机取证 2026-08-28)。窗口内按键判定直接返回"未按下"。
+void bsp_button_suppress_panel_glitch(void);

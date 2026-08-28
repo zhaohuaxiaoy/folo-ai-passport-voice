@@ -8,6 +8,13 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+
+// button_adc.c 补丁(managed_component,升级会覆盖):面板上电 SPI 窗抑制。
+extern void button_adc_set_ignore_until(int64_t until_us);
+
+// 面板上电瞬态抑制窗口:SLPOUT+120ms+DISPON+LVGL 全屏刷新 ~300ms,取 600ms。
+#define BSP_BTN_PANEL_GLITCH_US (600 * 1000)
 
 static const char *TAG = "bsp_btn";
 
@@ -105,6 +112,10 @@ esp_err_t bsp_button_init(bsp_btn_cb_t cb, void *user) {
 
     ESP_LOGI(TAG, "按键就绪:ADC1_CH%d 三键分压", BSP_BTN_ADC_CHANNEL);
     return ESP_OK;
+}
+
+void bsp_button_suppress_panel_glitch(void) {
+    button_adc_set_ignore_until(esp_timer_get_time() + BSP_BTN_PANEL_GLITCH_US);
 }
 
 int bsp_button_read_mv(void) {

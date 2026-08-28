@@ -1,6 +1,7 @@
 // components/bsp/src/bsp_display.c
 // 移植自 trae_card/components/platform/platform_esp32/src/disp_st7789.c
 #include "bsp_display.h"
+#include "bsp_button.h"
 #include "bsp_pins.h"
 #include "driver/spi_master.h"
 #include "driver/ledc.h"
@@ -151,6 +152,9 @@ void bsp_display_backlight(uint8_t percent) {
 void bsp_display_power(bool on) {
     if (!s_panel || !s_io) return;      // 未初始化 no-op(初始化序列已 DISPON)
     if (on) {
+        // 面板上电 SPI 活动与 ADC1_CH0 耦合,会腐蚀按键读数(假 UP 按下 → 假 PTT)。
+        // 窗口覆盖 SLPOUT+120ms+DISPON+LVGL 全屏刷新;期间按键判定返回"未按下"。
+        bsp_button_suppress_panel_glitch();
         esp_lcd_panel_io_tx_param(s_io, 0x11, NULL, 0);    // SLPOUT 唤醒
         vTaskDelay(pdMS_TO_TICKS(120));                     // 等内部时钟稳定(SLPIN 后必需)
         esp_lcd_panel_disp_on_off(s_panel, true);           // DISPON 恢复显示
