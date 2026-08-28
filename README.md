@@ -85,10 +85,14 @@
 
 **直接使用打包好的客户端（推荐，非开发者无需碰终端）**：
 
-- **macOS**：`companion/dist/AI Passport.app`（`companion/build/pack.py` 构建，或使用发布产物），双击启动
-- **Windows**：需在 Windows 构建机上运行 `python3 companion/build/pack.py` 生成 `dist/AI Passport.exe`（或使用发布产物）
+- **macOS**：[下载 AI-Passport-macOS.dmg](https://github.com/zhaohuaxiaoy/folo-ai-passport-voice/releases/latest)（解压拖入 /Applications）
+- **Windows**：[下载 AI-Passport-Windows.exe](https://github.com/zhaohuaxiaoy/folo-ai-passport-voice/releases/latest)（双击运行）
+
+Release 由 GitHub Actions 双平台自动构建（`v*` tag 触发，见 `.github/workflows/build-apps.yml`）。
 
 首次启动进入 5 步向导：欢迎 → 自动发现设备（BLE → USB）→ 火山 ASR Key 配置 → 系统授权引导（macOS）→ 状态页；连接后驻留系统托盘。首次运行自动生成 `companion/config.local.json`（火山 API Key，**不入 git**）。
+
+> **自构建**：Mac 上 `companion/.venv/bin/python companion/build/pack.py --dmg`；Windows 需在 Windows 构建机运行 `python build/pack.py`（产物 `dist/AI Passport.exe`）。
 
 **从源码运行（开发）**：
 

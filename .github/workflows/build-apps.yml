@@ -1,0 +1,58 @@
+# AI Passport 桌面端双平台打包(触发后自动发布 Release assets)
+# 触发:打 v* tag 推送(推荐)或手动 workflow_dispatch。
+# macOS runner 产出 .app/.dmg;Windows runner 产出 .exe ——
+# 各 job 上传自己的产物到同一 tag 的 Release。
+name: build-apps
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r companion/requirements.txt
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: python companion/build/pack.py --dmg
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: python companion/build/pack.py
+
+      - name: Stage macOS artifact
+        if: runner.os == 'macOS'
+        run: cp "companion/dist/AI Passport.dmg" "AI-Passport-macOS.dmg"
+
+      - name: Stage Windows artifact
+        if: runner.os == 'Windows'
+        run: cp "companion/dist/AI Passport.exe" "AI-Passport-Windows.exe"
+
+      - name: Upload release asset (macOS)
+        if: runner.os == 'macOS'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: AI-Passport-macOS.dmg
+
+      - name: Upload release asset (Windows)
+        if: runner.os == 'Windows'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: AI-Passport-Windows.exe

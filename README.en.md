@@ -85,8 +85,10 @@ Data flow: the device captures 16 kHz audio → streams 100 ms frames up over **
 
 **Use the packaged client (recommended — no terminal needed for end users)**:
 
-- **macOS**: `companion/dist/AI Passport.app` (built with `companion/build/pack.py`, or use a release build) — double-click to launch
-- **Windows**: run `python3 companion/build/pack.py` on a Windows build machine to produce `dist/AI Passport.exe` (or use a release build)
+- **macOS**: download [AI-Passport-macOS.dmg](https://github.com/zhaohuaxiaoy/folo-ai-passport-voice/releases/latest) (drag into /Applications)
+- **Windows**: download [AI-Passport-Windows.exe](https://github.com/zhaohuaxiaoy/folo-ai-passport-voice/releases/latest) (run directly)
+
+Releases are built automatically for both platforms by GitHub Actions (`v*` tag triggers; see `.github/workflows/build-apps.yml`). To build yourself: on macOS run `companion/.venv/bin/python companion/build/pack.py --dmg`; Windows builds require a Windows machine (`python build/pack.py` → `dist/AI Passport.exe`).
 
 On first launch the 5-step wizard opens: welcome → auto-discover the device (BLE → USB) → Volcano ASR key config → system permission guide (macOS) → status page; the app then stays in the system tray. First run writes `companion/config.local.json` (Volcano API key, **never committed**).
 
