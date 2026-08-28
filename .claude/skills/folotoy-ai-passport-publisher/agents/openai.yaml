@@ -1,0 +1,7 @@
+interface:
+  display_name: "FoloToy AI Passport 发布助手"
+  short_description: "检查、发布并维护 AI Passport 社区固件"
+  brand_color: "#57FFB6"
+  default_prompt: "Use $folotoy-ai-passport-publisher to inspect this project, write play-first bilingual submission copy without chip or hardware specifications, guide official-site authorization if needed, and ask for my confirmation before uploading."
+policy:
+  allow_implicit_invocation: true
