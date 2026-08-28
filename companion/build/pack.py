@@ -20,6 +20,15 @@ import shutil
 import subprocess
 import sys
 
+# Windows 构建机 stdout 缺省 cp1252,print("✓ …") 直接 UnicodeEncodeError
+# (CI 实测:构建完成后的最后一行 print 崩溃 → exit 1 → Release 上传失败)。
+# 强制 UTF-8,产物名/日志含中文与符号在 Windows 也安全。
+if getattr(sys.stdout, "encoding", "").lower() not in ("utf-8", "utf8"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 APP_NAME = "AI Passport"
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ENTRY = os.path.join(HERE, "fre_app.py")
