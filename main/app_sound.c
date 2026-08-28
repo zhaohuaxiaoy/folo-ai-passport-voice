@@ -96,9 +96,10 @@ esp_err_t app_sound_init(void) {
     if (!s_queue) return ESP_FAIL;
     // 静态栈(.bss):1536B 够提示音(单段 256 采样 buf);heap 极限下每字节
     // 都决定 host 任务(5120B 动态创建)能否成功。
-    static StackType_t s_snd_stack[1536 / sizeof(StackType_t)];
+    // 1536B 时高水位仅剩 316B(2026-08-28 实测)→ 2048B。
+    static StackType_t s_snd_stack[2048 / sizeof(StackType_t)];
     static StaticTask_t s_snd_tcb;
-    if (!xTaskCreateStatic(sound_worker, "sound_worker", 1536, NULL, 3,
+    if (!xTaskCreateStatic(sound_worker, "sound_worker", 2048, NULL, 3,
                            s_snd_stack, &s_snd_tcb)) {
         ESP_LOGE(TAG, "sound worker 创建失败");
         return ESP_FAIL;

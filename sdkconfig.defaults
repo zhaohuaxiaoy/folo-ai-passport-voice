@@ -80,3 +80,8 @@ CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
 # 故用主晶振(40M)分频做 BT 睡眠时钟 —— 官方支持 连接 + light sleep + DFS 的组合。
 CONFIG_BT_CTRL_MODEM_SLEEP=y
 CONFIG_BT_CTRL_LPCLK_SEL_MAIN_XTAL=y
+# 关键(2026-08-28 真机崩溃根因):无此项时 bt.c 置 no_light_sleep=1 但创建的
+# btLS NO_LIGHT_SLEEP 锁从未 acquire → light sleep 在 BT 启用时照样应用 →
+# BLE 连接事件错过 → esp_restart 复位循环(复位原因 4)。开启后主晶振在
+# light sleep 期间保持供电,BT 参考时钟不断(代价:睡眠多耗几百 µA,可接受)。
+CONFIG_BT_CTRL_MAIN_XTAL_PU_DURING_LIGHT_SLEEP=y

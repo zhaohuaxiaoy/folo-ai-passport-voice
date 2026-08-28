@@ -44,7 +44,16 @@ static app_state_t s_state;   // app_task 独占,无需锁
 // (残留在环内的帧由 worker 在 80MHz 下仍可编码发送,best-effort)。
 static esp_pm_lock_handle_t s_pm_cpu, s_pm_apb;
 static esp_pm_lock_handle_t s_pm_no_ls;   // USB 主机在位:禁 light sleep
-static StackType_t s_usb_presence_stack[2048 / 4];
+// ⚠ 单位陷阱:IDF 的 RISC-V port 里 portSTACK_TYPE = uint8_t(portmacro.h),
+//    即 sizeof(StackType_t)==1,xTaskCreateStatic 的 depth 参数就是字节数。
+//    这里曾写 [2048/4] = 512B 数组却按 2048B 登记 → FreeRTOS 把栈窗口开到
+//    数组后 1536B,压住 s_state 与 app_events 的 s_queue_storage:初始上下文帧
+//    落在 0x3fca15d0(第 3 号事件槽内),BLE 连接后事件投递把它覆写 →
+//    本任务下次被调度恢复出全零寄存器、mret 到 PC=0 → Instruction access
+//    fault 复位循环(2026-08-28 真机根因)。数组元素数 = 字节数,别再除 4。
+// 2048B 时实测高水位仅剩 368B(用量 ~1.7KB:ESP_LOGI 的 192B 栈缓冲 + 日志环
+// 路径),18% 余量太薄 → 3072B。
+static StackType_t s_usb_presence_stack[3072];
 static StaticTask_t s_usb_presence_tcb;
 
 static void pm_session_lock(void)
@@ -57,6 +66,68 @@ static void pm_session_unlock(void)
 {
     if (s_pm_apb) esp_pm_lock_release(s_pm_apb);
     if (s_pm_cpu) esp_pm_lock_release(s_pm_cpu);
+}
+
+// ---- 电源管理:活动门禁(2026-08-28 用户要求)----
+// 用户语义:"什么都不动超过 1 分钟再进入省电,任何操作之后立即恢复正常功耗"。
+// 活动锁 = CPU_FREQ_MAX + NO_LIGHT_SLEEP,等价于功耗优化前的常态(160MHz、
+// 不睡);任意队列事件(按键/BLE 连断/USB 连断/下行转写/TONE_DONE)都算"操作",
+// 立即取锁并刷新时刻;app_task 心跳检查,连续 PM_IDLE_GATE_MS 无事件才释放,
+// 这时才交给 esp_pm 变频 + light sleep。开机也算一次活动(先给 1 分钟常态)。
+// 录音会话另有 pm_session_lock(APB 也锁,I2S 不能降频),两者独立叠加。
+#define PM_IDLE_GATE_MS 60000
+static esp_pm_lock_handle_t s_pm_act_cpu, s_pm_act_ls;
+static bool s_pm_act_held;
+static uint64_t s_pm_act_ms;
+
+// 哪些事件算"链路/主机活动"(与按键无关,天然无假事件问题)
+static bool pm_ev_is_link(uint8_t t)
+{
+    switch (t) {
+    case APP_EV_BLE_CONNECTED: case APP_EV_BLE_DISCONNECTED:
+    case APP_EV_USB_CONNECTED: case APP_EV_USB_DISCONNECTED:
+    case APP_EV_TRANSCRIPT:    case APP_EV_AGENT_STATUS:
+    case APP_EV_APPROVAL_REQUEST: case APP_EV_TIME_SET:
+    case APP_EV_AUDIO_ERROR:   case APP_EV_BLE_DROP:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void pm_activity_mark(uint64_t now_ms, uint8_t ev_type)
+{
+    // 诊断:静默 >5s 后又被唤活,记下是哪类事件把门禁踢回常态(排查"永不进入
+    // 省电"时唯一有效的线索;按构造罕见,常量输出量)。
+    if (s_pm_act_held && now_ms - s_pm_act_ms > 5000) {
+        ESP_LOGI(TAG, "活动刷新: ev=%d 静默=%llums", (int)ev_type,
+                 (unsigned long long)(now_ms - s_pm_act_ms));
+    }
+    s_pm_act_ms = now_ms;
+    if (s_pm_act_held) return;
+    if (s_pm_act_cpu) esp_pm_lock_acquire(s_pm_act_cpu);
+    if (s_pm_act_ls)  esp_pm_lock_acquire(s_pm_act_ls);
+    s_pm_act_held = true;
+    ESP_LOGI(TAG, "活动:恢复常态功耗(不降频、不 light sleep)");
+}
+
+static void pm_idle_gate_check(uint64_t now_ms)
+{
+    if (!s_pm_act_held || now_ms - s_pm_act_ms < PM_IDLE_GATE_MS) return;
+    if (s_pm_act_ls)  esp_pm_lock_release(s_pm_act_ls);
+    if (s_pm_act_cpu) esp_pm_lock_release(s_pm_act_cpu);
+    s_pm_act_held = false;
+    ESP_LOGI(TAG, "空闲 %ds:进入省电(变频 + light sleep)", PM_IDLE_GATE_MS / 1000);
+}
+
+// 供 console `st` 展示门禁状态(诊断用;app_task 单写,读侧容忍撕裂)
+bool app_pm_gate_state(uint32_t *idle_ms)
+{
+    if (idle_ms) {
+        uint64_t now = esp_timer_get_time() / 1000;
+        *idle_ms = (uint32_t)(now - s_pm_act_ms);
+    }
+    return s_pm_act_held;
 }
 
 // ---- USB 在位检测:插 USB 时禁 light sleep ----
@@ -148,6 +219,12 @@ static void run_actions(const app_action_t *acts, uint8_t n)
         case APP_ACT_SEND_KEY_ACTION:
             len = app_protocol_key_action(buf, sizeof(buf),
                                           (app_key_action_t)a->u.key_action.action);
+            // 诊断(2026-08-28 "双击清空还是不行"):进日志环,与 key: 的
+            // btn/ev/mv 时间线对齐,直接分辨"状态机没判出双击"还是"判出来了
+            // 但 Mac 侧没注入"——两侧各有一行日志,不必猜。
+            ESP_LOGW("key", "key.action=%s -> %s",
+                     a->u.key_action.action == APP_KEY_CLEAR ? "clear" : "enter",
+                     len ? "sent" : "encode-fail");
             send_event_line(buf, len);
             break;
         case APP_ACT_SEND_AGENT_ACTION:
@@ -247,6 +324,7 @@ static void app_task(void *arg)
     QueueHandle_t q = app_events_queue();
     uint64_t next_tick = esp_timer_get_time() / 1000;
     uint64_t now_ms = next_tick;
+    pm_activity_mark(now_ms, 255);   // 开机 = 活动,先跑 1 分钟常态功耗
 
     for (;;) {
         app_event_t ev;
@@ -277,7 +355,19 @@ static void app_task(void *arg)
             got = true;
             now_ms = esp_timer_get_time() / 1000;
             uint8_t n = 0;
+            // 活动判定必须在归约之后:射频腐蚀 ADC 会凭空投出 KEY_PRESS
+            // (2026-08-28 实测 31s 处一次),若"任意事件即活动",这些假事件
+            // 会让门禁永远回不到省电(实测 51s 静默被两次噪声打断)。真操作的
+            // 判据 = 归约产出了动作、或状态/屏幕/锁定态变了、或是链路事件;
+            // 被 mv 门禁吞掉的假按三者皆不满足 → 不算活动。
+            const uint8_t st_before = (uint8_t)s_state.state;
+            const bool scr_before = s_state.screen_on, lock_before = s_state.locked;
             app_state_reduce(&s_state, &ev, now_ms, acts, &n);
+            if (n > 0 || (uint8_t)s_state.state != st_before
+                || s_state.screen_on != scr_before || s_state.locked != lock_before
+                || pm_ev_is_link(ev.type)) {
+                pm_activity_mark(now_ms, ev.type);
+            }
             run_actions(acts, n);
             if (++n_batch >= APP_EVENT_BATCH_MAX) {
                 vTaskDelay(pdMS_TO_TICKS(2));
@@ -296,6 +386,7 @@ static void app_task(void *arg)
             run_actions(acts, n);
             tick_acted = (n > 0);      // TICK 产生动作(toast 过期/超时/息屏) → 需渲染
             next_tick = now_ms + APP_TICK_MS;
+            pm_idle_gate_check(now_ms);   // 满 1 分钟无事件才放手省电
         }
 
         // 渲染判定(S1 降频):有事件/动作、或距上次渲染 ≥1s(顶栏/电量/
@@ -394,12 +485,15 @@ void app_main(void)
         esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "ptt_cpu", &s_pm_cpu);
         esp_pm_lock_create(ESP_PM_APB_FREQ_MAX, 0, "ptt_apb", &s_pm_apb);
         esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "usb_ls", &s_pm_no_ls);
+        // 活动门禁锁(见 pm_activity_mark):空闲 1 分钟前一直持有
+        esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "act_cpu", &s_pm_act_cpu);
+        esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "act_ls", &s_pm_act_ls);
     } else {
         ESP_LOGW(TAG, "esp_pm_configure 失败 %s(无 PM,照常运行)", esp_err_to_name(e));
     }
     if (e == ESP_OK && s_pm_no_ls) {
         TaskHandle_t usb_h = xTaskCreateStatic(usb_presence_task, "usb_presence",
-                                               2048, NULL, 1,
+                                               sizeof(s_usb_presence_stack), NULL, 1,
                                                s_usb_presence_stack,
                                                &s_usb_presence_tcb);
         if (!usb_h) ESP_LOGW(TAG, "usb_presence 任务创建失败(USB 在位时通道可能失联)");
@@ -478,7 +572,8 @@ void app_main(void)
     //    (真机日志 app_evt: 重要事件投递超时 ×3)。
     // ⚠ 静态栈:堆紧张时动态 xTaskCreate 栈分配会失败(且历史上无返回值检查)
     //    → 事件无人消费 + 全机无反应。静态栈 .bss 免疫。
-    //    注意:xTaskCreate 栈参数单位是字节,StackType_t 是 4B,数组元素按 4B 折算。
+    //    注意:栈参数单位是字节,且 IDF RISC-V 的 StackType_t 是 uint8_t(1B),
+    //    故数组元素数 = 字节数(sizeof 写法自证,勿手写 /4,见 s_usb_presence_stack)。
     static StackType_t s_app_stack[5120 / sizeof(StackType_t)];
     static StaticTask_t s_app_tcb;
     if (!xTaskCreateStatic(app_task, "app_task", 5120, NULL, 4,

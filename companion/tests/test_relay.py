@@ -751,10 +751,10 @@ def test_key_action_mac_dry_run():
     with redirect_stdout(buf):
         key_action("clear", dry_run=True)
     out = buf.getvalue()
-    # clear 按前台 app 分分支(终端 → Ctrl+U; 非终端 → 全选+删除),
+    # clear 按前台 app 分分支(终端 → Ctrl+E+Ctrl+U; 非终端 → Cmd+A+Delete),
     # dry-run 只打印当前分支 —— 环境相关, 两分支任一即通过
     terminal = 'keystroke "u" using control down' in out
-    select_all = "key code 115" in out and "key code 119" in out
+    select_all = 'keystroke "a" using command down' in out
     check("Mac clear 打印(终端分支或全选)", terminal or select_all, True)
     check("Mac clear 打印删除", "key code 51" in out or terminal, True)
 

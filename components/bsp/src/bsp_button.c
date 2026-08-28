@@ -69,15 +69,19 @@ esp_err_t bsp_button_init(bsp_btn_cb_t cb, void *user) {
             .min          = BTN_MV[i][0],
             .max          = BTN_MV[i][1],
         };
-        // OK 长按 = 手动锁定息屏(0.5s 判定;与 UP 的 0.3s 区分,避免误触):
+        // OK 长按 = 手动锁定息屏(0.5s 判定;与 UP 的 0.4s 区分,避免误触):
         // 锁定态再长按 OK 解锁。启用后进入长按态松开的 OK 只报
         // BUTTON_LONG_PRESS_UP 而不报 SINGLE_CLICK —— 单击语义(HOME 进
         // READY / APPROVAL 批准)只覆盖 <0.5s 的短按,长按不再误触发。
-        // UP 键(音量加)长按 = 说话(PTT 已从 OK 移师 UP 键):0.3s 判定,
+        // UP 键(音量加)长按 = 说话(PTT 已从 OK 移师 UP 键):0.4s 判定,
         // 长按态松开上报 BUTTON_LONG_PRESS_UP → BSP_BTN_LONG_UP 带出"说话结束"。
         button_config_t bc = { 0 };
         if (i == BSP_BTN_OK) bc.long_press_time = 500;      // 0.5s 判定锁定(与 UP 区分)
-        if (i == BSP_BTN_UP) bc.long_press_time = 300;      // 0.3s 判定长按说话(用户指定)
+        // 0.4s 判定长按说话(2026-08-28 用户指定,由 300 上调)。取值就是双击
+        // 与说话在同一颗键上的分界线:用户自己的轻点实测 285~300ms,300ms 阈值
+        // 只剩 5~15ms 余量,一旦被判成长按 iot_button 就再也不报 CLICK/DOUBLE,
+        // 清空直接消失、那一下还变成录音。400ms 给到 100~115ms 余量。
+        if (i == BSP_BTN_UP) bc.long_press_time = 400;
         esp_err_t e = iot_button_new_adc_device(&bc, &ac, &s_btn[i]);
         if (e != ESP_OK || !s_btn[i]) {
             ESP_LOGE(TAG, "按键 %d 创建失败 (%s) —— 检查 GPIO%d 的 ADC 配置与分压电阻",

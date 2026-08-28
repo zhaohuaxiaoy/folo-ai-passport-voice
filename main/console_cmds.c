@@ -26,6 +26,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+bool app_pm_gate_state(uint32_t *idle_ms);   /* main.c:活动门禁状态 */
+
 static const char *TAG = "console";
 
 // ---- 输出出口(emit hook:REPL → stdout;SYS → 捕获缓冲)----
@@ -252,6 +254,13 @@ static int cmd_st(int argc, char **argv)
                 (unsigned)sts[i].usStackHighWaterMark);
         }
         free(sts);
+    }
+    out("--- pm ---\n");
+    {
+        uint32_t idle_ms = 0;
+        bool held = app_pm_gate_state(&idle_ms);
+        out("gate: %s  idle: %ums\n", held ? "normal(常态功耗)" : "saving(省电)",
+            (unsigned)idle_ms);
     }
     out("--- link ---\n");
     // 双通道常开:聚合链路 + 两通道独立状态。会话路由 = 最近连接/使用通道。

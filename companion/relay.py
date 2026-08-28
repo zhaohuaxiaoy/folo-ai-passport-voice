@@ -661,6 +661,10 @@ class Relay:
         if action not in ("enter", "clear"):
             print(f"[key] 未知按键动作 {action!r}, 忽略", file=sys.stderr)
             return
+        # 收到即打印(2026-08-28 "双击清空还是不行"):设备侧 ring 里有
+        # key.action=clear -> sent, 这里有 [key] clear, 两行一对齐就知道
+        # 丢在哪一段——设备没判出手势 / 事件没上行 / 注入失败。
+        print(f"[key] {action}")
         try:
             # 审查 P1-3: key 注入是阻塞同步调用(Windows SendInput 逐键
             # 序列化, 实测每键可达 ~2s), 直接跑在事件循环里会冻结

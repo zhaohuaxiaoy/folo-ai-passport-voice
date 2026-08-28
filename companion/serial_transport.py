@@ -174,6 +174,14 @@ class SerialTransport:
         卡住最多 2s —— 改异步轮询(is_alive + 短 sleep,2s 截止)。读线程在
         _stop 置位 + close 后,select 抛异常或 0.5s 超时必然退出。
         """
+        # 告别帧:设备端不靠 SOF 判主机关端口(线插着 SOF 一直有),不发 bye
+        # 就得等 10 帧写失败才收束会话,期间 link_channel 粘在 USB,设备把
+        # PTT 音频投进死通道并显示 "USB BUSY"。best-effort,失败不影响关闭。
+        if self._ser is not None and self._ser.is_open:
+            try:
+                await asyncio.wait_for(self._write_frame(FRAME_SYS, b"bye"), 0.5)
+            except Exception:
+                pass
         self._stop = True
         if self._ser is not None:
             try:

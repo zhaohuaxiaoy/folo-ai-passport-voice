@@ -36,14 +36,23 @@ static const char *TAG = "usb_link";
 #define USB_POLL_INTERVAL_MS  500     /* 拔线轮询周期(read_bytes 阻塞上限) */
 #define USB_TX_TIMEOUT_EVENT  pdMS_TO_TICKS(20)
 #define USB_TX_TIMEOUT_AUDIO  pdMS_TO_TICKS(100)
+/* SYS_RESP 最大 2048B @115200 ≈ 178ms 才写完,20ms 超时必部分写丢帧(实测
+ * !log 恒超时)。500ms 留余量;阻塞写期间读任务不读下行,仅 SYS 命令场景可接受。 */
+#define USB_TX_TIMEOUT_SYS    pdMS_TO_TICKS(500)
 #define USB_SYS_LINE_MAX      128     /* SYS 命令文本上限(帧协议契约) */
 #define USB_RESP_MAX          2048    /* SYS_RESP 载荷上限 */
+/* 主机侧关掉端口(线仍插着)不丢 SOF,只表现为"没人读"→ 写超时。连续这么多帧
+ * 失败即判会话死亡,否则 link_channel 永远粘在 USB,PTT 音频/事件全投进死通道
+ * → UI 恒显 "USB BUSY - dropping frames"(2026-08-28 实测)。音频 100ms/帧,
+ * 10 帧 ≈ 1s 无人读,足以区分主机短暂卡顿与真的走了。主机重发 ping 即恢复。 */
+#define USB_TX_FAIL_LIMIT     10
 
 /* USB 驱动接入后保持安装(卸载 = 可能阻断读任务并造成悬空 UB)。接入前的
  * 待命期不占驱动/缓冲/读任务任何内存(仅 usb_wait 任务 2KB 栈)。 */
 static volatile bool s_running;            /* 已接入(驱动已装)置 true;幂等判定 */
 static volatile bool s_session_up;         /* 收到 ping → true;跨任务读写,单核无撕裂,volatile 显式化 */
 static bool s_connected;                   /* is_connected 上次采样 */
+static uint8_t s_tx_fail_run;               /* 连续发送失败计数(成功即归零) */
 static SemaphoreHandle_t s_tx_mux;         /* 发送互斥:串行化三发送方对 s_tx_buf 的组帧+写 */
 static SemaphoreHandle_t s_read_exit_sem;  /* shutdown 等待读任务真正退出 */
 static usb_frame_ctx_t s_fr_ctx;           /* 帧解码状态机(dir 初始化见 usb_link_init) */
@@ -168,6 +177,19 @@ bool usb_link_session_active(void)
     return s_session_up;
 }
 
+/* 会话收束的唯一出口:拔线(SOF 丢失)、主机 bye、连续发送失败三条路径共用。
+ * 幂等;非 ISR 上下文,断连事件走 important 投递(队列满则等 100ms 不丢,
+ * 否则 mode.c 的 link_channel 收不到回落信号)。 */
+static void session_down(const char *why)
+{
+    s_tx_fail_run = 0;
+    if (!s_session_up) return;
+    s_session_up = false;
+    ESP_LOGW(TAG, "USB 会话收束: %s", why);
+    app_event_t d = { .type = APP_EV_USB_DISCONNECTED };
+    app_event_post_important(&d, 100);
+}
+
 // ---- 发送 ----
 
 static int usb_send_frame(uint8_t type, const uint8_t *payload, size_t len,
@@ -188,7 +210,15 @@ static int usb_send_frame(uint8_t type, const uint8_t *payload, size_t len,
         written = usb_serial_jtag_write_bytes(s_tx_buf, n, timeout_ticks);
     }
     xSemaphoreGive(s_tx_mux);
-    return (n == 0 || written != (int)n) ? -1 : 0;
+    if (n > 0 && written == (int)n) {
+        s_tx_fail_run = 0;
+        return 0;
+    }
+    // 组帧失败(n==0)是本地 bug,不该算主机失联;只对"写不全"记账
+    if (n > 0 && ++s_tx_fail_run >= USB_TX_FAIL_LIMIT) {
+        session_down("连续发送失败(主机不读)");
+    }
+    return -1;
 }
 
 int usb_link_send_event(const char *line, size_t len)
@@ -208,7 +238,7 @@ static void send_sys_resp(const char *text, size_t len)
 {
     if (len > USB_RESP_MAX) len = USB_RESP_MAX;   // 超限截断(帧协议契约)
     usb_send_frame(USB_FRAME_SYS_RESP, (const uint8_t *)text, len,
-                   USB_TX_TIMEOUT_EVENT);
+                   USB_TX_TIMEOUT_SYS);
 }
 
 static void send_device_hello(void)
@@ -226,6 +256,7 @@ static void handle_sys(const char *line, size_t len)
 
     if (strcmp(s_sys_cmd, "ping") == 0) {
         // 握手:会话 up + 断连恢复事件 + pong + hello
+        s_tx_fail_run = 0;
         if (!s_session_up) {
             s_session_up = true;
             app_event_t c = { .type = APP_EV_USB_CONNECTED };
@@ -233,6 +264,13 @@ static void handle_sys(const char *line, size_t len)
         }
         send_sys_resp("pong", 4);
         send_device_hello();
+        return;
+    }
+    if (strcmp(s_sys_cmd, "bye") == 0) {
+        // 主机主动告别(relay 退出):先答复再收束,免得 session_down 之后
+        // usb_send_frame 因会话已 down 直接拒发,PC 侧看不到确认。
+        send_sys_resp("bye", 3);
+        session_down("主机 bye");
         return;
     }
     // 其余命令走 console 命令面(与 REPL 同一批 cmd_*,输出捕获进 SYS_RESP)
@@ -311,15 +349,7 @@ static void usb_read_task(void *arg)
                 s_connected = c;
                 if (!c) {
                     // 拔线/主机休眠:会话 down + 断连事件(link_up 收束)
-                    ESP_LOGW(TAG, "USB 主机已断开");
-                    if (s_session_up) {
-                        s_session_up = false;
-                        app_event_t d = { .type = APP_EV_USB_DISCONNECTED };
-                        // 收束关键事件:important 投递,队列满时不丢(性能轮
-                        // 队列 16→8 后更关键;与 mode.c 断连投递语义对齐)。
-                        // 读任务上下文,非 ISR,阻塞 ≤100ms 安全。
-                        app_event_post_important(&d, 100);
-                    }
+                    session_down("SOF 丢失(拔线/主机休眠)");
                 }
             }
         }
@@ -376,6 +406,7 @@ esp_err_t usb_link_init(void)
     uint8_t drain[64];
     while (usb_serial_jtag_read_bytes(drain, sizeof(drain), 0) > 0) { }
     s_session_up = false;
+    s_tx_fail_run = 0;
     s_connected = usb_serial_jtag_is_connected();
 
     // 日志隔离已由 usb_link_log_early() 提前安装(esp_log → RAM 环),此处

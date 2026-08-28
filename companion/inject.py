@@ -65,6 +65,50 @@ def _type_unicode(text):
         CGEventPost(kCGHIDEventTap, CGEventCreateKeyboardEvent(None, 0, False))
 
 
+# clear/enter 的按键序列用"机制中立"的形式描述: (CGEvent keycode, 修饰位,
+# 等价 osascript 片段)。两条通道同一份定义, 不会各写一遍写歪。
+_CG_CMD = 1 << 20    # kCGEventFlagMaskCommand
+_CG_CTRL = 1 << 18   # kCGEventFlagMaskControl
+
+_K_RETURN = (36, 0, "keystroke return")
+_K_DELETE = (51, 0, "key code 51")
+_K_CMD_A = (0, _CG_CMD, 'keystroke "a" using command down')
+_K_CTRL_E = (14, _CG_CTRL, 'keystroke "e" using control down')
+_K_CTRL_U = (32, _CG_CTRL, 'keystroke "u" using control down')
+
+
+def _cg_keys(keys):
+    """CGEvent 发一串按键(keycode + 修饰位), 失败抛 InjectError 让调用方兜底。
+
+    为什么 clear 也要走这条通道(2026-08-28 取证): 转写注入走的是 CGEvent
+    (_type_unicode)并且实测有效 —— 日志里成排的"[inject] 已粘贴 N 字符"就是
+    它;而 clear 原来只走 osascript(System Events keystroke), 真机日志显示
+    osascript **exit 0 但输入框毫无变化**, 失败在日志上完全看不出来。同一台机
+    器上一条通道有效、另一条静默无效, 就没有理由让 clear 继续用那条弱的。
+    osascript 保留为兜底(缺 Quartz 时仍可用)。
+    """
+    try:
+        from Quartz import (CGEventCreateKeyboardEvent, CGEventPost,
+                            CGEventSetFlags, kCGHIDEventTap)
+    except ImportError as e:
+        raise InjectError(f"缺少 pyobjc-framework-Quartz ({e})") from e
+    try:
+        from ApplicationServices import AXIsProcessTrusted
+    except ImportError:
+        pass
+    else:
+        if not AXIsProcessTrusted():
+            # CGEventPost 无授权时静默丢事件(同 _type_unicode 的坑)
+            raise InjectError("辅助功能未授权, CGEvent 按键被系统拦截。" + GUIDE)
+    for code, flags in keys:
+        for is_down in (True, False):
+            ev = CGEventCreateKeyboardEvent(None, code, is_down)
+            if flags:
+                CGEventSetFlags(ev, flags)
+            CGEventPost(kCGHIDEventTap, ev)
+        time.sleep(0.02)   # 给目标应用处理"全选"再收"删除"的间隙
+
+
 def _clipboard_snapshot():
     """读取当前剪贴板 → (has_text, text)。非文本(图片/文件)返回 (False, None)。"""
     r = subprocess.run(["osascript", "-e", "clipboard info"],
@@ -173,25 +217,59 @@ _TERMINAL_APPS = {
 }
 
 
-def _frontmost_is_terminal():
-    """前台 app 是否为终端类。osascript 失败/超时按"非终端"降级(不改变
-    注入路径, 不恶化现状)。"""
+def _frontmost_ident():
+    """前台 app 的 bundle id(取不到则退到进程名); 都取不到返回 None。"""
     queries = [
-        ('tell application "System Events" to get bundle identifier of '
-         'first application process whose frontmost is true', "id"),
-        ('tell application "System Events" to get name of '
-         'first application process whose frontmost is true', "name"),
+        'tell application "System Events" to get bundle identifier of '
+        'first application process whose frontmost is true',
+        'tell application "System Events" to get name of '
+        'first application process whose frontmost is true',
     ]
-    for query, _attr in queries:
+    for query in queries:
         try:
             p = subprocess.run(["osascript", "-e", query],
                                capture_output=True, text=True, timeout=3)
         except Exception:
-            return False
+            return None
         if p.returncode == 0 and p.stdout.strip():
-            val = p.stdout.strip()
-            return val in _TERMINAL_APPS or val in _TERMINAL_APPS.values()
-    return False
+            return p.stdout.strip()
+    return None
+
+
+def _frontmost_is_terminal():
+    """前台 app 是否为终端类。探测失败按"非终端"降级(不改变注入路径)。"""
+    val = _frontmost_ident()
+    if val is None:
+        return False
+    return val in _TERMINAL_APPS or val in _TERMINAL_APPS.values()
+
+
+# Cmd+A + Delete 是"清空输入框"在 macOS 的唯一正解, 但它在**非输入框**里可能是
+# 破坏性的(Mail 里 Cmd+A + Delete = 删掉当前邮箱视图里的全部邮件)。所以清空前
+# 先问一句"现在聚焦的是什么元素", 只挡列表类元素; AX 查询失败(权限/超时/
+# 应用不实现)则放行——宁可少一道保险, 也不能让功能整体失灵。
+# 2026-08-28 改为黑名单: 原来是白名单(只允许 AXTextField/AXTextArea/…),
+# 但真机上 role 千奇百怪(Electron/网页里常见 AXGroup/AXUnknown, 查询失败还会是
+# None), 白名单会把"其实是输入框"的场合整体挡死, 而这种挡死在日志里只留一行异常,
+# 用户看到的就是"功能又不好用了"。真正需要拦的只有列表类元素 —— Cmd+A + Delete
+# 在邮件列表/文件列表里删的是数据。其余一律放行。
+_DANGEROUS_AX_ROLES = ("AXTable", "AXOutline", "AXList", "AXRow", "AXCell",
+                       "AXBrowser", "AXCollection")
+
+
+def _focused_ax_role():
+    """当前聚焦元素的 AX role; 拿不到返回 None(表示"不知道", 不阻断)。"""
+    script = ('tell application "System Events" to get role of '
+              '(value of attribute "AXFocusedUIElement" of '
+              '(first application process whose frontmost is true))')
+    try:
+        p = subprocess.run(["osascript", "-e", script],
+                           capture_output=True, text=True, timeout=3)
+    except Exception:
+        return None
+    if p.returncode != 0:
+        return None
+    return p.stdout.strip() or None
 
 
 def key_action(action, dry_run=False):
@@ -199,10 +277,13 @@ def key_action(action, dry_run=False):
 
     action: "enter"(回车提交)或 "clear"(清空输入框)。
     clear 按前台 app 分路径:
-      - 终端类(Terminal/iTerm2/Warp/…): Ctrl+U 删到行首 —— TUI 里
-        Shift+End 全选会被终端拦截, 只用 Ctrl+U 才能整行清空;
-      - 非终端: Home+Shift+End 全选 + 删除(Chromium 里 Ctrl+U=查看源码, 避开)。
-    与 paste_text 同一 osascript/System Events 通道, 同一授权要求。
+      - 终端类(Terminal/iTerm2/Warp/…): Ctrl+E 到行尾 + Ctrl+U 删到行首
+        (TUI 里 Cmd+A 是"选中全部输出", 不是选中输入行);
+      - 非终端: Cmd+A 全选 + Delete(Chromium 里 Ctrl+U=查看源码, 避开;
+        Home/Shift+End 在 macOS 只滚动不移光标, 见下方实测注释)。
+        下手前先看聚焦元素的 AX role, 非文本元素直接报错不动手。
+    通道: 优先 CGEvent(与 paste_text 的 unicode 路径同一条, 实测有效),
+    缺 Quartz 时回退 osascript/System Events。两条都需要「辅助功能」授权。
     失败抛 InjectError。
     """
     if action not in ("enter", "clear"):
@@ -214,31 +295,58 @@ def key_action(action, dry_run=False):
     if shutil.which("osascript") is None:
         raise InjectError("缺少系统工具 osascript(仅 macOS 自带)")
 
+    need_text_focus = False   # clear 的非终端分支才需要"聚焦在输入框"这道保险
+    ident = None
+    branch = "enter回车"
     if action == "enter":
-        cmds = [
-            ["osascript", "-e",
-             'tell application "System Events" to keystroke return'],
-        ]
-    else:   # clear: 终端走 Ctrl+U(删到行首); 非终端 Home+Shift+End 全选 + 删除
-        if _frontmost_is_terminal():
-            cmds = [
-                ["osascript", "-e",
-                 'tell application "System Events" to keystroke "u" using control down'],
-            ]
+        keys = [_K_RETURN]
+    else:   # clear
+        ident = _frontmost_ident()
+        is_term = ident is not None and (ident in _TERMINAL_APPS
+                                         or ident in _TERMINAL_APPS.values())
+        if is_term:
+            # 终端: Ctrl+E 到行尾再 Ctrl+U 删到行首 —— readline/zle 里 Ctrl+U 只
+            # 删光标之前, 光标停在中间时尾巴会留下; 先到行尾才是"整行清空"。
+            keys = [_K_CTRL_E, _K_CTRL_U]
+            branch = "终端Ctrl+E/U"
         else:
-            cmds = [
-                ["osascript", "-e",
-                 'tell application "System Events" to key code 115'],       # 115 = Home
-                ["osascript", "-e",
-                 'tell application "System Events" to key code 119 using {shift down}'],  # Shift+End
-                ["osascript", "-e",
-                 'tell application "System Events" to key code 51'],        # 51 = delete
-            ]
+            # 2026-08-28 实测修正: 原来用 Home + Shift+End + Delete(Windows 习惯),
+            # 在 macOS 上是错的 —— key code 115(Home)映射到 scrollToBeginningOf-
+            # Document:, 只滚动视图, **不移动插入点**。刚粘完文本时光标本来就在末尾,
+            # Shift+End 于是什么都没选中, Delete 退化成退格删一个字符。TextEdit 实测:
+            # "AAAABBBBCCCC" → "AAAABBBBCCC"。Cmd+A(全选聚焦字段)+ Delete 才是
+            # macOS 的正解, 同一实测下清空干净。
+            need_text_focus = True   # 真正下手前先验聚焦元素(见 _DANGEROUS_AX_ROLES)
+            keys = [_K_CMD_A, _K_DELETE]
+            branch = "Cmd+A/Delete"
+    cmds = [["osascript", "-e", "tell application \"System Events\" to " + osa]
+            for _code, _flags, osa in keys]
     if dry_run:
         print(f"# 按键动作 {action!r}:")
         for c in cmds:
             print("$", " ".join(c))
         return
+
+    # 避险闸门只在真正注入时生效(dry-run 只是打印, 没有破坏性)
+    role = None
+    if need_text_focus:
+        role = _focused_ax_role()
+        if role in _DANGEROUS_AX_ROLES:
+            raise InjectError(
+                f"当前聚焦的是列表类元素(AX role={role}), 跳过清空 —— "
+                "Cmd+A + Delete 在邮件/文件列表里会删数据。"
+                "请先点进要清空的输入框再双击音量+。")
+
+    # 诊断(2026-08-28 "还是不管用"):设备侧证明手势判对了、relay 侧证明事件到了、
+    # osascript 还 exit 0 —— 唯一没有记录的就是"这一下打给了谁"。前台 app / 分支 /
+    # 聚焦元素三样进日志, 下一次复现不必再猜。
+    print(f"[key] {action}: 前台={ident!r} 分支={branch} 焦点role={role!r}")
+
+    try:
+        _cg_keys([(code, flags) for code, flags, _osa in keys])
+        return
+    except InjectError as e:
+        print(f"[key] CGEvent 通道不可用, 回退 osascript: {e}", file=sys.stderr)
 
     for c in cmds:
         p = subprocess.run(c, capture_output=True, text=True)
