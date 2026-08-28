@@ -84,9 +84,9 @@ def test_channel_cfg_sync():
     root.withdraw()
     app = FREApp(root, dry_run=True, no_tray=True)
     assert app.cfg.get("channel", "ble") == app.channel
-    app._channel_var.set("wifi")
+    app._channel_var.set("usb")
     app.on_channel_change()
-    assert app.cfg["channel"] == "wifi", "on_channel_change 未同步内存 cfg"
+    assert app.cfg["channel"] == "usb", "on_channel_change 未同步内存 cfg"
     app._channel_var.set("usb")
     app.on_discover_next()
     assert app.cfg["channel"] == "usb", "on_discover_next 未同步内存 cfg"

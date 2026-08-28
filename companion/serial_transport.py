@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """USB 有线通道传输层(SerialTransport): 与设备 USB-Serial-JTAG 串口直连。
 
-与 relay.py 的 BleakTransport / WsTransport 同 5 方法契约(传输层注入式,
+与 relay.py 的 BleakTransport 同 5 方法契约(传输层注入式,
 relay 核心零改动): scan_for_device / connect / write_gatt_char / start_notify /
 disconnect,另加 send_syscmd(line) -> str 扩展(USB 模式无控制台,命令经
 SYS 帧下行,响应 SYS_RESP 上行)。
@@ -11,7 +11,7 @@ SYS 帧下行,响应 SYS_RESP 上行)。
   CTRL/SYS PC→设备,SYS_RESP 设备→PC(请求-响应有序配对)。
 设备侧在 USB 模式下独占串口(esp_log 已重定向 RAM 环),数据流无串扰。
 
-与 BLE/WiFi 通道的差异点:
+与 BLE 通道的差异点:
   - connect(address): address = 串口路径(scan_for_device 返回或 config
     usb_port 直给);握手 = 发 SYS "ping" → 设备回 pong + device.hello;
   - 读线程:select(0.5s 超时)等可读 → read(4096) → FrameDecoder 逐帧;
@@ -68,7 +68,7 @@ def _serial_key(port):
 
 
 class SerialTransport:
-    """USB 串口传输层(单设备;v1 不自动重连,对齐 BLE/WiFi 语义)。
+    """USB 串口传输层(单设备;v1 不自动重连,对齐 BLE 语义)。
 
     port: 直连串口路径(relay 从 config usb_port 读入);None = 自动扫描。
     """
@@ -97,7 +97,7 @@ class SerialTransport:
         # (方向感知契约,审查 P1)。
         self._dec = FrameDecoder(dir=DIR_UP)
 
-    # -- 5 方法契约(对齐 BleakTransport/WsTransport) --
+    # -- 5 方法契约(对齐 BleakTransport) --
 
     async def scan_for_device(self, name, timeout):
         """枚举 USB 串口匹配 ESP32-C3;返回串口路径(端口地址)或 None。
@@ -322,7 +322,7 @@ class SerialTransport:
             pass    # 回调异常不扩散进读线程(与 bleak 回调语义一致)
 
     def _notify_disconnect(self):
-        """事件循环线程:断连回调(对齐 WsTransport:_on_disconnect() 直调)。"""
+        """事件循环线程:断连回调(对齐 BleakTransport 直调语义)。"""
         if self._on_disconnect is None:
             return
         try:

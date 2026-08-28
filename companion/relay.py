@@ -7,10 +7,13 @@
     0xA2B2 EVENT  NOTIFY            设备→Mac: JSON 行(device.hello /
                                     voice.start / voice.end / key.action /
                                     agent.action / status)
-    0xA2B3 AUDIO  NOTIFY            设备→Mac: 3200B 裸 PCM 帧(100ms @16k/16bit)
+    0xA2B3 AUDIO  NOTIFY            设备→Mac: 100ms 音频块
 ATT 分片: 任何超过 MTU-3 的载荷按 MTU-3 chunk 逐片 notify(ATT 载荷上限 =
-MTU-3), EVENT 行以 '\\n' 结尾, AUDIO 帧正好 3200B。本程序负责重组
-(reassemble_audio / reassemble_event 纯函数, 独立可测)。
+MTU-3), EVENT 行以 '\\n' 结尾。音频通道(ble_audio.c)每片前带 2B 帧头
+[块序号][片序号|0x80 LAST]: BLE 压缩路径每块 = 2B 帧头 + 804B IMA ADPCM
+block(100ms, 4:1), 块重组后解回 3200B PCM 帧; USB 路径为裸 3200B
+PCM 块(无帧头)。本程序负责重组(reassemble_adpcm / reassemble_audio /
+reassemble_event 纯函数, 独立可测)。
 
 流程: 扫描 "AI Passport" → 连接 → 订阅 EVENT+AUDIO → voice.start 开 ASR 流
 → 帧喂火山(中间结果实时预览: GUI 模式挂 on_candidate 走悬浮窗,
@@ -32,12 +35,10 @@ voice 窗口掉帧统计(理论帧数 vs 实收帧数, 与设备 status 帧 drop
 
 通道与注入后端由 companion/config.local.json 的 channel 决定:
   "ble"(缺省)  → BLE 直连(设备广播 "AI Passport");注入 = 平台默认后端
-  "wifi"       → 本机起 WS server(端口 ws_port), 设备 STA 主动连
-                  (无蓝牙 Windows 电脑);注入 = Windows 剪贴板后端
   "usb"        → USB 有线直连(设备 mode usb 后经 USB 线连电脑;端口 =
                  自动扫描或 config usb_port 指定);注入 = 平台默认后端。
                   USB 模式无控制台, 经 relay stdin `!<命令>` 下行 SYS
-                  命令面配网/查状态(mode/wifi set/ws set/log/st 等)。
+                  命令面查状态/切换(mode/log/st 等)。
 
 注入路径由 config.local.json 的 inject_mode 决定(缺省 "auto"):
   "unicode"   键盘事件逐字符注入(SendInput/CGEvent), 不碰系统剪贴板
@@ -48,8 +49,13 @@ voice 窗口掉帧统计(理论帧数 vs 实收帧数, 与设备 status 帧 drop
 import argparse
 import asyncio
 import json
+import struct
 import sys
 import time
+
+from adpcm import (  # noqa: E402  (同目录模块;BLE 压缩块重组/解码用)
+    ADPCM_BLOCK_BYTES, ADPCM_BLOCK_SAMPLES, decode_block,
+)
 
 SERVICE_UUID = "0000A2B0-0000-1000-8000-00805F9B34FB"
 CTRL_UUID = "0000A2B1-0000-1000-8000-00805F9B34FB"
@@ -104,6 +110,93 @@ def reassemble_audio(buf, chunk, max_buf=REASSEMBLE_AUDIO_MAX):
     if len(buf) > max_buf:
         buf.clear()   # 失步: 丢弃, 下一 chunk 重新对齐
     return buf, frames
+
+
+# BLE 音频分片帧头(与固件 main/ble_audio.c 逐字节对齐):
+#   [0] = 块序号(每帧 ++, mod 256)     —— 迟到/重复块检测
+#   [1] = 片序号 0..127 | 0x80 LAST    —— 片级去重 + 块终结
+# 帧头随 notify 发送,USB 裸 PCM 路径无帧头(reassemble_audio 直通)。
+ADPCM_CHUNK_HDR = 2
+ADPCM_CHUNK_LAST = 0x80
+ADPCM_CHUNK_IDX_MASK = 0x7F
+
+
+def _pack_pcm(samples):
+    """1600 样本 → 3200B 16kHz PCM 帧(与 PCM 路径帧格式一致,ASR 侧同分发)。"""
+    return struct.pack("<1600h", *samples)
+
+
+def _finalize_adpcm_block(state, pad):
+    """终结当前块: 组装出的 payload 校验 → 解码为 3200B PCM 帧。
+
+    len==804 全量解码; len<4 碎片(miss++ 丢弃); len>804 协议失步
+    (清空全部重组状态等新 seq 重新对齐); 中间长度(is_last 终结但丢片)
+    同样 miss++ 丢弃 —— 块自带 predictor/index 头,丢一块只损失该 100ms。
+    pad=True(新 seq 部分终结): 已收前缀补零到 804 解出静音帧,保 100ms
+    节拍(ASR 不因缺块断流),仍计入 miss。
+    """
+    payload = bytes(state["buf"])
+    seq = state["seq"]
+    state["seq"] = None
+    state["last_seq"] = seq      # 终结后该 seq 的迟到片一律丢弃
+    state["buf"] = bytearray()
+    state["last_idx"] = -1
+    if len(payload) == ADPCM_BLOCK_BYTES:
+        samples = decode_block(payload)
+        if len(samples) == ADPCM_BLOCK_SAMPLES:
+            return [_pack_pcm(samples)]
+        state["miss"] += 1
+        return []
+    state["miss"] += 1
+    if len(payload) > ADPCM_BLOCK_BYTES:        # 失步: 不可能的正常块,重对齐
+        state["last_seq"] = None
+        return []
+    if pad and len(payload) >= 4:
+        payload += b"\x00" * (ADPCM_BLOCK_BYTES - len(payload))
+        samples = decode_block(payload)
+        if len(samples) == ADPCM_BLOCK_SAMPLES:
+            return [_pack_pcm(samples)]
+    return []
+
+
+def reassemble_adpcm(state, chunk):
+    """BLE IMA ADPCM 块重组: (块状态 dict, 一段带帧头 notify 载荷) -> (状态, 帧列表)。
+
+    输入 chunk 是 AUDIO notify 载荷(2B 帧头 + 块数据,固件每块调用一次
+    notify_audio,块按 MTU-3-2 分片)。状态机:
+      - 同 seq 按片序号追加,重复/乱序片(idx ≤ 已收最大)丢弃
+      - is_last 片 → 终结当前块(校验/解码见 _finalize_adpcm_block)
+      - 新 seq 且前块未终结 → 前块补零终结(静音帧 + miss),开新块
+      - seq == 已终结块的 seq(迟到片) → 丢弃
+    帧头不足 2B 的碎片记 miss 丢弃。state 初始
+    {"seq": None, "buf": bytearray(), "last_idx": -1, "last_seq": None,
+    "miss": 0}。
+    """
+    frames = []
+    if len(chunk) < ADPCM_CHUNK_HDR:
+        state["miss"] += 1
+        return state, frames
+    seq = chunk[0]
+    idx = chunk[1] & ADPCM_CHUNK_IDX_MASK
+    last = bool(chunk[1] & ADPCM_CHUNK_LAST)
+    data = chunk[ADPCM_CHUNK_HDR:]
+    if seq == state["seq"]:
+        if idx <= state["last_idx"]:
+            return state, frames               # 重复/乱序片: 丢
+        state["buf"].extend(data)
+        state["last_idx"] = idx
+    elif seq == state["last_seq"]:
+        return state, frames                   # 已终结块的迟到片: 丢
+    else:
+        # 新块: 前块未终结(缺 is_last) → 补零终结保节拍,再开新块
+        if state["seq"] is not None and state["buf"]:
+            frames += _finalize_adpcm_block(state, pad=True)
+        state["seq"] = seq
+        state["buf"] = bytearray(data)
+        state["last_idx"] = idx
+    if last:
+        frames += _finalize_adpcm_block(state, pad=False)
+    return state, frames
 
 
 def reassemble_event(buf, chunk, max_buf=REASSEMBLE_EVENT_MAX):
@@ -344,9 +437,7 @@ class Relay:
 
     _STDIN_HELP = (
         "USB 模式无控制台, 经此下行 SYS 命令面(命令集与设备 console 一致):\n"
-        "  !mode ble|wifi|usb    切换通道(ble/wifi 生效; usb 为当前)\n"
-        "  !wifi set <ssid> <pass>   配置 WiFi(密码明文经本地 USB, 不落盘)\n"
-        "  !ws set auto          自动发现本机 WS server\n"
+        "  !mode ble|usb        切换通道(ble 生效; usb 为当前)\n"
         "  !log                  取回设备日志环(esp_log 已重定向 RAM 环)\n"
         "  !st                   会话状态\n"
         "  !reboot / !factory    重启 / 恢复出厂\n"
@@ -404,14 +495,14 @@ class Relay:
     async def run_syscmd(self, line, timeout=10.0):
         """GUI 诊断页命令桥: 执行 SYS 命令, 返回设备响应文本。
 
-        仅 USB 通道有命令面(SerialTransport.send_syscmd); BLE/WiFi 通道
+        仅 USB 通道有命令面(SerialTransport.send_syscmd); BLE 通道
         抛 RelayError 提示。并发安全: SerialTransport 内部按 future 路由
         SYS_RESP, 多调用方(诊断页 + stdin 循环)可同时发起。GUI 侧用
         run_coroutine_threadsafe 从 tk 线程调用。
         """
         if self._syscmd is None:
             raise RelayError(
-                "SYS 命令面仅 USB 通道支持(当前为 BLE/WiFi 通道); "
+                "SYS 命令面仅 USB 通道支持(当前为 BLE 通道); "
                 "完整诊断需以 USB 连接设备(mode usb)")
         return await asyncio.wait_for(self._syscmd(line), timeout=timeout)
 
@@ -448,12 +539,31 @@ class Relay:
         await asyncio.gather(self._drain_audio(), self._drain_events())
 
     async def _drain_audio(self):
-        audio_buf = bytearray()
+        # 按会话格式分流重组: ima_adpcm(BLE, 2B 帧头 + 804B block)经
+        # reassemble_adpcm 解回 3200B PCM 帧; pcm(USB 裸块)按 3200B
+        # 字节对齐。会话切换时重置重组状态, 防跨会话串流(设备在 voice.end
+        # 前排空, 干净边界下状态本为空, 重置仅兜底)。
+        pcm_buf = bytearray()
+        adpcm_state = None
+        last_fmt = None
         while not self._stop.is_set():
             kind, chunk = await self._audio_q.get()
             if kind == "stop":
                 break
-            audio_buf, frames = reassemble_audio(audio_buf, chunk)
+            s = self._session
+            fmt = s.audio_format if s is not None else "pcm"
+            if fmt != last_fmt:
+                if fmt == "ima_adpcm":
+                    adpcm_state = {"seq": None, "buf": bytearray(),
+                                   "last_idx": -1, "last_seq": None,
+                                   "miss": 0}
+                else:
+                    pcm_buf.clear()
+                last_fmt = fmt
+            if fmt == "ima_adpcm":
+                adpcm_state, frames = reassemble_adpcm(adpcm_state, chunk)
+            else:
+                pcm_buf, frames = reassemble_audio(pcm_buf, chunk)
             for fr in frames:
                 await self._on_audio_frame(fr)
 
@@ -523,10 +633,21 @@ class Relay:
             s = self._session
             self._session = None
             self._start_closing(s)         # 旧会话后台收尾 + 进收尾槽(不阻塞)
-        print("[voice] start")
+        # 音频格式(固件 voice.start 上报): "ima_adpcm" BLE 压缩块(2B 帧头 +
+        # 804B block, relay 解回 PCM) / "pcm" 裸 3200B 块(USB)。
+        # 未知格式按 pcm 兜底(换编解码器如退 ulaw 不需要改协议)。
+        afmt = ev.get("audio") or "pcm"
+        if afmt not in ("pcm", "ima_adpcm"):
+            print(f"[voice] 未知音频格式 {afmt!r}, 按 pcm 处理", file=sys.stderr)
+            afmt = "pcm"
+        asr = self._asr_factory()
+        # 压缩块在重组层已解回 16kHz PCM → ASR 永远收 3200B PCM 帧
+        if isinstance(getattr(asr, "cfg", None), dict):
+            asr.cfg["audio_format"] = "pcm"
+        print(f"[voice] start (audio={afmt})")
         if self._on_phase:
             self._on_phase("session_start")
-        self._session = _VoiceSession(self, self._asr_factory())
+        self._session = _VoiceSession(self, asr, afmt)
         await self._session.begin()        # 立即返回(ASR 连接后台化)
 
     async def _on_key_action(self, action):
@@ -666,7 +787,7 @@ class Relay:
     async def _sync_time(self):
         """下行 wall-clock 校时(UTC epoch 秒)。
 
-        transport 无关:BLE/WiFi 走 time.set 协议行(CTRL 通道),USB 走
+        transport 无关:BLE 走 time.set 协议行(CTRL 通道),USB 走
         SYS 命令面 `time set <epoch>`(console 命令表)。失败静默(日志),
         下周期重试 —— 校时是尽力而为,不打断语音/控制主路径。
         """
@@ -718,12 +839,13 @@ class _VoiceSession:
       挂到它——收尾完成只补 final_text/打印。
     """
 
-    def __init__(self, relay, asr):
+    def __init__(self, relay, asr, audio_format="pcm"):
         self.relay = relay
         self.asr = asr
+        self.audio_format = audio_format    # "pcm"(裸 3200B 块) / "ima_adpcm"(重组解码后同帧)
         self.start_mono = time.monotonic()
         self.end_mono = None
-        self.rx_frames = 0
+        self.rx_frames = 0                  # 帧数(100ms 节拍, 两种格式一致)
         self.final_text = ""
         self._connected = asyncio.Event()   # ASR 连接就绪
         self._conn_error = None             # 连接失败异常(非 None 后 feed 抛错)
@@ -803,6 +925,7 @@ class _VoiceSession:
         if self._conn_error is not None:
             raise self._conn_error
         self.rx_frames += 1
+        # 压缩块已在重组层解回 3200B PCM 帧 → 与 pcm 路径同一分发
         await self.asr.send_frame(frame)
 
     async def abort(self):
@@ -899,13 +1022,16 @@ class _VoiceSession:
         self.relay.print_stats(stats)
 
     def _stats(self):
-        """AC3 掉帧统计: 会话时长推理论帧数 vs 实收帧数。
+        """掉帧统计: 会话时长推理论帧数 vs 实收帧数。
 
-        理论帧数按 floor 计(固件 100ms 定时发帧, 会话起止帧数为下取整
-        语义), missed 保底 0(防止 round 高估产生负掉帧)。
+        理论帧数按 floor 计(固件定时发帧, 会话起止帧数为下取整语义),
+        missed 保底 0(防止 round 高估产生负掉帧)。帧率: 100ms/帧(10fps),
+        pcm 块与 ima_adpcm 块同节拍——与设备 status 帧的丢帧计数对账
+        口径一致。
         """
         dur = self.end_mono - self.start_mono
-        theory = max(0, int(dur / AUDIO_FRAME_SEC))
+        frame_sec = AUDIO_FRAME_SEC
+        theory = max(0, int(dur / frame_sec))
         missed = max(0, theory - self.rx_frames)
         pct = (missed / theory * 100.0) if theory else 0.0
         return {"duration": dur, "theory_frames": theory,
@@ -917,28 +1043,21 @@ class _VoiceSession:
 # ---- CLI ----
 
 def _build_transport(cfg):
-    """按 config.local.json 的 channel 选传输层(Windows 移植 P4+):
+    """按 config.local.json 的 channel 选传输层:
 
     - "ble"(缺省): bleak BLE 直连, macOS/Windows 蓝牙均可;
-    - "wifi": 本机起 WS server(mdns_pub 发布 _ai-passport._tcp), 设备
-      STA 主动连(无蓝牙 Windows 电脑); 端口/超时取 config ws_port 与
-      ws_connect_timeout;
     - "usb": USB 有线直连(设备 mode usb), SerialTransport 扫描
       VID 0x303A/PID 0x1001; config usb_port 非空 = 直连端口(不扫描)。
     """
     channel = cfg.get("channel", "ble")
     if channel == "ble":
         return BleakTransport()
-    if channel == "wifi":
-        from ws_transport import WsTransport   # 函数内懒加载, 避免顶层循环依赖
-        return WsTransport(port=int(cfg.get("ws_port", 8765)),
-                           connect_timeout=float(cfg.get("ws_connect_timeout", 120)))
     if channel == "usb":
         from serial_transport import SerialTransport
         return SerialTransport(port=cfg.get("usb_port") or None)
     raise RelayError(
         f"config.local.json 的 channel 值无效: {channel!r}"
-        f"(应为 \"ble\"、\"wifi\" 或 \"usb\")")
+        f"(WiFi 通道已移除, 请改为 \"ble\" 或 \"usb\")")
 
 
 def _default_inject_fn(cfg):
@@ -978,11 +1097,11 @@ def _default_key_action_fn(cfg):
 def main():
     ap = argparse.ArgumentParser(
         description="AI Passport 中转: 设备音频 → 火山 ASR → 注入输入框"
-                    "(通道/注入后端由 config.local.json 决定: ble/wifi/usb)",
+                    "(通道/注入后端由 config.local.json 决定: ble/usb)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     ap.add_argument("--device", default=None,
                     help="BLE 地址或 USB 串口路径(默认扫描 'AI Passport'"
-                         "/ USB VID 0x303A;wifi 通道忽略)")
+                         "/ USB VID 0x303A)")
     ap.add_argument("--no-inject", action="store_true",
                     help="只转写不注入(调试)")
     ap.add_argument("--no-approval", action="store_true",
@@ -1004,30 +1123,18 @@ def main():
         do_approval=not args.no_approval,
         dry_run=args.dry_run,
     )
-    # wifi 通道: mDNS 发布 _ai-passport._tcp(设备 STA 自动发现本 WS 服务)。
-    # 必须在事件循环外调用(zeroconf 同步 API 自阻塞, 见 mdns_pub.py 注释)。
-    zc = None
-    if cfg.get("channel", "ble") == "wifi":
-        from mdns_pub import publish_mdns
-        zc, _ = publish_mdns(int(cfg.get("ws_port", 8765)))
     try:
         asyncio.run(relay.run(args.device))
     except KeyboardInterrupt:
         print("\n[relay] Ctrl+C, 已退出")
     except RelayError as e:
         print(f"[relay] 错误: {e}", file=sys.stderr)
-        scope = ("ble: BLE 广播; wifi: 与电脑同一局域网"
+        scope = ("ble: BLE 广播"
                  if getattr(relay, "_syscmd", None) is None
                  else "usb: USB 已连接且设备已 mode usb")
         print(f"[relay] 请确认设备已开机并处于连接范围({scope}), "
               "然后重新运行本程序", file=sys.stderr)
         sys.exit(1)
-    finally:
-        if zc is not None:
-            try:
-                zc.close()
-            except Exception:
-                pass
 
 
 if __name__ == "__main__":

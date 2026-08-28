@@ -30,7 +30,7 @@ def check(name, got, want):
 
 def patch_subprocess(frontmost_bundle, frontmost_name, fail_probe=False):
     """上下文管理器: 替换 inject.subprocess.run, 退出自动还原 —— 防止
-    全局替换污染后续测试(mdns_pub/ws_transport 等共用 subprocess 模块)。"""
+    全局替换污染后续测试(同进程共用 subprocess 模块)。"""
     import contextlib
     import subprocess as _real
 

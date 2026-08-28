@@ -233,13 +233,13 @@ def test_syscmd_roundtrip():
 
     async def scenario():
         t = await connect_handshake(master, port)
-        task = asyncio.create_task(t.send_syscmd("mode wifi"))
+        task = asyncio.create_task(t.send_syscmd("mode usb"))
         frame = await asyncio.to_thread(read_frame, master)
-        assert frame == (FRAME_SYS, b"mode wifi")
+        assert frame == (FRAME_SYS, b"mode usb")
         os.write(master, encode_frame(FRAME_SYS_RESP,
-                                      b"switching to WiFi: reboot"))
+                                      b"switching to USB: reboot"))
         resp = await asyncio.wait_for(task, 2.0)
-        assert resp == "switching to WiFi: reboot"
+        assert resp == "switching to USB: reboot"
         await t.disconnect()
 
     try:
@@ -287,7 +287,7 @@ def test_concurrent_write_serialized():
     async def scenario():
         t = await connect_handshake(master, port)
         ctrl = b'{"type":"transcript","text":"hi","final":false}'
-        sysc = b"mode wifi"
+        sysc = b"mode usb"
         await asyncio.wait_for(asyncio.gather(
             t._write_frame(FRAME_CTRL, ctrl),
             t._write_frame(FRAME_SYS, sysc)), 2.0)

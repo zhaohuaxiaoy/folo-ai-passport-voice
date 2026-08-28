@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""relay + SerialTransport 集成测试(os.openpty 假设备侧, 对齐 test_ws_transport)。
+"""relay + SerialTransport 集成测试(os.openpty 假设备侧)。
 
 覆盖:
 - _build_transport "usb" 分支(SerialTransport + usb_port 直连 + 无效 channel)
 - 全流程: 握手 ping/pong → hello → voice.start → 音频帧 → voice.end
   → 定稿注入 + 下行 transcript(final:false 预览 / final:true 定稿)
-- SYS 命令往返(relay._handle_stdin_line("!mode wifi") → 设备收 SYS 帧)
+- SYS 命令往返(relay._handle_stdin_line("!mode usb") → 设备收 SYS 帧)
 - 设备关闭(master) → relay 随断连收束退出
 
 运行: companion/.venv/bin/python companion/tests/test_serial_relay.py
@@ -99,7 +99,7 @@ def device_script(master, results):
         assert f is not None and f[0] == FRAME_SYS, f"SYS 命令未到, 实际 {f}"
         sys_frame = f[1]
     results["sys"] = sys_frame
-    write_all(master, encode_frame(FRAME_SYS_RESP, b"switching to WiFi (reboot)"))
+    write_all(master, encode_frame(FRAME_SYS_RESP, b"switching to USB (reboot)"))
 
     # 5. 关闭 master → 读线程 EOF → on_disconnect → relay 收束
     time.sleep(0.2)
@@ -120,7 +120,7 @@ def test_build_transport_usb():
 
 
 def test_relay_over_usb():
-    """全流程 + !命令 syscmd 往返 + 断连收束(对齐 test_relay_over_ws)。"""
+    """全流程 + !命令 syscmd 往返 + 断连收束。"""
     async def scenario():
         master, slave, port = make_pair()
         t = SerialTransport(handshake_timeout=1.0)
@@ -140,9 +140,9 @@ def test_relay_over_usb():
         check("定稿注入输入框一次", injector.calls, ["你好世界"])
 
         # !命令 SYS 往返(替代 USB 模式缺失的控制台)
-        await relay._handle_stdin_line("!mode wifi")
+        await relay._handle_stdin_line("!mode usb")
         await wait_until(lambda: "sys" in results, what="SYS 命令到达设备")
-        check("SYS 帧内容(mode wifi)", results["sys"], b"mode wifi")
+        check("SYS 帧内容(mode usb)", results["sys"], b"mode usb")
 
         # 设备关闭(master) → relay 随断连收束
         await asyncio.wait_for(task, 5.0)

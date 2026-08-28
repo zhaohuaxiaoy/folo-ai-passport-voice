@@ -7,7 +7,9 @@ ASR→注入序列; voice 会话掉帧统计; 审批流(approval_request 写入 
 """
 import asyncio
 import json
+import math
 import os
+import struct
 import sys
 import time
 
@@ -18,8 +20,13 @@ from relay import (  # noqa: E402
     CTRL_UUID, EVENT_UUID, AUDIO_UUID,
     TRANSCRIPT_TEXT_MAX, Relay, RelayError,
     reassemble_audio, reassemble_event, split_transcript,
+    reassemble_adpcm, ADPCM_CHUNK_HDR, ADPCM_CHUNK_LAST,
 )
 from asr_client import StreamingASR, RESULTS_Q_MAX  # noqa: E402
+from adpcm import (  # noqa: E402
+    ADPCM_BLOCK_BYTES, ADPCM_BLOCK_SAMPLES, AdpcmState,
+    decode_block, encode_block,
+)
 
 FAILURES = []
 
@@ -269,6 +276,127 @@ def test_reassembly_overflow():
     check("EVENT 失步后重组", (len(lines), len(buf)), (1, 0))
 
 
+def _make_samples(seed):
+    """语音状 16kHz 样本(与 test_adpcm.py 同式): 生成可解码的真实 block。"""
+    out = []
+    for i in range(ADPCM_BLOCK_SAMPLES):
+        t = (i + seed * 997) / 16000.0
+        v = (math.sin(2.0 * math.pi * 220.0 * t)
+             + 0.3 * math.sin(2.0 * math.pi * 440.0 * t))
+        out.append(int(v * 9000.0))
+    return out
+
+
+def _chunk(seq, idx, last, data):
+    """构造带帧头的 notify 载荷(与固件 ble_audio.c 帧头格式一致)。"""
+    b1 = idx | (ADPCM_CHUNK_LAST if last else 0)
+    return bytes([seq, b1]) + data
+
+
+def test_reassembly_adpcm():
+    """BLE ADPCM 块重组(帧头感知): 单片直通 / 多片重组 / 丢片 / 重复片 /
+    迟到片 / 新 seq 部分终结补零 / 碎片 / 失步清空。输出帧必须与直接
+    decode_block 逐样本一致(重组路径解码契约)。"""
+    def feed(chunks):
+        st = {"seq": None, "buf": bytearray(), "last_idx": -1,
+              "last_seq": None, "miss": 0}
+        all_frames = []
+        for c in chunks:
+            st, frames = reassemble_adpcm(st, c)
+            all_frames += frames
+        return st, all_frames
+
+    blk0 = encode_block(AdpcmState(), _make_samples(0))
+    want0 = decode_block(blk0)   # 直接解码参考(1600 样本)
+
+    # 1) 单片整块(MTU 大): [seq][0|LAST] + 804B → 1 帧 3200B
+    st, frames = feed([_chunk(1, 0, True, blk0)])
+    check("ADPCM 单片整块→1 帧", len(frames), 1)
+    check("ADPCM 输出帧长 3200", len(frames[0]), 3200)
+    check("ADPCM 输出与直接解码逐样本一致",
+          list(struct.unpack("<1600h", frames[0])), want0)
+    check("ADPCM 完块后缓冲清空", (st["buf"], st["seq"]), (bytearray(), None))
+    check("ADPCM 完块无 miss", st["miss"], 0)
+
+    # 2) 多片重组(MTU 185: body=180,804 = 4×180 + 84 → 5 片,末片 LAST)
+    body = 180
+    parts = [blk0[i:i + body] for i in range(0, len(blk0), body)]
+    chunks = [_chunk(2, i, i == len(parts) - 1, p)
+              for i, p in enumerate(parts)]
+    st, frames = feed(chunks)
+    check("ADPCM 多片重组→1 帧", len(frames), 1)
+    check("ADPCM 多片输出与直接解码一致",
+          list(struct.unpack("<1600h", frames[0])), want0)
+
+    # 3) 丢片(片 1 缺失): is_last 终结但 len<804 → miss++ 无输出
+    chunks = [_chunk(3, 0, False, parts[0]),
+              _chunk(3, 2, False, parts[2]),
+              _chunk(3, 4, True, parts[4])]
+    st, frames = feed(chunks)
+    check("ADPCM 丢片中片→无输出", frames, [])
+    check("ADPCM 丢片 miss=1", st["miss"], 1)
+
+    # 4) 重复片去重(idx 重复): 不破坏重组,块正常解出
+    chunks = [_chunk(4, 0, False, parts[0]),
+              _chunk(4, 0, False, parts[0]),   # 重复
+              _chunk(4, 1, False, parts[1]),
+              _chunk(4, 2, False, parts[2]),
+              _chunk(4, 3, False, parts[3]),
+              _chunk(4, 4, True, parts[4])]
+    st, frames = feed(chunks)
+    check("ADPCM 重复片去重→1 帧", len(frames), 1)
+    check("ADPCM 去重后输出一致",
+          list(struct.unpack("<1600h", frames[0])), want0)
+
+    # 5) 迟到片: 已终结块的片再来(seq == last_seq)→ 丢弃, 状态不受扰
+    chunks = [_chunk(5, 0, True, blk0),           # 块 5 完成
+              _chunk(5, 0, True, parts[0]),       # 迟到片
+              _chunk(6, 0, False, parts[0]),      # 块 6 开始(跨 seq)
+              _chunk(6, 1, False, parts[1]),
+              _chunk(6, 2, False, parts[2]),
+              _chunk(6, 3, False, parts[3]),
+              _chunk(6, 4, True, parts[4])]
+    st, frames = feed(chunks)
+    check("ADPCM 迟到片丢弃+块6正常", len(frames), 2)
+    check("ADPCM 迟到片不增 miss", st["miss"], 0)
+
+    # 6) 新 seq 部分终结: 块 7 缺 is_last 就被块 8 顶替 → 补零解码帧 + miss
+    chunks = [_chunk(7, 0, False, parts[0]),
+              _chunk(7, 1, False, parts[1]),
+              _chunk(8, 0, True, blk0)]           # 新 seq: 块 7 部分终结
+    st, frames = feed(chunks)
+    check("ADPCM 部分终结→补零帧+块8帧", len(frames), 2)
+    check("ADPCM 部分终结 miss=1", st["miss"], 1)
+    # 补零帧 = 已收 360B 数据(4B 头 + 356B → 713 样本)解码 + 零 nibble 尾。
+    # IMA code=0 解码为 +step/8 逼近、index 每步 -1 → step 衰减到 7 后
+    # diffq=0, predictor 冻结在恒值(不是 0)——补零语义是"保节拍稳定输出",
+    # 不产生发散/噪声。
+    pad0 = list(struct.unpack("<1600h", frames[0]))
+    check("ADPCM 补零帧长 3200", len(frames[0]), 3200)
+    check("ADPCM 补零帧前缀=已收数据解码", pad0[:713], want0[:713])
+    check("ADPCM 补零帧零尾冻结(不发散)",
+          len(set(pad0[-100:])) == 1, True)
+    check("ADPCM 块8输出一致",
+          list(struct.unpack("<1600h", frames[1])), want0)
+
+    # 7) 碎片: 帧头不足 2B / is_last 但 payload < 4B → miss++ 无输出
+    st, frames = feed([b"\x00", b"", _chunk(9, 0, True, b"\x01\x02")])
+    check("ADPCM 帧头碎片/短块→无输出", frames, [])
+    check("ADPCM 碎片 miss=3", st["miss"], 3)
+
+    # 8) 失步: 同 seq 累计 > 804(不可能的正常块)→ miss++ 且全清重对齐
+    big = b"\x55" * 201
+    chunks = [_chunk(10, i, i == 4, big) for i in range(5)]   # 1005 > 804
+    st, frames = feed(chunks)
+    check("ADPCM 超长块失步→无输出", frames, [])
+    check("ADPCM 失步 miss=1", st["miss"], 1)
+    check("ADPCM 失步后状态清空", (st["seq"], st["last_seq"]), (None, None))
+    st, frames = feed([_chunk(11, 0, True, blk0)])   # 重新对齐: 正常
+    check("ADPCM 失步后新块正常", len(frames), 1)
+    check("ADPCM 失步恢复输出一致",
+          list(struct.unpack("<1600h", frames[0])), want0)
+
+
 # ---- relay 全流程 ----
 
 async def test_voice_flow():
@@ -338,6 +466,87 @@ async def test_voice_flow():
           [e[0] for e in t.events].count("disconnect"), 1)
 
 
+async def test_voice_flow_adpcm():
+    """BLE 压缩路径全流程: voice.start 带 audio=ima_adpcm,块带 2B 帧头按
+    MTU 185 语义分片(180B body,5 片/块)→ 重组解码 → 3200B PCM 帧上送
+    ASR;统计按 100ms 帧口径;注入恰一次。"""
+    t = FakeTransport()
+    injector = FakeInjector()
+    holder = {}
+    relay = Relay(t,
+                  asr_factory=make_fake_asr_factory(
+                      [("你好世界", True)], holder),
+                  inject_fn=injector, timeout=5, do_approval=False)
+    task = asyncio.create_task(relay.run())
+    await wait_until(lambda: t.handlers, what="订阅")
+
+    # 6 块(100ms 节拍),每块 5 片: 4×180B + 84B(末片 LAST)
+    blks = [encode_block(AdpcmState(), _make_samples(b)) for b in range(6)]
+    t.notify_event(b'{"event":"voice.start","audio":"ima_adpcm"}\n')
+    await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
+    body = 180
+    for b, blk in enumerate(blks):
+        parts = [blk[i:i + body] for i in range(0, len(blk), body)]
+        for i, p in enumerate(parts):
+            t.notify_audio(_chunk(b, i, i == len(parts) - 1, p))
+            # 30 片 > AUDIO_Q_MAX(20): 同步连塞会丢帧——每片让出事件
+            # 循环, 给 _drain_audio 消费机会(真实 BLE notify 有间隔)
+            await asyncio.sleep(0)
+    await wait_until(lambda: len(holder["asr"].sent_frames) >= 6,
+                     what="6 帧全部上送")
+
+    t.notify_event(b'{"event":"voice.end"}\n')
+    await wait_until(lambda: len(relay.session_stats) >= 1, what="会话统计(占位)")
+    await wait_until(lambda: len(injector.calls) >= 1, what="定稿注入")
+    await wait_session_done(relay)
+
+    asr = holder["asr"]
+    check("ASR 收到 6 个 PCM 帧", len(asr.sent_frames), 6)
+    check("帧长全 3200B", all(len(f) == 3200 for f in asr.sent_frames), True)
+    for b, (blk, fr) in enumerate(zip(blks, asr.sent_frames)):
+        want = decode_block(blk)     # 直接解码参考
+        check(f"帧{b}重组输出一致",
+              list(struct.unpack("<1600h", fr)), want)
+    check("ASR 已结束流", asr.ended, True)
+    check("注入只落定稿", injector.calls, ["你好世界"])
+
+    stats = relay.session_stats[0]
+    check("统计 rx_frames=6(100ms 口径)", stats["rx_frames"], 6)
+    check("统计 final_text", stats["final_text"], "你好世界")
+
+    t.disconnect_cb()
+    await wait_until(task.done, what="断开退出")
+
+
+async def test_unknown_format_fallback():
+    """未知音频格式(如 ulaw)按 pcm 兜底: 裸 3200B 块直通 ASR。"""
+    t = FakeTransport()
+    injector = FakeInjector()
+    holder = {}
+    relay = Relay(t,
+                  asr_factory=make_fake_asr_factory(
+                      [("未知格式兜底", True)], holder),
+                  inject_fn=injector, timeout=5, do_approval=False)
+    task = asyncio.create_task(relay.run())
+    await wait_until(lambda: t.handlers, what="订阅")
+
+    t.notify_event(b'{"event":"voice.start","audio":"ulaw"}\n')
+    await wait_until(lambda: relay._session is not None, what="voice.start 已处理")
+    frame = b"\x55" * AUDIO_FRAME_BYTES
+    t.notify_audio(frame)
+
+    t.notify_event(b'{"event":"voice.end"}\n')
+    await wait_until(lambda: len(relay.session_stats) >= 1, what="会话统计(占位)")
+    await wait_until(lambda: len(injector.calls) >= 1, what="定稿注入")
+    await wait_session_done(relay)
+
+    asr = holder["asr"]
+    check("未知格式按 pcm 直通", asr.sent_frames, [bytes(frame)])
+
+    t.disconnect_cb()
+    await wait_until(task.done, what="断开退出")
+
+
 # ---- 校时下行(连接建立后立即;每小时周期由 TIME_SYNC_INTERVAL_S 控制)----
 
 def _time_set_writes(events):
@@ -347,7 +556,7 @@ def _time_set_writes(events):
 
 
 async def test_time_sync_downlink_ble():
-    """BLE/WiFi: 连接后立即下行 time.set(CTRL), epoch 为 UTC 整数秒;
+    """BLE: 连接后立即下行 time.set(CTRL), epoch 为 UTC 整数秒;
     断开后 run 收束, 校时任务一并取消(无泄漏)。"""
     t = FakeTransport()
     relay = Relay(t,
@@ -379,7 +588,7 @@ async def test_time_sync_downlink_usb():
     relay = Relay(t,
                   asr_factory=make_fake_asr_factory([], {}),
                   inject_fn=FakeInjector(), timeout=5, do_approval=False,
-                  stdin_input=iter(()).__next__)   # stdin 立即 EOF
+                  stdin_input=lambda prompt="": iter(()).__next__())  # stdin 立即 EOF
     task = asyncio.create_task(relay.run(device_addr="FAKE:USB"))
     await wait_until(lambda: len(syscmds) >= 1, what="USB 首次校时")
     line = syscmds[0]
@@ -542,8 +751,12 @@ def test_key_action_mac_dry_run():
     with redirect_stdout(buf):
         key_action("clear", dry_run=True)
     out = buf.getvalue()
-    check("Mac clear 打印全选", "key code 115" in out and "key code 119" in out, True)
-    check("Mac clear 打印删除", "key code 51" in out, True)
+    # clear 按前台 app 分分支(终端 → Ctrl+U; 非终端 → 全选+删除),
+    # dry-run 只打印当前分支 —— 环境相关, 两分支任一即通过
+    terminal = 'keystroke "u" using control down' in out
+    select_all = "key code 115" in out and "key code 119" in out
+    check("Mac clear 打印(终端分支或全选)", terminal or select_all, True)
+    check("Mac clear 打印删除", "key code 51" in out or terminal, True)
 
     try:
         key_action("bogus")
@@ -1063,7 +1276,7 @@ async def test_run_syscmd():
     relay = Relay(t,
                   asr_factory=make_fake_asr_factory([], {}),
                   inject_fn=FakeInjector(), timeout=5, do_approval=False,
-                  stdin_input=iter(()).__next__)   # stdin 立即 EOF
+                  stdin_input=lambda prompt="": iter(()).__next__())  # stdin 立即 EOF
     task = asyncio.create_task(relay.run(device_addr="FAKE:USB"))
     await wait_until(lambda: len(t.events) >= 4, what="订阅完成")
 
@@ -1080,7 +1293,7 @@ async def test_run_syscmd():
 
 
 async def test_run_syscmd_unsupported():
-    """BLE/WiFi 通道(无 send_syscmd): run_syscmd 明确报错。"""
+    """BLE 通道(无 send_syscmd): run_syscmd 明确报错。"""
     t = FakeTransport()           # 无 send_syscmd → _syscmd = None
     relay = Relay(t,
                   asr_factory=make_fake_asr_factory([], {}),
@@ -1104,10 +1317,13 @@ async def main():
     print("== 分片重组 ==")
     test_reassembly_audio()
     test_reassembly_event()
+    test_reassembly_adpcm()
     print("== 转写切分(纯函数) ==")
     test_split_transcript()
     print("== relay 流程 ==")
     await test_voice_flow()
+    await test_voice_flow_adpcm()
+    await test_unknown_format_fallback()
     await test_time_sync_downlink_ble()
     await test_time_sync_downlink_usb()
     await test_key_action_downlink()

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """AI Passport 安装/首次配置/设备诊断向导(tkinter + ttkbootstrap)。
 
-5 步流程: 欢迎 → 发现设备(BLE→WiFi→USB 自动探测, 可手动) → ASR 配置
+5 步流程: 欢迎 → 发现设备(BLE→USB 自动探测, 可手动) → ASR 配置
 (火山 Key + 真实测试连接) → 输入注入权限(macOS) → 完成(状态页)。
 进阶: 状态页 Advanced 进入诊断页(见 fre_app.py 诊断节)。
 
@@ -24,6 +24,14 @@ import queue
 import sys
 import threading
 import time
+# 打包运行时 stdout/stderr 无处可去(PyInstaller --windowed):重定向到
+# ~/Library/Logs/AI Passport.log,诊断 BLE 链路(连接/voice.start/ASR/
+# 悬浮窗回调)可复盘。源码运行不受影响。必须在任何 print 之前设置。
+if getattr(sys, "frozen", False):
+    import os
+    _logf = open(os.path.expanduser("~/Library/Logs/AI Passport.log"), "a", buffering=1)
+    sys.stdout = _logf
+    sys.stderr = _logf
 import tkinter as tk
 from tkinter import font as tkfont
 from tkinter import messagebox
@@ -41,7 +49,7 @@ POLL_ACTIVE_MS = 100
 POLL_IDLE_MS = 400
 DIAG_MAX_LINES = 500          # 诊断 Text 截断(PERF P2-6)
 
-CHANNEL_LABELS = (("ble", "蓝牙 BLE"), ("wifi", "WiFi"), ("usb", "USB 有线"))
+CHANNEL_LABELS = (("ble", "蓝牙 BLE"), ("usb", "USB 有线"))
 INJECT_LABELS = {"unicode": "Unicode 键盘注入", "clipboard": "剪贴板",
                  "auto": "Auto (unicode 优先)"}
 
@@ -49,9 +57,6 @@ INJECT_LABELS = {"unicode": "Unicode 键盘注入", "clipboard": "剪贴板",
 # (按钮名, 命令, 需确认?)  前两项需确认: 恢复出厂 / 重启
 DIAG_QUICK = (
     ("Mode", "mode", False),
-    ("WiFi", "wifi status", False),
-    ("WebSocket", "ws status", False),
-    ("mDNS", "mdns", False),
     ("Logs", "log", False),
     ("System", "st", False),
     ("Factory Reset", "factory", True),
@@ -108,7 +113,7 @@ class FREApp:
         self._thread = None              # 后台 asyncio 线程
         self._probe_thread = None        # 通道探测线程(互斥, PERF P2-2)
         self.device_addr = None
-        self.probe_result = None         # ("ble"|"wifi"|"usb", addr)
+        self.probe_result = None         # ("ble"|"usb", addr)
         self.last_error = ""
         self._tray = None                # pystray Icon(连接成功后启动)
         self._shutdown_deadline = 0.0    # 分片退出轮询的强收期限
@@ -307,7 +312,7 @@ class FREApp:
         self._probe_var.set("正在探测…")
         self._device_var.set("尚未探测")
         self.probe_result = None
-        # PERF P2-2: 探测中再点「重新设置」不得叠第二个 asyncio.run / 抢 8765
+        # PERF P2-2: 探测中再点「重新设置」不得叠第二个 asyncio.run
         if self._probe_thread is not None and self._probe_thread.is_alive():
             self._probe_var.set("正在探测…(已在进行)")
             return
@@ -316,7 +321,7 @@ class FREApp:
         self._probe_thread.start()
 
     def _probe_worker(self):
-        """后台线程执行通道探测(BLE→WiFi→USB), 结果经队列回 UI。"""
+        """后台线程执行通道探测(BLE→USB), 结果经队列回 UI。"""
         if self.dry_run:
             time.sleep(0.3)   # 模拟探测耗时
             result = ("ble", "AA:BB:CC:DD:EE:FF")
@@ -381,7 +386,7 @@ class FREApp:
     def on_discover_next(self):
         self.channel = self._channel_var.get()
         # 同步内存 cfg(审查 P1-1): _relay_worker 的 _build_transport 读
-        # self.cfg —— 只写盘不同步则 BLE→WiFi 切换仍按旧 channel 建传输层,
+        # self.cfg —— 只写盘不同步则切换仍按旧 channel 建传输层,
         # 向导里切换通道不生效(连接必然超时)。
         self.cfg = {**self.cfg, "channel": self.channel}
         if not self.dry_run:
@@ -439,7 +444,6 @@ class FREApp:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         self._loop = loop
-        mdns = None
         try:
             from relay import Relay
             from relay import _build_transport
@@ -450,22 +454,11 @@ class FREApp:
                 inject_fn = _FakeInjector()
                 key_action_fn = lambda action: None  # noqa: E731
             else:
-                # BLE 用 Relay 默认 transport; WiFi/USB 按 config 选传输层
+                # BLE 用 Relay 默认 transport; USB 按 config 选传输层
                 transport = (None if self.channel == "ble"
                              else _build_transport(self.cfg))
                 inject_fn = _default_inject_fn(self.cfg)
                 key_action_fn = _default_key_action_fn(self.cfg)
-                # WiFi 通道: 设备经 mDNS 发现本机 WS 服务(审查 P1-2: GUI 此前
-                # 从不发布 mDNS, 设备查不到 WS 地址 → 连接必然超时)。须在事件
-                # 循环外调用(zeroconf 同步 API 自阻塞); 失败只提示不阻断
-                # (设备侧有 static ws 配置兜底)。
-                if self.channel == "wifi":
-                    try:
-                        from mdns_pub import publish_mdns
-                        mdns = publish_mdns(int(self.cfg.get("ws_port", 8765)))
-                    except Exception as e:  # noqa: BLE001
-                        print(f"[fre] mDNS 发布失败(设备需 static ws 配置): {e}",
-                              file=sys.stderr)
 
             relay = Relay(transport,
                           inject_fn=inject_fn, key_action_fn=key_action_fn,
@@ -477,7 +470,7 @@ class FREApp:
                               self._qput(("candidate", (text, is_final))))
             self._relay = relay                      # 诊断页命令桥用
             self.syscmd_available = getattr(relay, "_syscmd", None) is not None
-            # BLE 直接连已发现地址; WiFi/USB 由 relay 内部扫描/等待
+            # BLE 直接连已发现地址; USB 由 relay 内部扫描/等待
             self.relay_task = loop.create_task(
                 relay.run(self.device_addr if self.channel == "ble" else None,
                           console_stdin=False))   # GUI 无 stdin; 退出防阻塞(审查 P1-4)
@@ -488,14 +481,9 @@ class FREApp:
             self._qput(("error", str(e)))
             self._qput(("phase", "failed"))
         finally:
-            if mdns is not None:
-                try:
-                    mdns[0].close()   # Zeroconf 收束: mDNS 服务下线
-                except Exception:  # noqa: BLE001
-                    pass
             self._qput(("relay_done", None))
             # P2-3: 收束事件循环 —— 取消残留协程(诊断页 run_syscmd 桥等,
-            # 不复位会跨线程泄漏)再 close。顺序: zc 已关, 再收 loop。
+            # 不复位会跨线程泄漏)再 close。
             try:
                 pending = [t for t in asyncio.all_tasks(loop)
                            if not t.done() and t is not self.relay_task]

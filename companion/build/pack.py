@@ -26,8 +26,7 @@ ENTRY = os.path.join(HERE, "fre_app.py")
 DIST = os.path.join(HERE, "dist")
 
 # pyinstaller 需要收集的懒加载/框架模块
-COLLECT_SUBMODULES = ("bleak", "websockets", "zeroconf", "pystray",
-                      "ttkbootstrap")
+COLLECT_SUBMODULES = ("bleak", "websockets", "pystray", "ttkbootstrap")
 # ttkbootstrap 无 hooks-contrib hook: 主题/资产数据(元素图、app 图标)
 # 必须 collect-data, 否则运行时查资源失败
 COLLECT_DATA = ("ttkbootstrap",)

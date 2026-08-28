@@ -8,7 +8,7 @@ In one sentence: it moves AI from the browser to your desktop input box, and put
 
 ```text
 Hold OK to talk ──► device records ──► desktop relay ──► Volcano streaming ASR
-                        │  over BLE / WiFi / USB
+                        │  over BLE / USB
                         ▼  live partials
             Floating window shows candidates
                         │
@@ -16,21 +16,21 @@ Hold OK to talk ──► device records ──► desktop relay ──► Volca
             Inject into focused input box (once)
 ```
 
-> The repository contains both the **firmware** (ESP-IDF, device side) and the **desktop companion** (`companion/`, macOS/Windows relay), which work together over three channels: BLE / WiFi / USB.
+> The repository contains both the **firmware** (ESP-IDF, device side) and the **desktop companion** (`companion/`, macOS/Windows relay), which work together over two channels: BLE / USB.
 
 ## Architecture
 
 | Layer | Component | Responsibility |
 | --- | --- | --- |
-| Device | ESP32-C3 firmware (ESP-IDF 5.5 + LVGL 9.5) | State machine, buttons/recording, UI rendering, three-channel transport, power management |
-| Desktop | companion (macOS / Windows) | Three-channel access, Volcano streaming ASR forwarding, floating window, clipboard injection, wizard, tray |
+| Device | ESP32-C3 firmware (ESP-IDF 5.5 + LVGL 9.5) | State machine, buttons/recording, UI rendering, dual-channel transport, power management |
+| Desktop | companion (macOS / Windows) | Dual-channel access, Volcano streaming ASR forwarding, floating window, clipboard injection, wizard, tray |
 | Cloud | Volcano Engine large-model streaming ASR | Audio → text (partial full-accumulation / final) |
 
-Data flow: the device captures 16 kHz audio → streams 100 ms frames up over **BLE / WiFi+WS / USB** (any channel) → the desktop relay feeds them into Volcano ASR in streaming mode → partial results echo live to the floating window and the device screen → on release the final text is injected once and the window closes. The reverse channel carries agent status, approval requests and button verdicts.
+Data flow: the device captures 16 kHz audio → streams 100 ms frames up over **BLE / USB** (any channel) → the desktop relay feeds them into Volcano ASR in streaming mode → partial results echo live to the floating window and the device screen → on release the final text is injected once and the window closes. The reverse channel carries agent status, approval requests and button verdicts.
 
 ## Highlights
 
-- **Three-channel redundant transport**: one audio/event protocol runs over three physical channels — BLE (direct to Mac, GATT service `0xA2B0`), WiFi+WebSocket+mDNS (Bluetooth-less PCs, auto-discovery and auto-reconnect), USB-Serial-JTAG (wired debugging + full console command surface). Any channel failure converges the session back to READY and keeps approvals pending for reconnect — a broken link never bricks the device.
+- **Dual-channel redundant transport**: one audio/event protocol runs over two physical channels — BLE (direct to Mac, GATT service `0xA2B0`) and USB-Serial-JTAG (wired debugging + full console command surface). Any channel failure converges the session back to READY and keeps approvals pending for reconnect — a broken link never bricks the device.
 - **State-machine driven + snapshot rendering**: the core state machine is a pure-C reducer (`state + event → action`) with zero ESP-IDF dependencies; 7 host test suites run directly on a PC. UI rendering is driven by snapshot diffs, fully decoupling logic from hardware — testable and portable.
 - **Low-resource streaming audio pipeline**: on an ESP32-C3 with only **400 KB SRAM**, audio streams up in 3200-byte/100 ms frames — static ring buffers (no dynamic allocation), source-side frame dropping (never buffers a full utterance), drop reconciliation against silent loss; long sentences never stall.
 - **Physical security approval**: agent permission requests (modify files, run commands) are not push notifications — they are an approval page on the device screen. **OK approve / UP reject** — a real physical press counts; the approval state never sleeps.
@@ -48,19 +48,19 @@ Data flow: the device captures 16 kHz audio → streams 100 ms frames up over **
 - **Three-button interaction**: OK hold-to-talk, DOWN = Enter, OK double-click clears the input box (global)
 - **Full state machine**: HOME → READY → LISTENING → TRANSCRIBING → AGENT_RUNNING → APPROVAL → DONE
 - **Tones**: start / send / approval / success / reject / error
-- **Three transport channels**: BLE / WiFi+WS+mDNS / USB-Serial-JTAG (full console command surface)
+- **Dual-channel transport**: BLE / USB-Serial-JTAG (full console command surface)
 - **Low-memory audio pipeline**: 3200-byte/100 ms frames, static ring buffers, source-side frame dropping, drop reconciliation
 - **Two-level screen-off**: 20 s idle → backlight off; 60 s idle → panel SLPIN power-off; any key wakes; approval state stays on
-- **Console commands**: `st` (heap/stack watermarks, link state, drop stats), `mode`, `wifi set` (password never echoed), `ws`, `mdns`, `logs`, `system`, `factory reset`, `reboot`
+- **Console commands**: `st` (heap/stack watermarks, link state, drop stats), `mode` (ble/usb), `logs`, `system`, `factory reset`, `reboot`
 
 ### Desktop companion (macOS + Windows)
 
 - **Candidate floating window** (core): partial ASR results — **full accumulated text** — appear live in a borderless always-on-top window anchored at the bottom center of the screen; auto-wraps and grows upward as you speak; on release the final text is injected once and the window disappears
 - **Never steals focus**: the window never calls focus; Windows uses `WS_EX_NOACTIVATE` + `SWP_NOACTIVATE`, macOS hot path avoids WindowServer syncs (no spinning beachball while talking)
 - **High-frequency frame merging**: 120 ms merge window keeps only the latest frame, first frame renders immediately — no per-frame redraw stutter
-- **5-step wizard**: welcome → auto-discover device (BLE → WiFi → USB) → Volcano ASR key config (zero-audio handshake test, never echoes the key) → system permission guide (macOS) → status page
+- **5-step wizard**: welcome → auto-discover device (BLE → USB) → Volcano ASR key config (zero-audio handshake test, never echoes the key) → system permission guide (macOS) → status page
 - **System tray**: stays in the menu bar / tray after connecting — status rows, diagnostics, settings
-- **Diagnostics page**: full device console command surface over USB; read-only runtime state over BLE/WiFi
+- **Diagnostics page**: full device console command surface over USB; read-only runtime state over BLE
 - **Injection**: macOS clipboard + Cmd+V (requires Accessibility permission; CJK must go through the clipboard channel); standalone Windows injector
 
 ## Controls
@@ -84,7 +84,7 @@ Data flow: the device captures 16 kHz audio → streams 100 ms frames up over **
 - **macOS**: `companion/dist/AI Passport.app` (built with `companion/build/pack.py`, or use a release build) — double-click to launch
 - **Windows**: run `python3 companion/build/pack.py` on a Windows build machine to produce `dist/AI Passport.exe` (or use a release build)
 
-On first launch the 5-step wizard opens: welcome → auto-discover the device (BLE → WiFi → USB) → Volcano ASR key config → system permission guide (macOS) → status page; the app then stays in the system tray. First run writes `companion/config.local.json` (Volcano API key, **never committed**).
+On first launch the 5-step wizard opens: welcome → auto-discover the device (BLE → USB) → Volcano ASR key config → system permission guide (macOS) → status page; the app then stays in the system tray. First run writes `companion/config.local.json` (Volcano API key, **never committed**).
 
 **Run from source (development)**:
 
@@ -113,9 +113,9 @@ The first build pulls LVGL, `esp_lvgl_port`, `button`, `esp_codec_dev` and other
 ## Repository layout
 
 ```text
-main/                    ESP32-C3 firmware: state machine, UI, three-channel transport, audio streaming, console commands
+main/                    ESP32-C3 firmware: state machine, UI, dual-channel transport, audio streaming, console commands
 components/bsp/          Board drivers: display / buttons / audio / battery / shared I2C (bsp_pins.h is the single source of truth)
-companion/               Desktop side: relay (streaming ASR + injection), floating window, wizard, tray, three-channel transport
+companion/               Desktop side: relay (streaming ASR + injection), floating window, wizard, tray, dual-channel transport
 tests/                   Hardware-free firmware logic tests (pure C, ctest)
 docs/                    Hardware development guide and acceptance docs
 sdkconfig.defaults       ESP32-C3, USB console, Flash, LVGL defaults
@@ -135,7 +135,7 @@ The injection target is whatever window the user is focused on — the floating 
 
 ## Design decisions
 
-- **Why three channels**: BLE only covers Macs with Bluetooth; Windows PCs without Bluetooth use WiFi+WS (mDNS auto-discovery); USB is both the debugger and the last-resort wired link — any single link can fail and the others keep working. Disconnect events converge the session uniformly, leaving no half-open sessions.
+- **Why two channels**: BLE covers Macs with Bluetooth; USB is both the debugger and the last-resort wired link — any single link can fail and the other keeps working. Disconnect events converge the session uniformly, leaving no half-open sessions.
 - **Why a pure-C reducer state machine**: the `state + event → action` pattern keeps all transition logic **hardware-free**; 7 ctest suites cover state transitions, protocol codec, audio framing and UI pixel math. UI renders from snapshot diffs — adding a page adds no state coupling.
 - **Why a static ring-buffer audio pipeline**: the ESP32-C3 has only 400 KB SRAM — dynamic allocation plus buffering a full utterance would blow the heap. 3200-byte/100 ms frames, source-side frame dropping and drop reconciliation are what let an entry-level MCU act as an AI input device.
 - **Why physical approval**: AI auto-modifying files or running commands is risky — approvals don't live in a notification banner, they live on the device screen. A real button press counts, and the approval state never sleeps.
@@ -165,7 +165,7 @@ The full checklist for when hardware arrives is in [`docs/ON_DEVICE.md`](docs/ON
 
 ## Extensibility
 
-Voice input is the **first application** on this pipeline: the same audio stream + event protocol (shared by all three channels) can naturally carry more — transcription, translation, agent commands, remote control. Both the firmware and the desktop side are open under MIT; reskinning, adding pages and integrating new services all start from clean architectural boundaries.
+Voice input is the **first application** on this pipeline: the same audio stream + event protocol (shared by both channels) can naturally carry more — transcription, translation, agent commands, remote control. Both the firmware and the desktop side are open under MIT; reskinning, adding pages and integrating new services all start from clean architectural boundaries.
 
 ## License
 

@@ -5,8 +5,6 @@
   "volcano_model": "bigmodel_async",
   "volcano_enable_nonstream": true,
   "channel": "ble",
-  "ws_port": 8765,
-  "ws_connect_timeout": 120,
   "usb_port": "",
   "inject_focus_delay": 2.0,
   "inject_mode": "auto"

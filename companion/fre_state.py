@@ -11,10 +11,9 @@ import subprocess
 import sys
 
 # 向导管理的 config 白名单字段(其他字段原样保留, 含密钥)
-WIZARD_FIELDS = ("channel", "inject_mode", "inject_focus_delay",
-                 "ws_port", "ws_connect_timeout", "usb_port")
+WIZARD_FIELDS = ("channel", "inject_mode", "inject_focus_delay", "usb_port")
 
-VALID_CHANNELS = ("ble", "wifi", "usb")
+VALID_CHANNELS = ("ble", "usb")
 VALID_INJECT_MODES = ("auto", "unicode", "clipboard")
 
 # 页面状态机: 合法迁移集合(纯函数校验)
@@ -75,7 +74,7 @@ def load_or_default_cfg():
 def validate_channel(v):
     if v not in VALID_CHANNELS:
         raise ValueError(
-            f"channel 值无效: {v!r}(应为 \"ble\"、\"wifi\" 或 \"usb\")")
+            f"channel 值无效: {v!r}(WiFi 通道已移除, 请改为 \"ble\" 或 \"usb\")")
 
 
 def validate_inject_mode(v):

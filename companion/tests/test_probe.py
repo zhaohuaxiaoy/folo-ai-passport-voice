@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""probe 单测: BLE→WiFi→USB 优先级探测, 注入 fake 传输层工厂。
+"""probe 单测: BLE→USB 优先级探测, 注入 fake 传输层工厂。
 
 覆盖:
-- BLE 命中 → 直接返回, 不碰 WiFi/USB
-- BLE 空 + WiFi 命中 → 返回 wifi(探测后断开, 不留连接)
-- BLE/WiFi 空 + USB 命中 → 返回 usb
+- BLE 命中 → 直接返回, 不碰 USB
+- BLE 空 + USB 命中 → 返回 usb
 - 全空 → (None, None)
 - 单通道异常 → 降级下一通道
 - on_status 进度回调收到阶段文案
@@ -45,23 +44,6 @@ class FakeBle:
         pass
 
 
-class FakeWifi:
-    def __init__(self, port, timeout):
-        self.port = port
-        self.timeout = timeout
-        self.connected = False
-        self.disconnected = False
-
-    async def connect(self, address, on_disconnect=None):
-        if self._accept:
-            self.connected = True
-        else:
-            raise TimeoutError("no device")
-
-    async def disconnect(self):
-        self.disconnected = True
-
-
 class FakeUsb:
     def __init__(self, port):
         self._port = port
@@ -78,46 +60,32 @@ class FakeUsb:
         pass
 
 
-def factories(ble_addr=None, wifi_accept=False, usb_port=None):
+def factories(ble_addr=None, usb_port=None):
     objs = {}
 
     def ble():
         objs["ble"] = FakeBle(ble_addr)
         return objs["ble"]
 
-    def wifi(port, timeout):
-        objs["wifi"] = FakeWifi(port, timeout)
-        objs["wifi"]._accept = wifi_accept
-        return objs["wifi"]
-
     def usb():
         objs["usb"] = FakeUsb(usb_port)
         return objs["usb"]
 
-    return {"ble": ble, "wifi": wifi, "usb": usb}, objs
+    return {"ble": ble, "usb": usb}, objs
 
 
 def test_ble_hit_first():
     f, objs = factories(ble_addr="AA:BB")
     got = asyncio.run(probe_channels({}, factories=f))
     check("BLE 命中返回 ble", got, ("ble", "AA:BB"))
-    check("BLE 命中不碰 WiFi/USB",
-          hasattr(objs.get("wifi", None), "connected"), False)
+    check("BLE 命中不碰 USB", hasattr(objs.get("usb", None), "scanned"), False)
 
 
-def test_wifi_hit_after_ble_miss():
-    f, objs = factories(wifi_accept=True)
-    got = asyncio.run(probe_channels({"ws_port": 9000}, factories=f))
-    check("WiFi 命中返回 wifi", got, ("wifi", "ws://127.0.0.1:9000"))
-    check("WiFi 探测后断开", objs["wifi"].disconnected, True)
-    check("WiFi 端口透传", objs["wifi"].port, 9000)
-
-
-def test_usb_hit_last():
+def test_usb_hit_after_ble_miss():
     f, objs = factories(usb_port="/dev/cu.usbmodem1")
     got = asyncio.run(probe_channels({}, factories=f))
     check("USB 命中返回 usb", got, ("usb", "/dev/cu.usbmodem1"))
-    check("WiFi 未尝试连接", objs["wifi"].connected, False)
+    check("USB 探测到", objs["usb"].scanned, True)
 
 
 def test_all_miss():
@@ -136,7 +104,7 @@ def test_ble_error_falls_through():
         return Boom()
     f["ble"] = ble_boom
     got = asyncio.run(probe_channels({}, factories=f))
-    check("BLE 异常降级 WiFi", got, (None, None))
+    check("BLE 异常降级 USB", got, (None, None))
 
 
 def test_status_callback():
@@ -148,8 +116,7 @@ def test_status_callback():
 
 def main():
     test_ble_hit_first()
-    test_wifi_hit_after_ble_miss()
-    test_usb_hit_last()
+    test_usb_hit_after_ble_miss()
     test_all_miss()
     test_ble_error_falls_through()
     test_status_callback()

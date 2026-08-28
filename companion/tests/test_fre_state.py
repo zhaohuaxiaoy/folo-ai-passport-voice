@@ -39,9 +39,9 @@ def test_write_cfg_keeps_secret():
             with open(p, "w", encoding="utf-8") as f:
                 f.write('{"volcano_api_key": "SECRET-KEY", "channel": "ble"}')
             merged = fre_state.write_cfg(
-                {"channel": "wifi", "inject_mode": "unicode"})
+                {"channel": "usb", "inject_mode": "unicode"})
             check("保留密钥", merged.get("volcano_api_key"), "SECRET-KEY")
-            check("channel 更新", merged.get("channel"), "wifi")
+            check("channel 更新", merged.get("channel"), "usb")
             check("inject_mode 写入", merged.get("inject_mode"), "unicode")
             # 落盘后再读, 确认持久化
             with open(p, "r", encoding="utf-8") as f:
@@ -58,8 +58,7 @@ def test_write_cfg_from_empty():
         try:
             merged = fre_state.write_cfg(
                 {"channel": "ble", "inject_mode": "auto",
-                 "inject_focus_delay": 2.0, "ws_port": 8765,
-                 "ws_connect_timeout": 120})
+                 "inject_focus_delay": 2.0})
             check("无既有文件可写", merged.get("channel"), "ble")
             check("usb_port 缺省不写入", "usb_port" in merged, False)
         finally:
@@ -68,7 +67,7 @@ def test_write_cfg_from_empty():
 
 def test_validate_fields():
     """channel/inject_mode 非法值拒绝(文案与 relay 一致)。"""
-    for bad in ("BLE", "", "serial", 3):
+    for bad in ("BLE", "", "serial", "wifi", 3):
         try:
             fre_state.validate_channel(bad)
             check(f"channel 非法 {bad!r} 拒绝", False, True)

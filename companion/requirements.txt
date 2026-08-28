@@ -3,8 +3,7 @@
 # Windows 平台标记(PEP 508): Win10 1803+ / Win11 均满足 bleak winrt 后端要求。
 bleak==3.0.2; platform_system == "Darwin"      # macOS 11+ 单后端 BLE 客户端
 bleak[winrt]==3.0.2; platform_system == "Windows"   # Windows BLE(winrt 后端)
-websockets==17.0.1    # 火山 ASR 双向流式 + WiFi 通道 WS server(WsTransport)
-zeroconf==0.150.0     # WiFi 通道: mDNS 发布 _ai-passport._tcp(设备自动发现)
+websockets==17.0.1    # 火山 ASR 双向流式上行
 pywin32>=306; platform_system == "Windows"     # Windows 注入(unicode SendInput / 剪贴板)
 # macOS unicode 注入(CGEvent 逐字符键盘事件, 不碰剪贴板); 缺失时 auto 模式
 # 回退剪贴板路径(见 inject.py paste_text mode 说明)
@@ -12,7 +11,7 @@ pyobjc-framework-Quartz>=10.0; platform_system == "Darwin"
 # macOS 辅助功能权限检测(AXIsProcessTrusted, fre_state 懒加载); 缺失时权限
 # 状态恒为 unknown, 向导无法判断是否已授权
 pyobjc-framework-ApplicationServices>=10.0; platform_system == "Darwin"
-# pyserial: USB 有线通道数据收发(全平台) + Windows 串口配网(纯 Python 无副作用)
+# pyserial: USB 有线通道数据收发(全平台)
 pyserial>=3.5
 # 托盘(pystray): macOS 走 pyobjc 后端, Windows 走 ctypes 后端(无需 pywin32)
 pystray>=0.19
