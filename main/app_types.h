@@ -170,7 +170,14 @@ typedef enum {
     APP_ACT_TIME_SET,        // time_sync_set_epoch(校时落地)
 } app_action_type_t;
 
-#define APP_ACT_MAX 4   // 单事件最多产出的动作数
+// 单事件最多产出的动作数。emit() 满了就静默丢弃,所以这个值必须 ≥ 最长的
+// 那一条归约路径,否则丢的是尾部动作 —— 4 → 6(2026-08-29):息屏/断电态按
+// 音量加开录音是最长路径,唤醒三连(UI_PANEL_ON + UI_SCREEN_ON + UI_REFRESH)
+// 之后还有 PLAY_TONE + SEND_VOICE_START = 5 条,第 5 条正好被丢 —— 结果是
+// 滴声照响、采集照开,而 Mac 侧从没收到 voice.start(整段话进不了 ASR)。
+// 同长的还有"息屏 + 音量减长按清空"(唤醒三连 + SEND_KEY_ACTION + PLAY_TONE)
+// 与离线 PTT(唤醒三连 + PLAY_TONE(ERROR) + UI_REFRESH)。取 6 留一条余量。
+#define APP_ACT_MAX 6
 
 typedef struct {
     app_action_type_t type;
@@ -221,6 +228,13 @@ typedef struct {
 // 重叠(前几帧录进 440Hz),只发生在退化路径,可接受。兜底触发在串口留痕
 // (main.c 心跳里辨认 STREAM_START),下次再慢可直接看日志而不是猜。
 #define APP_TONE_PENDING_TIMEOUT_MS 200u
+// PTT 最长单次说话(2026-08-29 新增):LISTENING 原本是唯一没有退出超时的状态
+// —— 松开事件一旦丢了(on_key 走 post_important(100ms),队列满仍可能丢),设备就
+// 永久 LISTENING:一直采集、一直占着会话 PM 锁(进不了低功耗)、Mac 侧挂着永不
+// 收束的 voice 流,只能靠断电恢复。到点按"正常松手"收束(STREAM_STOP +
+// SEND_VOICE_END,已录的照常转写),不当错误处理 —— 真人一口气说不到 60s,正常
+// 使用永远碰不到这条路径。
+#define APP_PTT_MAX_TALK_MS     60000u
 
 #ifdef __cplusplus
 }

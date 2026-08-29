@@ -27,11 +27,25 @@ import time
 # 打包运行时 stdout/stderr 无处可去(PyInstaller --windowed):重定向到
 # ~/Library/Logs/AI Passport.log,诊断 BLE 链路(连接/voice.start/ASR/
 # 悬浮窗回调)可复盘。源码运行不受影响。必须在任何 print 之前设置。
+# 打不开日志(目录被删/只读/磁盘满/权限)不能让 App 起不来 —— 无 stdout 的
+# windowed 进程里这个异常没有任何出口, 用户看到的就是"图标弹一下就没了"。
+# 退到 os.devnull: 丢日志换可用性; 连 devnull 都打不开就保持原样(仍能跑,
+# print 写进不存在的 stdout 由 Python 自己吞掉)。
 if getattr(sys, "frozen", False):
     import os
-    _logf = open(os.path.expanduser("~/Library/Logs/AI Passport.log"), "a", buffering=1)
-    sys.stdout = _logf
-    sys.stderr = _logf
+    _logf = None
+    _logp = os.path.expanduser("~/Library/Logs/AI Passport.log")
+    for _cand in (_logp, os.devnull):
+        try:
+            if _cand is _logp:
+                os.makedirs(os.path.dirname(_logp), exist_ok=True)
+            _logf = open(_cand, "a", buffering=1)
+            break
+        except Exception:
+            _logf = None
+    if _logf is not None:
+        sys.stdout = _logf
+        sys.stderr = _logf
 import tkinter as tk
 from tkinter import font as tkfont
 from tkinter import messagebox

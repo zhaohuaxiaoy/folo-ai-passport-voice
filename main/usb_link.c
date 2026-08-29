@@ -260,7 +260,10 @@ static void handle_sys(const char *line, size_t len)
         if (!s_session_up) {
             s_session_up = true;
             app_event_t c = { .type = APP_EV_USB_CONNECTED };
-            app_event_post(&c);
+            // 与 USB_DISCONNECTED 对齐(2026-08-29):连接事件丢了会让 UI 停在
+            // 离线、PTT 被挡,而线其实是通的。本函数在 usb_link 任务上下文,
+            // 阻塞 ≤100ms 安全。
+            app_event_post_important(&c, 100);
         }
         send_sys_resp("pong", 4);
         send_device_hello();

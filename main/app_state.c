@@ -61,6 +61,36 @@
 // LONG 长按期间只报一次,guard 只挡第一次;松手后再次长按 OK 正常锁定。
 #define OK_LONG_GUARD_MS 1000
 
+// OK 键"真实按压"电压区间(2026-08-29):OK 分压档是 447-1900mV
+// (BSP_BTN_MV_TABLE),真机实测按住期间回调读数 598-599。锁定入口拿它判真假 ——
+// 与 UP(PTT_UP_PRESS_MAX_MV)、DOWN(PTT_FAKE_LONG_MV)的门禁同一口径:真按压时
+// 回调必然读到本档,幽灵事件读到的是别档或松开电平(2890)。
+// 目前没有抓到过 OK 档的幽灵(射频腐蚀方向是整段压到 0mV,落在 UP 档),这条是
+// 对称性补齐,不是已发生缺陷的修复。
+// ⚠ 只用于"上锁",解锁那条路径故意不加门禁:门禁判错的代价不对称 —— 挡掉一次
+//   幽灵上锁毫无损失,挡掉一次真解锁等于用户面对一块砖。
+#define OK_PRESS_MIN_MV 447
+#define OK_PRESS_MAX_MV 1900
+
+// 幽灵事件判定(与各分支自己的 mv 门禁同口径,集中一处便于对账)。
+// 只有"手指还在键上"的事件类型可判:PRESS 与 LONG 回调时刻按压仍在,mv 必落
+// 本档;RELEASE/LONG_UP/CLICK/DOUBLE 回调时用户已松手,mv 恒 2890,无从判真假
+// (真假单击靠 PRESS 时记下的 last_up_press_mv 区分)。
+static bool key_ev_is_fake(const app_event_t *ev) {
+    const uint8_t b = ev->u.key.btn;
+    const uint16_t mv = ev->u.key.mv;
+    if (b == APP_BTN_UP && (ev->type == APP_EV_KEY_PRESS || ev->type == APP_EV_KEY_LONG)) {
+        return mv > PTT_UP_PRESS_MAX_MV;
+    }
+    if (b == APP_BTN_DOWN && ev->type == APP_EV_KEY_LONG) {
+        return mv >= PTT_FAKE_LONG_MV;
+    }
+    if (b == APP_BTN_OK && ev->type == APP_EV_KEY_LONG) {
+        return mv < OK_PRESS_MIN_MV || mv > OK_PRESS_MAX_MV;
+    }
+    return false;
+}
+
 static const char *const AGENT_STATE_NAMES[APP_AGENT_COUNT] = {
     [APP_AGENT_READY]    = "ready",
     [APP_AGENT_THINKING] = "thinking",
@@ -233,7 +263,9 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         // 再长按 OK 仍是解锁(上方分支先行),录音不受影响。
     } else {
         if (screen_was_off) {
-            if (ev->type == APP_EV_KEY_PRESS) {
+            // 幽灵事件不唤醒(2026-08-29):假 UP PRESS 会白亮 20s 屏
+            // (下方状态机分支有 mv 门禁不会误开录音,但屏已经亮了)。
+            if (ev->type == APP_EV_KEY_PRESS && !key_ev_is_fake(ev)) {
                 if (!s->panel_on) {
                     s->panel_on = true;
                     app_action_t p = { .type = APP_ACT_UI_PANEL_ON };
@@ -262,7 +294,10 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         // 锁定入口:亮屏的 HOME/READY 下长按 OK(0.5s 阈值)立即锁定息屏
         // (背光灭 + 面板 SLPIN 断电,不等 60s 超时)。录音/转写/审批/Agent
         // 运行中不可锁定;USB 模式手动锁定允许(显式操作,省电优先)。
+        // 幽灵长按拦截(2026-08-29 对称性补齐,见 OK_PRESS_MIN_MV):回调时刻
+        // mv 不在 OK 档 = 无人按键。上锁挡错的代价是"少锁一次",可以承受。
         if (ev->type == APP_EV_KEY_LONG && b == APP_BTN_OK &&
+            !key_ev_is_fake(ev) &&
             (s->state == APP_ST_HOME || s->state == APP_ST_READY) &&
             s->screen_on && s->panel_on &&
             now_ms - s->wake_ms > OK_LONG_GUARD_MS) {
@@ -285,7 +320,7 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
     // 长按到点即清空并给一声提示音 —— 用户无法凭手感知道 500ms 到了没有,和
     // 开录音的滴声同理(这是阈值确认音,不是状态音,不违反"转写期静音")。
     if (ev->type == APP_EV_KEY_LONG && b == APP_BTN_DOWN) {
-        if (ev->u.key.mv >= PTT_FAKE_LONG_MV) {
+        if (key_ev_is_fake(ev)) {   // 等价于 mv >= PTT_FAKE_LONG_MV,口径集中在一处
             return;
         }
         send_key_action(s, APP_KEY_CLEAR, out, n, max);
@@ -452,6 +487,12 @@ static void handle_tick(app_state_t *s, uint64_t now_ms, app_action_t *out, uint
             emit(out, n, max, st);
             s->stream_started = true;
         }
+        // 说话时长兜底(2026-08-29 新增,见 APP_PTT_MAX_TALK_MS):松开事件丢失
+        // 时 LISTENING 会永久滞留。到点按"正常松手"处理 —— 已录内容照常进转写,
+        // 不给错误提示(真人一口气到不了 60s,正常路径不可达)。
+        else if (elapsed >= APP_PTT_MAX_TALK_MS) {
+            end_ptt(s, now_ms, out, n, max);
+        }
         break;
     case APP_ST_TRANSCRIBING:
         if (elapsed >= APP_TRANSCRIBE_TIMEOUT) {
@@ -504,7 +545,12 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
     case APP_EV_KEY_DOUBLE:
     case APP_EV_KEY_LONG:
     case APP_EV_KEY_LONG_UP:
-        s->last_key_ms = now_ms;
+        // 幽灵事件不算"用户活动":射频腐蚀造出的假按会把自动息屏计时一路推后
+        // (真机环 130s 内两次),屏幕迟迟不熄 = 白耗电。事件本身照常放行 ——
+        // 各分支自己的 mv 门禁负责不让它产生动作(口径见 key_ev_is_fake)。
+        if (!key_ev_is_fake(ev)) {
+            s->last_key_ms = now_ms;
+        }
         handle_key(s, ev, now_ms, out, out_n, max);
         break;
 
@@ -649,6 +695,19 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         break;
 
     case APP_EV_AUDIO_ERROR:
+        // 采集/发送出错必须先把会话收束掉再回 READY(2026-08-29 修):原先只
+        // set_toast + abort_to_ready,留下三个尾巴 ——
+        //   ① 音频管线里的残留帧会流进下一次会话(token 失效只挡已开流的部分);
+        //   ② Mac 侧挂着一个永不结束的 voice,ASR 流要等到 STT 超时才收;
+        //   ③ STREAM_START 取的会话 PM 锁没人放,设备再也回不到低功耗门禁。
+        // 两条动作都幂等(执行器侧 pm_session_unlock 亦有幂等守卫):滴声还没播完
+        // 就出错时流其实没开,CANCEL 落地无副作用。
+        if (s->state == APP_ST_LISTENING) {
+            app_action_t c = { .type = APP_ACT_STREAM_CANCEL };
+            emit(out, out_n, max, c);
+            app_action_t v = { .type = APP_ACT_SEND_VOICE_END };
+            emit(out, out_n, max, v);
+        }
         set_toast(s, now_ms, "Audio error");
         abort_to_ready(s, now_ms, NULL, out, out_n, max);
         break;

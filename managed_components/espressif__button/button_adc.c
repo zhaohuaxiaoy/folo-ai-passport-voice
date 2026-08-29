@@ -83,6 +83,8 @@ typedef struct {
     adc_unit_t unit_id;
     uint32_t ch;
     uint32_t index;
+    // 补丁 2026-08-29:面板上电抑制窗内维持的上一次判定(见 s_ignore_until_us)。
+    uint8_t last_level;
 } button_adc_obj;
 
 static button_adc_t g_button = {0};
@@ -270,8 +272,18 @@ static uint32_t s_last_mv = 3000;      // 上次返回电压(松开态初始,首
 // UP 假按 → 300ms 假 LONG → PTT 开录(真机 KEYDBG 取证: 解锁后 25963ms
 // UP PRESS_DOWN mv=598,面板稳定后 27098ms 恢复,PTT 自动停)。
 // bsp_display_power(true) 入口调用 button_adc_set_ignore_until() 设置窗口;
-// 窗口内 get_key_level 直接返回 INACTIVE —— 状态机当"松开"处理,不吞回调、
-// 不污染 LONG 态(组件升版会覆盖此补丁,须同步移植)。
+// 窗口内 get_key_level 返回【窗前的最后一次判定】(不吞回调、不污染 LONG 态;
+// 组件升版会覆盖此补丁,须同步移植)。
+//
+// 修正 2026-08-29:窗内原先返回 INACTIVE,那等于凭空合成一次"松开" —— 面板
+// 断电(空闲 60s)后按住音量加说话,PRESS 先开了会话并播滴声,同一轮渲染里
+// bsp_display_power(true) 开窗 → 状态机立刻收到 RELEASE → 不足
+// PTT_MIN_TALK_MS 被判误触、收束回 READY;600ms 后窗关,手指还按着 → 又是
+// 一次全新 PRESS → 第二声滴 + 第二个会话。用户报的"长按音量上键有时候会响
+// 两次"就是它(有时候 = 只在面板已断电的那一按)。改成维持原判定后:窗前按
+// 着就一直算按着,窗前没按就一直算没按 —— 原始的假按(窗内 ADC 读 ~0mV 被判
+// 成 UP 按下)同样被挡住。代价:恰好在窗内松手的那次,松开事件最多迟 600ms
+// 被发现(PTT 多录 ≤0.6s),远好过丢掉开头 0.6s 又响两声。
 static int64_t s_ignore_until_us;
 void button_adc_set_ignore_until(int64_t until_us) { s_ignore_until_us = until_us; }
 
@@ -388,10 +400,11 @@ uint8_t button_adc_get_key_level(button_driver_t *button_driver)
     int ch_index = find_channel(adc_btn->unit_id, ch);
     ESP_RETURN_ON_FALSE(ch_index >= 0, 0, TAG, "The button_index is not init");
 
-    // 面板上电 SPI 窗(见文件头 button_adc_set_ignore_until 注释):判定直接
-    // 返回 INACTIVE,ADC 读数在窗内不可信。
+    // 面板上电 SPI 窗(见文件头 button_adc_set_ignore_until 注释):窗内 ADC
+    // 读数不可信 —— 维持窗前的最后一次判定,绝不合成"松开"(否则按住唤醒时
+    // PTT 会被判误触收束,600ms 后再来一次 → 响两声,见文件头修正记录)。
     if (esp_timer_get_time() < s_ignore_until_us) {
-        return BUTTON_INACTIVE;
+        return adc_btn->last_level;
     }
 
     /** It starts only when the elapsed time is more than 1ms */
@@ -402,8 +415,10 @@ uint8_t button_adc_get_key_level(button_driver_t *button_driver)
 
     if (vol <= g_button.unit[adc_btn->unit_id].ch[ch_index].btns[index].max &&
             vol >= g_button.unit[adc_btn->unit_id].ch[ch_index].btns[index].min) {
+        adc_btn->last_level = BUTTON_ACTIVE;
         return BUTTON_ACTIVE;
     }
+    adc_btn->last_level = BUTTON_INACTIVE;
     return BUTTON_INACTIVE;
 }
 

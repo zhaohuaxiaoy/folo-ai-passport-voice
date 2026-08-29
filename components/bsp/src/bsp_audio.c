@@ -160,6 +160,13 @@ esp_err_t bsp_audio_write(const void *pcm, size_t bytes) {
     return esp_codec_dev_write(s_dev, (void *)pcm, bytes) == 0 ? ESP_OK : ESP_FAIL;
 }
 
+// 阻塞读, 不设超时(有意为之, 2026-08-29 审查确认)。esp_codec_dev_read 底层是
+// i2s_channel_read(..., portMAX_DELAY): I2S RX 由 MCLK 硬件时钟驱动, 只要通道
+// 使能就按 16kHz 稳定产出 DMA 描述符, "读不回来"意味着时钟或 DMA 已经死了 ——
+// 那种状态下加超时只会把一个可诊断的死等(任务栈上看得见卡在哪)变成一串
+// ESP_FAIL 与静音帧。调用方(audio_streamer 的 audio_worker)是专用任务, 优先级
+// 低于喂狗 IDLE, 卡住不会拖垮系统; 会话结束由 s_active 标志退出循环, 最后一次
+// read 返回后才检查, 所以最坏多等一块(100ms)。
 esp_err_t bsp_audio_read(void *pcm, size_t bytes) {
     if (!s_dev) return ESP_ERR_INVALID_STATE;
     return esp_codec_dev_read(s_dev, pcm, bytes) == 0 ? ESP_OK : ESP_FAIL;

@@ -407,7 +407,12 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg) {
                 };
                 ble_gap_update_params(event->subscribe.conn_handle, &upd);
                 app_event_t ev = { .type = APP_EV_BLE_CONNECTED };
-                app_event_post(&ev);
+                // 与断连对齐(2026-08-29):连接同样是"收束关键事件"。丢一条
+                // BLE_CONNECTED 的后果比丢断连更隐蔽 —— UI 一直显示离线、PTT 被
+                // 离线分支挡住(按了只有 error 音),而链路其实是通的,要等到真
+                // 断连才重新自洽。调用在 NimBLE host 任务上下文(非 ISR),阻塞
+                // ≤100ms 安全,与本文件 disconnect 分支同论证。
+                app_event_post_important(&ev, 100);
             } else {
                 ESP_LOGW(TAG, "EVENT 订阅取消,链路断");
                 app_event_t d = { .type = APP_EV_BLE_DISCONNECTED };

@@ -15,6 +15,12 @@ extern "C" {
 
 esp_err_t console_cmds_register(void);
 
+// 复位原因枚举 → 可读名(esp_reset_reason 的 esp_reset_reason_t)。
+// 越界/未知返回 "unknown"。main.c 的启动日志与 rst 命令共用一份表 ——
+// 之前两处各写了一份注释版枚举, 且都比 IDF 5.x 的实际取值错位一位
+// (真机 2026-08-29: USB 复位报 11, 注释表把 11 写成 SDIO)。
+const char *console_reset_reason_str(int reason);
+
 // 输出回调(SYS 帧捕获用;NULL = 缺省写 stdout)。
 typedef void (*console_emit_fn_t)(const char *s, size_t n);
 void console_cmds_set_emit(console_emit_fn_t fn);

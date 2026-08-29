@@ -56,16 +56,29 @@ static esp_pm_lock_handle_t s_pm_no_ls;   // USB 主机在位:禁 light sleep
 static StackType_t s_usb_presence_stack[3072];
 static StaticTask_t s_usb_presence_tcb;
 
+// 幂等守卫(2026-08-29):esp_pm_lock_release 对未持有的锁返回 INVALID_STATE,
+// 计数型锁上重复 acquire 更会让计数只升不降 —— 而"取消"在设计上就是幂等动作,
+// 同一个会话可以先 STREAM_STOP(松手)再 STREAM_CANCEL(紧随的断链/AUDIO_ERROR),
+// 反过来 AUDIO_ERROR 的兜底路径也可能在没开流时发 CANCEL。用一个布尔把"会话锁
+// 是否在手"记下来,重复取/重复放都成为空操作。
+// 单上下文不变量:lock/unlock 只在 app_task 的 run_actions() 里调用(见下方各
+// APP_ACT_* 分支),故裸布尔无需原子化;新增调用点若不在 app_task 上,必须改锁。
+static bool s_pm_sess_held;
+
 static void pm_session_lock(void)
 {
+    if (s_pm_sess_held) return;
     if (s_pm_cpu) esp_pm_lock_acquire(s_pm_cpu);
     if (s_pm_apb) esp_pm_lock_acquire(s_pm_apb);
+    s_pm_sess_held = true;
 }
 
 static void pm_session_unlock(void)
 {
+    if (!s_pm_sess_held) return;
     if (s_pm_apb) esp_pm_lock_release(s_pm_apb);
     if (s_pm_cpu) esp_pm_lock_release(s_pm_cpu);
+    s_pm_sess_held = false;
 }
 
 // ---- 电源管理:活动门禁(2026-08-28 用户要求)----
@@ -476,9 +489,14 @@ void app_main(void)
     // (抓 HCI 包时临时把 CONFIG_BT_NIMBLE_LOG_LEVEL 调到 DEBUG,别留在代码里——
     //  NimBLE DEBUG 每个 HCI 字节一行,音频流期间会压满串口和 CPU。)
     ESP_LOGI(TAG, "AI Passport 固件启动");
-    // 复位原因(1上电 2外部 4软件 5panic 6int_wdt 7task_wdt 8wdt 9深度睡眠
-    // 10brownout 掉电 11sdio):用户反馈异常时第一行日志即可判断电源/软件。
-    ESP_LOGI(TAG, "复位原因: %d", (int)esp_reset_reason());
+    // 复位原因:用户反馈异常时第一行日志即可判断电源/软件。枚举名取自
+    // console_reset_reason_str(与 rst 命令同一份表,见 console_cmds.h)——
+    // 这里原来手抄的中文枚举比 IDF 5.x 实际取值错位一位,brownout(9)会被
+    // 读成"深度睡眠",panic(4)读成"软件",判因方向整个反了。
+    {
+        const int rr = (int)esp_reset_reason();
+        ESP_LOGI(TAG, "复位原因: %d (%s)", rr, console_reset_reason_str(rr));
+    }
 
     // 0. 电源管理:空闲自动 light sleep + CPU 变频(功耗优化 #1)。
     //    max 160MHz(录音/渲染峰值),min 80MHz(空闲省 CPU 电流);
@@ -524,6 +542,12 @@ void app_main(void)
     nvs_settings_init();
 
     // 2. BSP:总线 + 显示(失败则无法继续 —— UI 是唯一出口)
+    // 这里(以及上面 NVS)的 return 是有意的"停在原地", 不是漏了错误处理
+    // (2026-08-29 审查确认):app_main 返回后任务被删除, 已起的 usb_presence /
+    // 控制台仍在跑, 串口上留着这行 ESP_LOGE —— 这是唯一能让人看出"为什么这台
+    // 设备没反应"的证据。换成 esp_restart() 会变成静默复位循环: 屏没起来的
+    // 设备无法自报错误, 用户看到的只是一块反复重启的砖, 日志被冲掉。
+    // 这两处失败都是硬件/焊接级故障(I2C 不通、面板无响应), 重试没有意义。
     bsp_i2c_init();
     if (bsp_display_init() != ESP_OK || !bsp_lvgl_init()) {
         ESP_LOGE(TAG, "显示/LVGL 初始化失败,终止");

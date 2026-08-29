@@ -20,7 +20,9 @@ from relay import (  # noqa: E402
     CTRL_UUID, EVENT_UUID, AUDIO_UUID,
     TRANSCRIPT_TEXT_MAX, Relay, RelayError,
     reassemble_audio, reassemble_event, split_transcript,
-    reassemble_adpcm, ADPCM_CHUNK_HDR, ADPCM_CHUNK_LAST,
+    reassemble_adpcm, split_merged_notify, _focus_delay,
+    INJECT_FOCUS_DELAY_DEFAULT, INJECT_FOCUS_DELAY_MAX,
+    ADPCM_CHUNK_HDR, ADPCM_CHUNK_LAST,
 )
 from asr_client import StreamingASR, RESULTS_Q_MAX  # noqa: E402
 from adpcm import (  # noqa: E402
@@ -106,6 +108,13 @@ class FailingWriteTransport(FakeTransport):
     async def write_gatt_char(self, uuid, data, response=False):
         self.events.append(("write", uuid, bytes(data), response))
         raise OSError("模拟 CTRL 写失败")
+
+
+def agent_status_writes(events):
+    """提取 CTRL 下行里的 agent.status 行(JSON 对象列表)。"""
+    return [json.loads(e[2]) for e in events
+            if e[0] == "write" and e[1] == CTRL_UUID
+            and json.loads(e[2]).get("type") == "agent.status"]
 
 
 def transcript_writes(events):
@@ -291,6 +300,89 @@ def _chunk(seq, idx, last, data):
     """构造带帧头的 notify 载荷(与固件 ble_audio.c 帧头格式一致)。"""
     b1 = idx | (ADPCM_CHUNK_LAST if last else 0)
     return bytes([seq, b1]) + data
+
+
+def _adpcm_state():
+    return {"seq": None, "buf": bytearray(), "last_idx": -1,
+            "last_seq": None, "miss": 0, "unit": None}
+
+
+def _frags(seq, blk, body):
+    """按固件规则把一个 804B 块切成带帧头的分片(非末片长度恒为 body+2)。"""
+    parts = [blk[i:i + body] for i in range(0, len(blk), body)]
+    return [_chunk(seq, i, i == len(parts) - 1, p) for i, p in enumerate(parts)]
+
+
+def test_reassembly_adpcm_merged():
+    """CoreBluetooth 合并 notification 的拆分(C-1):任何合并方式的输出必须与
+    逐片投递逐字节相同。合并只是整片拼接,所以判据就是"与不合并等价"。"""
+    def feed(chunks, st=None):
+        st = st or _adpcm_state()
+        frames = []
+        for c in chunks:
+            st, got = reassemble_adpcm(st, c)
+            frames += got
+        return st, frames
+
+    body = 251                      # MTU 256: body = 256-3-2, 满片 253B
+    blk0 = encode_block(AdpcmState(), _make_samples(0))
+    blk1 = encode_block(AdpcmState(), _make_samples(1))
+    f0 = _frags(10, blk0, body)     # 4 片: 253,253,253,53
+    f1 = _frags(11, blk1, body)
+    check("合并测试前提: 4 片且非末片 253B",
+          (len(f0), len(f0[0]), len(f0[-1])), (4, 253, 53))
+    _, want = feed(f0 + f1)
+    check("参考(逐片): 2 帧", len(want), 2)
+
+    # 1) 两个满片合并成一次回调
+    _, got = feed([f0[0] + f0[1], f0[2], f0[3]] + f1, _learned(body))
+    check("合并两满片 == 逐片", got, want)
+
+    # 2) 满片 + 末片合并(块尾被并进来)
+    _, got = feed([f0[0], f0[1], f0[2] + f0[3]] + f1)
+    check("合并满片+末片 == 逐片", got, want)
+
+    # 3) 末片 + 下一块满片合并(跨块边界,长度在前的是短片 —— 按 unit 从左
+    #    硬拆会错位,必须靠 LAST 位与"块还缺多少"定界)
+    _, got = feed(f0[:3] + [f0[3] + f1[0]] + f1[1:])
+    check("合并末片+下块满片 == 逐片", got, want)
+
+    # 4) 一次回调裹住整块 + 下块两片
+    _, got = feed([b"".join(f0) + f1[0] + f1[1]] + f1[2:], _learned(body))
+    check("合并整块+跨块两片 == 逐片", got, want)
+
+    # 5) 三满片合并
+    _, got = feed([f0[0] + f0[1] + f0[2], f0[3]] + f1, _learned(body))
+    check("合并三满片 == 逐片", got, want)
+
+    # 6) unit 学习:第一个非末片载荷就是合并的(残留边角)—— 该块解错但不
+    #    崩、不失步,后续干净满片把 unit 纠正回来,下一块正常
+    st, got = feed([f0[0] + f0[1]] + f0[2:] + f1)
+    check("首包即合并: unit 被后续满片纠正", st["unit"], 253)
+    check("首包即合并: 下一块仍解出正确帧", got[-1:], want[-1:])
+
+    # 7) 丢片 + 合并:账面"还缺多少"算大,只能靠"切口后必须是下一块片头"定界。
+    #    有缺口的块按既有语义丢弃(计 miss),关键是下一块必须完好解出 —— 不拆
+    #    的话它的片头落在数据中间,整个会话从此错位。
+    lossy = [f0[0], f0[1], f0[3] + f1[0]] + f1[1:]
+    check("丢片+合并的切口按片头校正",
+          [len(x) for x in split_merged_notify(_learned(body), lossy[2])], [53, 253])
+    st, got = feed(lossy, _learned(body))
+    check("丢片块计 miss 并丢弃", (st["miss"], len(got)), (1, 1))
+    check("丢片后下一块仍逐字节正确", got, want[-1:])
+
+    # 8) 纯函数边界:碎片(<2B)原样返回,不足帧头的尾巴单独成片
+    st = _learned(body)
+    check("碎片原样返回", split_merged_notify(st, b"\x01"), [b"\x01"])
+    pieces = split_merged_notify(st, f0[0] + b"\x07")
+    check("尾部碎片单独成片", (len(pieces), pieces[-1]), (2, b"\x07"))
+
+
+def _learned(body):
+    """已学到 unit 的重组状态(真实会话第一片非末片即学到)。"""
+    st = _adpcm_state()
+    st["unit"] = body + ADPCM_CHUNK_HDR
+    return st
 
 
 def test_reassembly_adpcm():
@@ -514,6 +606,69 @@ async def test_voice_flow_adpcm():
     check("统计 rx_frames=6(100ms 口径)", stats["rx_frames"], 6)
     check("统计 final_text", stats["final_text"], "你好世界")
 
+    t.disconnect_cb()
+    await wait_until(task.done, what="断开退出")
+
+
+async def test_adpcm_state_resets_between_sessions():
+    """同一连接上连续两次 ima_adpcm 会话:前一会话的残留半块不能污染后一会话。
+
+    seq 是每会话从 0 起的 mod 256 块序号。上一会话末尾若留下未终结的半块
+    (末片丢了/设备排空前断流),新会话第 0 块的 seq 会撞上残留的 last_seq,
+    被当成"已终结块的迟到片"整块丢弃 —— 表现为新会话开头几个 100ms 凭空
+    消失。只按 audio_format 变化复位挡不住这种情况(两次会话格式相同)。
+    """
+    t = FakeTransport()
+    injector = FakeInjector()
+    asrs = []
+
+    def factory():
+        a = FakeASR([("第二次会话", True)])
+        asrs.append(a)
+        return a
+
+    relay = Relay(t, asr_factory=factory, inject_fn=injector,
+                  timeout=5, do_approval=False)
+    task = asyncio.create_task(relay.run())
+    await wait_until(lambda: t.handlers, what="订阅")
+
+    body = 180
+    blks = [encode_block(AdpcmState(), _make_samples(b)) for b in range(3)]
+
+    def send_block(seq, blk, drop_last=False):
+        parts = [blk[i:i + body] for i in range(0, len(blk), body)]
+        if drop_last:
+            parts = parts[:-1]                 # 末片丢失 → 半块留在状态里
+        for i, p in enumerate(parts):
+            t.notify_audio(_chunk(seq, i, i == len(parts) - 1 and not drop_last, p))
+
+    # 会话一: 第 0 块完整 + 第 1 块缺末片(残留)
+    t.notify_event(b'{"event":"voice.start","audio":"ima_adpcm"}\n')
+    await wait_until(lambda: relay._session is not None, what="会话一 start")
+    send_block(0, blks[0])
+    await wait_until(lambda: len(asrs[0].sent_frames) >= 1, what="会话一 1 帧")
+    send_block(1, blks[1], drop_last=True)
+    t.notify_event(b'{"event":"voice.end"}\n')
+    await wait_session_done(relay)
+
+    # 会话二: seq 从 0 重新开始 —— 与残留的 seq/last_seq 撞值
+    t.notify_event(b'{"event":"voice.start","audio":"ima_adpcm"}\n')
+    await wait_until(lambda: len(asrs) >= 2 and relay._session is not None,
+                     what="会话二 start")
+    send_block(0, blks[0])
+    send_block(1, blks[1])
+    await wait_until(lambda: len(asrs[1].sent_frames) >= 2, what="会话二 2 帧",
+                     timeout=2.0)
+
+    check("会话二收到 2 帧", len(asrs[1].sent_frames), 2)
+    for i in (0, 1):
+        check(f"会话二帧{i}逐字节正确",
+              list(struct.unpack("<1600h", asrs[1].sent_frames[i])),
+              decode_block(blks[i]))
+
+    t.notify_event(b'{"event":"voice.end"}\n')
+    await wait_until(lambda: len(relay.session_stats) >= 2, what="会话二统计")
+    await wait_session_done(relay)
     t.disconnect_cb()
     await wait_until(task.done, what="断开退出")
 
@@ -825,6 +980,13 @@ async def test_ctrl_write_no_response():
     await wait_until(task.done, what="断开退出")
 
 
+class FailingConnectASR(FakeASR):
+    """connect() 直接抛错:模拟 ASR 鉴权/网络失败(会话拿不到任何结果)。"""
+
+    async def connect(self):
+        raise OSError("模拟 ASR 连接失败")
+
+
 class HangingConnectASR(FakeASR):
     """connect() 永久悬挂:模拟网络黑洞(审查 P1-4: 无超时曾卡死音频排空)。"""
 
@@ -950,6 +1112,59 @@ async def test_connect_timeout():
     t.disconnect_cb()
     await wait_until(task.done, what="超时后断开仍干净退出")
     check("超时后 asr 已关闭", holder["asr"].closed, True)
+
+
+def test_focus_delay_cfg():
+    """inject_focus_delay(Windows 注入前等待秒数)读配置要能兜住手工编辑的
+    脏值 —— 否则异常在"用户说完话要注入"的那一刻才炸,且看不出与配置有关。"""
+    d = INJECT_FOCUS_DELAY_DEFAULT
+    check("缺省(键不存在)", _focus_delay({}), d)
+    check("正常值原样", _focus_delay({"inject_focus_delay": 0.5}), 0.5)
+    check("字符串数字可用", _focus_delay({"inject_focus_delay": "1.5"}), 1.5)
+    check("0 = 不等(单测/无人值守)", _focus_delay({"inject_focus_delay": 0}), 0.0)
+    check("负数夹到 0", _focus_delay({"inject_focus_delay": -3}), 0.0)
+    check("手滑多打一位夹到上限",
+          _focus_delay({"inject_focus_delay": 200}), INJECT_FOCUS_DELAY_MAX)
+    check("非数字退缺省", _focus_delay({"inject_focus_delay": "soon"}), d)
+    check("null 退缺省", _focus_delay({"inject_focus_delay": None}), d)
+    check("NaN 退缺省", _focus_delay({"inject_focus_delay": float("nan")}), d)
+
+
+async def test_agent_done_always_sent_once():
+    """agent.status done 是设备退出 TRANSCRIBING 的唯一信号:成功、ASR 连接
+    失败、无最终结果超时三条路径都必须下行,且每会话恰一次(不重复)。
+
+    修复前只有定稿路径发 done —— 失败/超时会话让设备停在 TRANSCRIBING 直到
+    它自己的 STT 超时,期间还接不了新会话。
+    """
+    async def run_session(asr, timeout=5, feed_frame=True):
+        t = FakeTransport()
+        relay = Relay(t, asr_factory=lambda: asr, inject_fn=FakeInjector(),
+                      timeout=timeout, do_approval=False, connect_timeout_s=0.2)
+        task = asyncio.create_task(relay.run())
+        await wait_until(lambda: t.handlers, what="订阅")
+        t.notify_event(b'{"event":"voice.start"}\n')
+        await wait_until(lambda: relay._session is not None, what="voice.start")
+        if feed_frame:
+            t.notify_audio(bytes(AUDIO_FRAME_BYTES))
+        t.notify_event(b'{"event":"voice.end"}\n')
+        await wait_session_done(relay)
+        t.disconnect_cb()
+        await wait_until(task.done, what="断开退出")
+        return agent_status_writes(t.events)
+
+    # 成功路径: 定稿发一次, _close_up 不重复发
+    dones = await run_session(FakeASR([("你好", True)]))
+    check("成功会话 done 恰一次",
+          [d["state"] for d in dones], ["done"])
+
+    # ASR 连接失败: 一个结果都没有, done 仍要发
+    dones = await run_session(FailingConnectASR([]), feed_frame=False)
+    check("连接失败也发 done", [d["state"] for d in dones], ["done"])
+
+    # 无最终结果超时(results 只给中间结果后挂起)
+    dones = await run_session(FakeASR([("中间结果", False)]), timeout=0.2)
+    check("超时收尾也发 done", [d["state"] for d in dones], ["done"])
 
 
 async def test_results_queue_bounded():
@@ -1318,11 +1533,14 @@ async def main():
     test_reassembly_audio()
     test_reassembly_event()
     test_reassembly_adpcm()
+    test_reassembly_adpcm_merged()
+    test_focus_delay_cfg()
     print("== 转写切分(纯函数) ==")
     test_split_transcript()
     print("== relay 流程 ==")
     await test_voice_flow()
     await test_voice_flow_adpcm()
+    await test_adpcm_state_resets_between_sessions()
     await test_unknown_format_fallback()
     await test_time_sync_downlink_ble()
     await test_time_sync_downlink_usb()
@@ -1342,6 +1560,7 @@ async def main():
     await test_disconnect_overlapping_closing()
     await test_subscribe_failure_cleanup()
     await test_connect_timeout()
+    await test_agent_done_always_sent_once()
     await test_results_queue_bounded()
     await test_disconnect_queue_full()
     await test_no_approval_and_no_inject()

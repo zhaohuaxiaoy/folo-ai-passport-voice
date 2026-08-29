@@ -63,12 +63,25 @@ def _pick_family(available, candidates):
 def _anchor(sw, sh, w, h):
     """屏幕尺寸 + 窗口尺寸 → 底部居中坐标 (x, y)。
 
+    Tk 口径: 原点左上, y = 窗口上边距屏幕顶边(geometry +x+y 的语义)。
     窗口底边落在屏幕 80% 高度线(距屏幕底部向上 20%,微信语音输入式):
     y = int(sh * 0.8) - h。
     """
     x = max(0, (sw - w) // 2)
     y = max(0, int(sh * 0.8) - h)
     return x, y
+
+
+def _anchor_cocoa(sw, sh, w, h):
+    """同一落点换算到 Cocoa 口径 (x, y)。
+
+    NSWindow setFrameOrigin_ 的原点在屏幕左下, y = 窗口下边距屏幕底边 ——
+    与 Tk 的上下颠倒。直接套 _anchor 的 y 会把窗口顶到屏幕上部(sh=1080
+    时下边缘落在 y=864, 离顶只剩 ~100px), 与 Tk 分支的"中下部"不是一个
+    位置。所以统一由 _anchor 出落点再翻转一次, 两个平台永远一致。
+    """
+    x, y_top = _anchor(sw, sh, w, h)
+    return x, max(0, int(sh) - y_top - int(h))
 
 
 def _win32_exstyle_noactivate(existing):
@@ -486,8 +499,7 @@ class _MacPanelFloat:
         w = min(max(size.width, 80.0), float(_WRAP)) + 2 * _PAD_X
         h = max(size.height, 16.0) + 2 * _PAD_Y + 4
         sw, sh = screen.size.width, screen.size.height
-        x = max(0, int((sw - w) // 2))
-        y = max(0, int(sh * 0.8) - int(h))
+        x, y = _anchor_cocoa(int(sw), int(sh), int(w), int(h))
         self._panel.setContentSize_(NSMakeSize(w, h))
         self._label.setFrame_(NSMakeRect(_PAD_X, _PAD_Y,
                                          w - 2 * _PAD_X, h - 2 * _PAD_Y))

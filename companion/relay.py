@@ -159,6 +159,90 @@ def _finalize_adpcm_block(state, pad):
     return []
 
 
+def _last_frag_len(payload, off, seq, acc):
+    """合并载荷里一个末片(0x80)的长度。
+
+    首选"该块还缺多少 + 2B 帧头"这个账面值;但块内丢过片时账面会算大,所以要用
+    "切口后面必须是下一块的片头"来校验: 末片终结当前块,紧跟着的只可能是新块的
+    第 0 片,即 [seq+1][0] 或 [seq+1][0x80]。账面值校验不过就往后找第一个对得上
+    的切口(丢片场景下这是唯一可用的信号);都找不到就把剩余整段当一片,交给
+    _finalize_adpcm_block 的补零兜住,绝不硬拆出错位的片。
+    """
+    n = len(payload)
+    nxt = (seq + 1) & 0xFF
+
+    def ok(cut):
+        if cut == n:
+            return True                        # 正好吃完整段
+        if cut + ADPCM_CHUNK_HDR > n:
+            return False                       # 只剩碎片: 不是合理切口
+        return payload[cut] == nxt and not (payload[cut + 1] & 0x7F)
+
+    want = ADPCM_BLOCK_BYTES - acc + ADPCM_CHUNK_HDR
+    if want > ADPCM_CHUNK_HDR and off + want <= n and ok(off + want):
+        return want
+    for cut in range(off + ADPCM_CHUNK_HDR + 1, n):
+        if ok(cut):
+            return cut - off
+    return n - off
+
+
+def split_merged_notify(state, payload):
+    """一次 BLE 回调载荷 -> 分片列表(拆开 CoreBluetooth 合并的多条 notification)。
+
+    macOS 的 CoreBluetooth 会把连续到达的多条 ATT notification 合并进一次回调
+    (真机取证: 会话里出现 364/546/728B 这类成倍长度, 见 print_ble_chunk_dist)。
+    reassemble_adpcm 按"一次载荷 = 一个分片, 帧头在 offset 0"解析, 合并后第二个
+    分片的帧头落在数据中间 -> 整块解错、后续片全部错位, 该会话转写离谱。
+
+    拆分依据全部来自固件 main/ble_audio.c:ble_audio_notify_audio() 的分片规则:
+      - 一次连接内 body = mtu - 3 - 2 恒定 -> 非末片长度恒为 unit = body + 2;
+      - 末片(0x80)长度 = 该块还缺的数据 + 2B 帧头, 块固定 804B 数据;
+      - 合并只是整片拼接, 不会切断单片。
+    于是从左往右走一遍就能定界: 看片头的 LAST 位选长度。unit 用"非末片载荷长度
+    取最小值"学习 —— 满片必然不带 LAST, 合并载荷长度 ≥ unit + 3, min 收敛到真值。
+
+    对不上时的退让: 块内有丢片会让"还缺多少"算大, 此时把剩余整段当一片交给下游
+    (行为退化成原样, 由 _finalize_adpcm_block 的 miss/补零兜住), 绝不硬拆出错位
+    的片。unit 尚未学到且载荷超过"一片装得下整块"(2+804)时按该上限拆, 兜住 MTU
+    大到一片一块的情形。残留边角: 会话第一个非末片载荷本身就是合并的话, unit 被
+    学大, 这一块解错, 下一个干净满片纠正它 —— 影响限于该 100ms。
+    """
+    n = len(payload)
+    if n < ADPCM_CHUNK_HDR:
+        return [payload]                       # 碎片: 交给下游记 miss
+    if not payload[1] & ADPCM_CHUNK_LAST:
+        unit = state.get("unit")
+        if unit is None or n < unit:
+            state["unit"] = n
+    unit = state.get("unit")
+    if unit is None:
+        unit = ADPCM_CHUNK_HDR + ADPCM_BLOCK_BYTES   # 一片装得下整块的硬上限
+    if n <= unit:
+        return [payload]
+
+    pieces = []
+    off = 0
+    cur_seq = state.get("seq")
+    acc = len(state["buf"]) if cur_seq is not None else 0   # 当前块已收数据
+    while off + ADPCM_CHUNK_HDR <= n:
+        seq = payload[off]
+        if seq != cur_seq:
+            cur_seq, acc = seq, 0              # 片头换块: 重新计数
+        if payload[off + 1] & ADPCM_CHUNK_LAST:
+            want = _last_frag_len(payload, off, seq, acc)
+            pieces.append(payload[off:off + want])
+            off += want
+            cur_seq, acc = None, 0             # 块已终结
+        else:
+            pieces.append(payload[off:off + unit])
+            off += unit
+            acc += unit - ADPCM_CHUNK_HDR
+    if off < n:
+        pieces.append(payload[off:])           # 尾部不足帧头: 下游记 miss
+    return pieces
+
+
 def reassemble_adpcm(state, chunk):
     """BLE IMA ADPCM 块重组: (块状态 dict, 一段带帧头 notify 载荷) -> (状态, 帧列表)。
 
@@ -170,9 +254,16 @@ def reassemble_adpcm(state, chunk):
       - seq == 已终结块的 seq(迟到片) → 丢弃
     帧头不足 2B 的碎片记 miss 丢弃。state 初始
     {"seq": None, "buf": bytearray(), "last_idx": -1, "last_seq": None,
-    "miss": 0}。
+    "miss": 0, "unit": None}("unit" = 学习到的满片长度, 见 split_merged_notify)。
     """
     frames = []
+    # 合并载荷先拆开逐片喂(见 split_merged_notify);单片直通不递归。
+    pieces = split_merged_notify(state, chunk)
+    if len(pieces) > 1:
+        for piece in pieces:
+            state, got = reassemble_adpcm(state, piece)
+            frames += got
+        return state, frames
     if len(chunk) < ADPCM_CHUNK_HDR:
         state["miss"] += 1
         return state, frames
@@ -542,25 +633,30 @@ class Relay:
     async def _drain_audio(self):
         # 按会话格式分流重组: ima_adpcm(BLE, 2B 帧头 + 804B block)经
         # reassemble_adpcm 解回 3200B PCM 帧; pcm(USB 裸块)按 3200B
-        # 字节对齐。会话切换时重置重组状态, 防跨会话串流(设备在 voice.end
-        # 前排空, 干净边界下状态本为空, 重置仅兜底)。
+        # 字节对齐。会话切换时重置重组状态, 防跨会话串流: 只看格式变化不够 ——
+        # 同一连接上连续两次 ima_adpcm 会话格式相同, 而块序号 seq 是每会话从 0
+        # 起的 mod 256 值, 上一会话残留的半块会让新会话头几块被当成"已终结块的
+        # 迟到片"整块丢掉。所以按会话对象身份复位。学到的 unit(满片长度)是连接
+        # 级常量(MTU 决定), 跨会话保留, 免得每次会话开头重新学。
         pcm_buf = bytearray()
         adpcm_state = None
         last_fmt = None
+        last_sess = None
         while not self._stop.is_set():
             kind, chunk = await self._audio_q.get()
             if kind == "stop":
                 break
             s = self._session
             fmt = s.audio_format if s is not None else "pcm"
-            if fmt != last_fmt:
+            if fmt != last_fmt or s is not last_sess:
                 if fmt == "ima_adpcm":
+                    unit = adpcm_state.get("unit") if adpcm_state else None
                     adpcm_state = {"seq": None, "buf": bytearray(),
                                    "last_idx": -1, "last_seq": None,
-                                   "miss": 0}
+                                   "miss": 0, "unit": unit}
                 else:
                     pcm_buf.clear()
-                last_fmt = fmt
+                last_fmt, last_sess = fmt, s
             if fmt == "ima_adpcm":
                 n = len(chunk)
                 self._ble_chunk_lens[n] = self._ble_chunk_lens.get(n, 0) + 1
@@ -873,6 +969,7 @@ class _VoiceSession:
         self._results_task = None
         self._run_task = None
         self._ended = False                 # end() 幂等
+        self._done_sent = False             # agent.status done 只发一次
         self._stats_ref = None              # 本会话的统计占位(收尾完成时补全)
 
     async def begin(self):
@@ -904,6 +1001,20 @@ class _VoiceSession:
             except Exception as e:
                 print(f"[voice] on_candidate 回调异常: {e}", file=sys.stderr)
 
+    async def _ensure_agent_done(self):
+        """本会话的 agent.status done 只发一次(哪条路径先到算哪条)。
+
+        done 的语义是"会话结束"而不是"识别成功": 设备 TRANSCRIBING 只有收到
+        agent.status 才回 DONE。修复前 ASR 连接失败/无最终结果超时这两条路径
+        直接 _close_up() 收尾, 一个 done 都不发 —— 设备停在 TRANSCRIBING 直到
+        自己的 STT 超时(用户视角就是"说完卡住"), 中途还接不了新会话。
+        失败只记日志(见 _send_agent_done), 不重试: 会话已经在收尾了。
+        """
+        if self._done_sent:
+            return
+        self._done_sent = True
+        await self.relay._send_agent_done()
+
     async def _results_loop(self):
         """消费 ASR 结果: 中间结果仅预览(不注入), 定稿收尾并注入一次。
 
@@ -931,7 +1042,7 @@ class _VoiceSession:
                     # 靠 agent.status done 下行才回 DONE——悬浮窗取代的是
                     # 预览,不是收尾信号(真机验证 2026-08-27: 缺此下行设备
                     # 一直 TRANSCRIBING 直到 STT 超时)。
-                    await self.relay._send_agent_done()
+                    await self._ensure_agent_done()
                     self._final_received.set()
                     return
         except Exception as e:
@@ -1025,7 +1136,12 @@ class _VoiceSession:
         await self._close_up()
 
     async def _close_up(self):
-        """收尾收束: 关 ASR、取消结果循环、补全统计占位、打印。"""
+        """收尾收束: 补发 done、关 ASR、取消结果循环、补全统计占位、打印。
+
+        done 放最前: 收尾的每条路径(定稿/连接失败/超时/收尾异常)都经过这里,
+        设备的 TRANSCRIBING 由它释放, 不该排在 ASR 关闭之后。
+        """
+        await self._ensure_agent_done()
         try:
             await self.asr.close()
         except Exception as e:
@@ -1082,6 +1198,31 @@ def _build_transport(cfg):
         f"(WiFi 通道已移除, 请改为 \"ble\" 或 \"usb\")")
 
 
+INJECT_FOCUS_DELAY_DEFAULT = 2.0
+INJECT_FOCUS_DELAY_MAX = 30.0
+
+
+def _focus_delay(cfg):
+    """config.local.json 的 inject_focus_delay → 合法秒数(纯函数)。
+
+    Windows 注入前等用户切到目标窗口的秒数, 唯一可调的注入时序参数。手工编辑
+    过的配置里它可能是字符串/负数/null: 原来直接 float() 会在"第一次要注入"
+    的那一刻抛 ValueError/TypeError —— 用户说完话才发现注入不工作, 且异常信息
+    与配置项毫无关联。这里退回缺省 2.0, 并夹到 [0, 30](0 = 不等, 单测用;
+    上限防手滑多打一位让注入看起来卡死)。
+    """
+    raw = cfg.get("inject_focus_delay", INJECT_FOCUS_DELAY_DEFAULT)
+    try:
+        delay = float(raw)
+    except (TypeError, ValueError):
+        print(f"[cfg] inject_focus_delay 值无效({raw!r}), 用缺省 "
+              f"{INJECT_FOCUS_DELAY_DEFAULT}s", file=sys.stderr)
+        return INJECT_FOCUS_DELAY_DEFAULT
+    if delay != delay:                      # NaN: 比较全假, 夹不住
+        return INJECT_FOCUS_DELAY_DEFAULT
+    return min(max(delay, 0.0), INJECT_FOCUS_DELAY_MAX)
+
+
 def _default_inject_fn(cfg):
     """按平台选注入后端(契约一致: 单参 text):
 
@@ -1100,7 +1241,7 @@ def _default_inject_fn(cfg):
             f"(应为 \"auto\"、\"unicode\" 或 \"clipboard\")")
     if sys.platform == "win32":
         from inject_win import paste_text
-        delay = float(cfg.get("inject_focus_delay", 2.0))
+        delay = _focus_delay(cfg)
         return lambda text: paste_text(text, focus_delay=delay, mode=mode)
     from inject import paste_text
     return lambda text: paste_text(text, mode=mode)
@@ -1110,7 +1251,7 @@ def _default_key_action_fn(cfg):
     """按平台选按键注入后端(契约一致: 单参 action: enter|clear)。"""
     if sys.platform == "win32":
         from inject_win import key_action
-        delay = float(cfg.get("inject_focus_delay", 2.0))
+        delay = _focus_delay(cfg)
         return lambda action: key_action(action, focus_delay=delay)
     from inject import key_action
     return key_action

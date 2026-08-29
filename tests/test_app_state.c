@@ -25,9 +25,21 @@ static void reduce(app_event_type_t t, uint64_t ts) {
     app_state_reduce(&s, &ev, now, out, &on);
 }
 
+// 按下期间的真实 ADC 读数(BSP_BTN_MV_TABLE 各档实测中值:UP 3-5 / DOWN 303-305
+// / OK 598-599)。reduce_btn 默认填本档值 —— app_state 的幽灵门禁按"回调 mv 是否
+// 落在本档"判真假(见 key_ev_is_fake),留 0 会让 OK 长按被判成幽灵。
+static uint16_t btn_real_mv(app_btn_t b) {
+    switch (b) {
+    case APP_BTN_UP:   return 5;
+    case APP_BTN_DOWN: return 305;
+    default:           return 598;   // APP_BTN_OK
+    }
+}
+
 static void reduce_btn(app_event_type_t t, app_btn_t b, uint64_t ts) {
     app_event_t ev = { .type = t };
     ev.u.key.btn = b;
+    ev.u.key.mv = btn_real_mv(b);
     now = ts;
     app_state_reduce(&s, &ev, now, out, &on);
 }
@@ -1028,6 +1040,166 @@ static void test_wake_no_relock(void) {
     assert(on == 0);                                          // LONG 零动作
 }
 
+// ---- 面板断电(60s)后按 PTT:最长归约路径不得丢动作 ----
+// 回归 2026-08-29:这条路径产 5 个动作(UI_PANEL_ON + UI_SCREEN_ON + UI_REFRESH
+// + PLAY_TONE + SEND_VOICE_START),APP_ACT_MAX=4 时 emit() 静默丢掉最后一条
+// —— 设备照样滴一声、照样开采集,而 Mac 侧从没收到 voice.start,整段话进不了
+// ASR。只关背光(20s)的那一档才 4 条动作、恰好不溢出,所以旧测试(b 分支)
+// 抓不到。同长的另两条路径一并锁住。
+static void test_panel_off_longest_paths(void) {
+    // a. 面板断电 + ▲ 按下:唤醒三连 + 滴声 + voice.start 五条都在
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);              // → READY
+    reduce(APP_EV_TICK, s.last_key_ms + APP_IDLE_PANEL_OFF_MS + 1);  // 60s:面板断电
+    assert(s.screen_on == false && s.panel_on == false);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 10);
+    assert(s.state == APP_ST_LISTENING);
+    assert(has_action(APP_ACT_UI_PANEL_ON));
+    assert(has_action(APP_ACT_UI_SCREEN_ON));
+    assert(has_action(APP_ACT_PLAY_TONE));
+    assert(has_action(APP_ACT_SEND_VOICE_START));   // ← APP_ACT_MAX=4 时被丢
+    assert_action_order(APP_ACT_PLAY_TONE, APP_ACT_SEND_VOICE_START);
+
+    // b. 面板断电 + ▼ 长按清空:唤醒三连 + 清空上行 + 确认音
+    reset();
+    reduce(APP_EV_TICK, now + APP_IDLE_PANEL_OFF_MS + 1);
+    assert(s.panel_on == false);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_DOWN, now + 10);
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_DOWN, now + 500);
+    app_action_t *a = find_action(APP_ACT_SEND_KEY_ACTION);
+    assert(a && a->u.key_action.action == APP_KEY_CLEAR);
+    assert(has_action(APP_ACT_PLAY_TONE));
+
+    // c. 面板断电 + 离线按 ▲:唤醒三连 + error 音 + 刷新(toast 要能显示出来)
+    reset();
+    s.link_up = false;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);              // → READY
+    reduce(APP_EV_TICK, s.last_key_ms + APP_IDLE_PANEL_OFF_MS + 1);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 10);
+    assert(s.state == APP_ST_READY);                                 // 离线不进 LISTENING
+    assert(has_action(APP_ACT_UI_PANEL_ON));
+    assert(has_action(APP_ACT_PLAY_TONE));
+    assert(has_action(APP_ACT_UI_REFRESH));
+    assert(s.toast[0] != '\0');
+}
+
+// ---- AUDIO_ERROR 必须收束会话(2026-08-29 修 F-2)----
+// 旧版只 toast + 回 READY:管线残留帧流进下一会话、Mac 侧 voice 永不收束(挂到
+// STT 超时)、STREAM_START 取的 PM 会话锁没人放(设备再回不到低功耗)。
+static void test_audio_error_closes_session(void) {
+    // a. LISTENING(已开流):CANCEL + voice.end + 回 READY + toast
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);
+    app_event_t td = { .type = APP_EV_TONE_DONE };
+    app_state_reduce(&s, &td, now + 100, out, &on);
+    assert(s.state == APP_ST_LISTENING && s.stream_started);
+    app_event_t ae = { .type = APP_EV_AUDIO_ERROR };
+    app_state_reduce(&s, &ae, now + 200, out, &on);
+    assert(has_action(APP_ACT_STREAM_CANCEL));
+    assert(has_action(APP_ACT_SEND_VOICE_END));
+    assert(s.state == APP_ST_READY);
+    assert(s.toast[0] != '\0');
+
+    // b. LISTENING 但滴声未播完(流还没开):同样收束 —— 两条动作幂等,
+    //    执行器侧 CANCEL 无副作用,voice.start 已经发出去了必须配 voice.end
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);
+    assert(!s.stream_started);
+    app_state_reduce(&s, &ae, now + 50, out, &on);
+    assert(has_action(APP_ACT_STREAM_CANCEL));
+    assert(has_action(APP_ACT_SEND_VOICE_END));
+    assert(s.state == APP_ST_READY);
+
+    // c. 非 LISTENING(READY):不发收束动作(没有会话可收)
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    assert(s.state == APP_ST_READY);
+    app_state_reduce(&s, &ae, now + 20, out, &on);
+    assert(!has_action(APP_ACT_STREAM_CANCEL));
+    assert(!has_action(APP_ACT_SEND_VOICE_END));
+    assert(s.state == APP_ST_READY);
+    assert(s.toast[0] != '\0');
+}
+
+// ---- LISTENING 兜底超时(2026-08-29 新增):松开事件丢失不得永久滞留 ----
+static void test_ptt_max_talk_watchdog(void) {
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);   // 开录,不再给松开事件
+    const uint64_t t0 = s.state_since_ms;
+    app_event_t td = { .type = APP_EV_TONE_DONE };
+    app_state_reduce(&s, &td, now + 100, out, &on);
+    assert(s.state == APP_ST_LISTENING);
+
+    // 到点前一刻:仍在录
+    reduce(APP_EV_TICK, t0 + APP_PTT_MAX_TALK_MS - 1);
+    assert(s.state == APP_ST_LISTENING);
+    assert(!has_action(APP_ACT_STREAM_STOP));
+
+    // 到点:按"正常松手"收束 —— 已录内容进转写,不是错误路径(无 toast)
+    reduce(APP_EV_TICK, t0 + APP_PTT_MAX_TALK_MS);
+    assert(has_action(APP_ACT_STREAM_STOP));
+    assert(has_action(APP_ACT_SEND_VOICE_END));
+    assert(s.state == APP_ST_TRANSCRIBING);
+    assert(s.toast[0] == '\0');
+}
+
+// ---- 幽灵事件不算用户活动(2026-08-29 修 F-3)----
+static void test_fake_key_is_not_activity(void) {
+    // a. 假 UP 按下(mv=2890 松开电平)不刷新息屏计时:原定时刻照旧息屏
+    reset();
+    const uint64_t base = s.last_key_ms;
+    reduce_btn_mv(APP_EV_KEY_PRESS, APP_BTN_UP, 2890, base + 10000);
+    assert(s.last_key_ms == base);                      // 计时未被推后
+    reduce(APP_EV_TICK, base + APP_IDLE_BACKLIGHT_OFF_MS);
+    assert(s.screen_on == false);                       // 照原定时刻息屏
+
+    // b. 真 UP 按下会刷新(对照组)
+    reset();
+    const uint64_t base2 = s.last_key_ms;
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, base2 + 10000);
+    assert(s.last_key_ms == base2 + 10000);
+
+    // c. 假 UP 按下不唤醒屏幕(息屏态)
+    reset();
+    reduce(APP_EV_TICK, s.last_key_ms + APP_IDLE_PANEL_OFF_MS + 1);
+    assert(s.screen_on == false && s.panel_on == false);
+    reduce_btn_mv(APP_EV_KEY_PRESS, APP_BTN_UP, 2890, now + 10);
+    assert(s.screen_on == false);                       // 白亮 20s 屏的洞
+    assert(s.panel_on == false);
+    assert(!has_action(APP_ACT_UI_SCREEN_ON));
+    assert(!has_action(APP_ACT_UI_PANEL_ON));
+}
+
+// ---- OK 长按锁屏的 mv 门禁(2026-08-29 对称性补齐)----
+static void test_ok_long_lock_mv_gate(void) {
+    // a. 幽灵 OK 长按(mv=2890 松开电平)不上锁
+    reset();
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);          // → READY
+    reduce_btn_mv(APP_EV_KEY_LONG, APP_BTN_OK, 2890, now + 20);
+    assert(s.locked == false);
+    assert(!has_action(APP_ACT_UI_PANEL_OFF));
+
+    // b. 真 OK 长按(mv 落在 OK 档 447-1900)照常上锁
+    reset();
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    reduce_btn_mv(APP_EV_KEY_LONG, APP_BTN_OK, 598, now + 20);
+    assert(s.locked == true);
+    assert(has_action(APP_ACT_UI_PANEL_OFF));
+
+    // c. 解锁那条路径故意不加门禁:代价不对称(挡掉真解锁 = 用户面对一块砖)
+    reduce_btn_mv(APP_EV_KEY_LONG, APP_BTN_OK, 2890, now + 5000);
+    assert(s.locked == false);
+    assert(has_action(APP_ACT_UI_PANEL_ON));
+}
+
 // ---- 息屏后按键放行(过修修正 2026-08-28):自动息屏只是省电显示态 ----
 // 息屏(超时 tick 驱动)后按键应唤醒并照常执行操作,不再被吞;锁定态的
 // "照常执行但不亮屏"由 locked 门禁负责(见 test_locked_keys_operate_screen_off)。
@@ -1405,6 +1577,11 @@ int main(void) {
     test_ok_long_unlocks();
     test_wake_no_relock();
     test_screen_off_keys_pass_through();
+    test_panel_off_longest_paths();
+    test_audio_error_closes_session();
+    test_ptt_max_talk_watchdog();
+    test_fake_key_is_not_activity();
+    test_ok_long_lock_mv_gate();
     test_up_taps_never_clear();
     test_ptt_no_confirm_delay();
     test_relock_cycle();

@@ -286,12 +286,27 @@ static int cmd_st(int argc, char **argv)
 }
 
 // ---- rst:复位原因(无线自动重启诊断用) ----
+// esp_reset_reason_t(IDF 5.5)顺序, 索引 = 枚举值。名字取自 esp_system.h,
+// 不再手抄成中文注释: 这个表错位过一次, 而它的唯一用途就是判因。
+static const char *const s_rst_names[] = {
+    "unknown", "poweron", "ext", "sw", "panic", "int_wdt", "task_wdt",
+    "wdt", "deepsleep", "brownout", "sdio", "usb", "jtag", "efuse",
+    "pwr_glitch", "cpu_lockup",
+};
+
+const char *console_reset_reason_str(int reason)
+{
+    if (reason < 0 || (size_t)reason >= sizeof(s_rst_names) / sizeof(s_rst_names[0])) {
+        return "unknown";
+    }
+    return s_rst_names[reason];
+}
+
 static int cmd_rst(int argc, char **argv)
 {
     (void)argc; (void)argv;
-    // 枚举:1未知 2上电 3外部 4软件 5panic 6中断WDT 7任务WDT
-    // 8WDT 9深度睡眠 10brownout(掉电) 11SDIO。
-    out("复位原因: %d\n", (int)esp_reset_reason());
+    const int r = (int)esp_reset_reason();
+    out("复位原因: %d (%s)\n", r, console_reset_reason_str(r));
     return 0;
 }
 

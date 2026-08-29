@@ -13,7 +13,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from floating import (  # noqa: E402
     HWND_TOPMOST, SWP_NOACTIVATE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    _anchor, _pick_family, _present_window, _win32_apply_noactivate,
+    _anchor, _anchor_cocoa, _pick_family, _present_window,
+    _win32_apply_noactivate,
     _win32_exstyle_noactivate,
 )
 
@@ -38,6 +39,22 @@ def test_anchor():
     # 窗口过宽: x 钳制到 0
     assert _anchor(300, 300, 400, 100) == (0, 140)
     print("[PASS] _anchor 底部居中定位")
+
+
+def test_anchor_cocoa():
+    """Cocoa 口径(原点左下)必须落在与 Tk 相同的位置: 下边缘距屏底 20%。"""
+    for sw, sh, w, h in ((1920, 1080, 360, 120), (2560, 1440, 400, 88),
+                         (1440, 900, 300, 60)):
+        x_tk, y_tk = _anchor(sw, sh, w, h)
+        x_co, y_co = _anchor_cocoa(sw, sh, w, h)
+        assert x_co == x_tk, (x_co, x_tk)
+        # 同一落点: Tk 的"上边距顶" + 高 + Cocoa 的"下边距底" = 屏高
+        assert y_tk + h + y_co == sh, (y_tk, h, y_co, sh)
+        # 下边缘就在 20% 线上(不是 80%: 修复前正是把它顶到了屏幕上部)
+        assert y_co == sh - int(sh * 0.8), (y_co, sh)
+    # 窗口比屏幕高: 两个口径都夹到 0(不给负原点)
+    assert _anchor_cocoa(800, 600, 400, 700) == (200, 0)
+    print("[PASS] _anchor_cocoa 与 Tk 同落点")
 
 
 # ---- Windows 不激活置顶(REVIEW P2-D, 无显示 / 非 Windows 可跑) ----
@@ -366,6 +383,7 @@ def test_floating_position_tracks_text():
 if __name__ == "__main__":
     test_pick_family()
     test_anchor()
+    test_anchor_cocoa()
     test_win32_exstyle_noactivate()
     test_win32_apply_noactivate_sets_bits()
     test_win32_apply_noactivate_failure()
