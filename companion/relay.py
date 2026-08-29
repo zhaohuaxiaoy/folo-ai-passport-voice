@@ -661,7 +661,8 @@ class Relay:
         if action not in ("enter", "clear"):
             print(f"[key] 未知按键动作 {action!r}, 忽略", file=sys.stderr)
             return
-        # 收到即打印(2026-08-28 "双击清空还是不行"):设备侧 ring 里有
+        # 收到即打印(2026-08-28 "双击清空还是不行"排查遗产;清空已于
+        # 2026-08-29 改为 DOWN 长按):设备侧 ring 里有
         # key.action=clear -> sent, 这里有 [key] clear, 两行一对齐就知道
         # 丢在哪一段——设备没判出手势 / 事件没上行 / 注入失败。
         print(f"[key] {action}")

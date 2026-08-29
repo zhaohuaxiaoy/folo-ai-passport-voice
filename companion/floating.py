@@ -508,7 +508,11 @@ class FloatingCandidate:
         if sys.platform == "darwin":
             try:
                 self._impl = _MacPanelFloat(root)
-            except Exception:  # noqa: BLE001 缺 PyObjC: 降级 Tk(抢焦点, 已知局限)
+            except Exception as e:  # noqa: BLE001 缺 PyObjC: 降级 Tk(抢焦点)
+                # 降级必须留痕: Tk 悬浮窗会抢焦点, 抢走之后注入就打进空处
+                # (表现正是"明明有焦点却没输入上去"), 而原来这里是静默的。
+                print(f"[悬浮窗] NSPanel 不可用, 降级 Tk(会抢焦点): {e}",
+                      file=sys.stderr)
                 self._impl = _TkFloat(root)
         else:
             self._impl = _TkFloat(root)

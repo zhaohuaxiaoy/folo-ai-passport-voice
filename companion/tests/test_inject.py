@@ -30,13 +30,18 @@ def check(name, got, want):
 
 
 def patch_subprocess(frontmost_bundle, frontmost_name, fail_probe=False,
-                     ax_role="AXTextArea", fail_ax=False, cg="fail"):
+                     ax_role="AXTextArea", fail_ax=False, cg="fail",
+                     native=None):
     """上下文管理器: 替换 inject.subprocess.run, 退出自动还原 —— 防止
     全局替换污染后续测试(同进程共用 subprocess 模块)。
 
     cg 控制 CGEvent 通道(生产路径首选它, 见 inject._cg_keys):
       "fail"   模拟缺 Quartz → 回退 osascript, 断言仍看 state["sent"];
       "record" 通道可用 → 按键记进 state["cg"], osascript 一条都不该发。
+    native 控制原生 AX 探测 _ax_probe 的返回值(生产路径首选它):
+      None(缺省) 模拟缺 pyobjc → (None, None, None), 逐项回退 osascript 探测,
+                 上面那批 osascript 断言仍然有效;
+      (ident, role, nchars) 模拟原生探测可用 —— 此时不该再发探测用 osascript。
     """
     import contextlib
     import subprocess as _real
@@ -67,13 +72,17 @@ def patch_subprocess(frontmost_bundle, frontmost_name, fail_probe=False,
 
         orig = inject.subprocess.run
         orig_cg = inject._cg_keys
+        orig_probe = inject._ax_probe
         inject.subprocess.run = run
         inject._cg_keys = cg_keys
+        inject._ax_probe = lambda: (native if native is not None
+                                    else (None, None, None))
         try:
             yield state
         finally:
             inject.subprocess.run = orig
             inject._cg_keys = orig_cg
+            inject._ax_probe = orig_probe
 
     return _patch()
 
@@ -175,6 +184,224 @@ def test_enter_unaffected():
     check("enter 为 return", "keystroke return" in state["sent"][0][-1], True)
 
 
+# --- 原生 AX 探测(生产首选路径) ---
+
+def test_clear_native_probe_no_osascript():
+    """原生探测可用时: clear 不再发任何探测用 osascript, 键序不变。"""
+    with patch_subprocess("", "", cg="record",
+                          native=("com.tencent.xinWeChat", "AXTextArea", 7)) as st:
+        inject.key_action("clear")
+    check("原生探测下不发 osascript", len(st["sent"]), 0)
+    check("原生探测下键序仍 Cmd+A/Delete", st["cg"][0],
+          [(0, inject._CG_CMD), (51, 0)])
+
+
+def test_clear_native_dangerous_role_refuses():
+    """原生探测拿到列表类 role: 同样拒绝下手(闸门不依赖探测通道)。"""
+    with patch_subprocess("", "", cg="record",
+                          native=("com.apple.mail", "AXTable", None)) as st:
+        try:
+            inject.key_action("clear")
+            check("列表类 role 应拒绝", False, True)
+        except inject.InjectError as e:
+            check("列表类 role 拒绝", "列表类元素" in str(e), True)
+    check("拒绝时一个键都不发", len(st["cg"]), 0)
+
+
+# --- 落地校验(unicode 路径) ---
+
+def patch_typing(lands, role="AXTextArea", ident="com.tencent.xinWeChat",
+                 start=0, countable=True):
+    """替换 _ax_probe / _type_unicode / _cg_keys / time.sleep / subprocess.run。
+
+    lands: 每次注入(逐字符打字, 或剪贴板 Cmd+V)让聚焦元素字数增加多少 —— 依次
+    取用, 用尽后重复最后一个。0 = 那次注入一个字都没落地。这样建模比"直接给
+    _ax_probe 排一串返回值"贴近真实: 字数只会因为注入而变。
+    countable=False 模拟不报字数的元素(WPS 文档区)。
+    state["typed"] 记每次 _type_unicode 的 gap, state["sent"] 记外部命令。
+    """
+    import contextlib
+    import subprocess as _real
+
+    @contextlib.contextmanager
+    def _patch():
+        state = {"typed": [], "sent": [], "cg": [], "n": start}
+        seq = list(lands)
+
+        def land():
+            state["n"] += seq.pop(0) if len(seq) > 1 else seq[0]
+
+        def probe():
+            return ident, role, (state["n"] if countable else None)
+
+        def type_unicode(text, gap=inject._TYPE_GAP_S):
+            state["typed"].append(gap)
+            land()
+
+        def cg_keys(keys):
+            state["cg"].append(list(keys))
+            if list(keys) == [(inject._K_CMD_V[0], inject._CG_CMD)]:
+                land()   # Cmd+V 粘贴也算一次注入
+
+        def run(cmd, **kw):
+            state["sent"].append(cmd[0])
+            # _clipboard_snapshot: 报"有文本"且旧内容为 OLD —— 这样"失败时不恢复
+            # 旧剪贴板(把这句话留给用户 Cmd+V)"才是可断言的(pbcopy 次数)。
+            if cmd[0] == "osascript":
+                return _real.CompletedProcess(cmd, 0, stdout="text")
+            if cmd[0] == "pbpaste":
+                return _real.CompletedProcess(cmd, 0, stdout=b"OLD")
+            return _real.CompletedProcess(cmd, 0, stdout=b"")
+
+        orig = (inject._ax_probe, inject._type_unicode, inject.subprocess.run,
+                inject.time.sleep, inject._cg_keys)
+        inject._ax_probe = probe
+        inject._type_unicode = type_unicode
+        inject.subprocess.run = run
+        inject.time.sleep = lambda _s: None
+        inject._cg_keys = cg_keys
+        try:
+            yield state
+        finally:
+            (inject._ax_probe, inject._type_unicode, inject.subprocess.run,
+             inject.time.sleep, inject._cg_keys) = orig
+
+    return _patch()
+
+
+def test_type_verify_landed_once():
+    """字数按预期增长: 只打一遍, 不碰剪贴板。"""
+    with patch_typing([4]) as st:
+        inject.paste_text("你好世界")
+    check("落地只打一遍", len(st["typed"]), 1)
+    check("落地不碰剪贴板", st["sent"], [])
+
+
+def test_type_verify_partial_no_retype():
+    """只落地一部分(丢字): 也不重打 —— 重打会叠字, 宁可让用户看见少字。"""
+    with patch_typing([2]) as st:
+        inject.paste_text("你好世界")
+    check("部分落地不重打", len(st["typed"]), 1)
+
+
+def test_type_verify_retries_then_clipboard():
+    """两遍打字都没落地 → 回退剪贴板粘贴, 粘贴落地则算成功。"""
+    with patch_typing([0, 0, 4]) as st:
+        inject.paste_text("你好世界")
+    check("重打一次(共两遍)", len(st["typed"]), 2)
+    check("第二遍用慢速节奏", st["typed"][1], inject._TYPE_GAP_SLOW_S)
+    check("回退剪贴板(pbcopy 被调)", "pbcopy" in st["sent"], True)
+    check("Cmd+V 走 CGEvent", st["cg"][-1],
+          [(inject._K_CMD_V[0], inject._CG_CMD)])
+    # 粘贴成功 → 写入 + 恢复旧剪贴板 = pbcopy 两次
+    check("成功后恢复旧剪贴板", st["sent"].count("pbcopy"), 2)
+
+
+def test_type_verify_all_channels_fail_raises():
+    """打字两遍 + 粘贴都没落地: 必须报错, 不许再打印"已粘贴 N 字符"。"""
+    with patch_typing([0]) as st:
+        try:
+            inject.paste_text("你好世界")
+            check("三次都没落地应报错", False, True)
+        except inject.InjectError as e:
+            check("报错点明焦点问题", "焦点不在输入框" in str(e), True)
+            check("报错指路 Cmd+V", "Cmd+V" in str(e), True)
+    check("报错前试过剪贴板", "pbcopy" in st["sent"], True)
+    # 失败时把这句话留在剪贴板(不恢复旧内容): pbcopy 只该被调一次
+    check("失败不恢复旧剪贴板", st["sent"].count("pbcopy"), 1)
+
+
+def test_type_verify_unicode_mode_raises():
+    """unicode 模式不许碰剪贴板: 两次都没落地就报错(而不是假成功)。"""
+    with patch_typing([0]) as st:
+        try:
+            inject.paste_text("你好世界", mode="unicode")
+            check("unicode 模式应报错", False, True)
+        except inject.InjectError as e:
+            check("unicode 模式报错", "没落到输入框" in str(e), True)
+    check("unicode 模式不碰剪贴板", "pbcopy" in st["sent"], False)
+
+
+def test_type_verify_unverifiable_passes():
+    """元素不报字数(WPS 文档区 AXSplitGroup): 算无法校验, 打一遍就放行。"""
+    with patch_typing([0], role="AXSplitGroup", countable=False) as st:
+        inject.paste_text("你好世界")
+    check("无法校验只打一遍", len(st["typed"]), 1)
+    check("无法校验不回退剪贴板", st["sent"], [])
+
+
+def test_type_verify_terminal_never_retypes():
+    """终端字数判据不可信(Terminal.app 插入后 nchars 实测不动): 一律不重打。
+
+    否则"字数没变"会把成功的注入判成失败, 重打 + 粘贴 = 终端里三份重复文本。
+    """
+    with patch_typing([0], ident="com.apple.Terminal") as st:
+        inject.paste_text("你好世界")
+    check("终端只打一遍", len(st["typed"]), 1)
+    check("终端不回退剪贴板", st["sent"], [])
+
+
+def patch_quartz():
+    """注入假 Quartz 模块, 记录每个 CGEvent 的 flags 是否被显式设置。
+
+    flags 是这轮真机故障的根因所在: CGEventCreateKeyboardEvent 新建的事件
+    默认继承"系统当前修饰键状态", 我们自己刚发过的 Cmd+A 会把 Command 位粘住,
+    于是后面每个字符都变成 Cmd+字符被应用当快捷键吃掉(实测一个字都进不去)。
+    所以"每个事件都必须显式设过 flags"是硬约束, flags=0 也要设。
+    """
+    import contextlib
+    import types
+
+    @contextlib.contextmanager
+    def _patch():
+        posted = []
+
+        def create(src, code, is_down):
+            # flags=None 代表"从没设过"→ 真机上等于沿用系统粘住的修饰键
+            return {"code": code, "down": bool(is_down), "flags": None}
+
+        fake = types.ModuleType("Quartz")
+        fake.kCGHIDEventTap = 0
+        fake.CGEventCreateKeyboardEvent = create
+        fake.CGEventKeyboardSetUnicodeString = lambda ev, n, s: None
+        fake.CGEventSetFlags = lambda ev, f: ev.__setitem__("flags", f)
+        fake.CGEventPost = lambda tap, ev: posted.append(dict(ev))
+        old_mod = sys.modules.get("Quartz")
+        old_sleep = inject.time.sleep
+        sys.modules["Quartz"] = fake
+        inject.time.sleep = lambda _s: None
+        try:
+            yield posted
+        finally:
+            inject.time.sleep = old_sleep
+            if old_mod is None:
+                del sys.modules["Quartz"]
+            else:
+                sys.modules["Quartz"] = old_mod
+
+    return _patch()
+
+
+def test_unicode_events_always_set_flags():
+    """逐字符注入的每个事件(按下+抬起)都显式清零 flags。"""
+    with patch_quartz() as posted:
+        inject._type_unicode("ab", gap=0)
+    check("2 字 → 4 个事件", len(posted), 4)
+    check("每个事件都清零 flags", [e["flags"] for e in posted], [0, 0, 0, 0])
+
+
+def test_cg_keys_always_set_flags():
+    """_cg_keys 的 flags=0 也要显式设 —— 原来"为 0 就不设"正是 bug 所在。"""
+    with patch_quartz() as posted:
+        inject._cg_keys([(51, 0)])          # 裸 Delete
+    check("裸键显式设 flags=0", [e["flags"] for e in posted], [0, 0])
+    with patch_quartz() as posted:
+        inject._cg_keys([(0, inject._CG_CMD), (51, 0)])   # Cmd+A 然后裸 Delete
+    check("带修饰键与裸键各自的 flags",
+          [(e["code"], e["flags"]) for e in posted],
+          [(0, inject._CG_CMD), (0, inject._CG_CMD), (51, 0), (51, 0)])
+
+
 def main():
     test_clear_terminal_ctrl_u()
     test_clear_nonterminal_select_all()
@@ -185,6 +412,17 @@ def main():
     test_clear_prefers_cgevent()
     test_clear_unknown_role_proceeds()
     test_enter_unaffected()
+    test_clear_native_probe_no_osascript()
+    test_clear_native_dangerous_role_refuses()
+    test_type_verify_landed_once()
+    test_type_verify_partial_no_retype()
+    test_type_verify_retries_then_clipboard()
+    test_type_verify_all_channels_fail_raises()
+    test_type_verify_unicode_mode_raises()
+    test_type_verify_unverifiable_passes()
+    test_type_verify_terminal_never_retypes()
+    test_unicode_events_always_set_flags()
+    test_cg_keys_always_set_flags()
     if FAILURES:
         print(f"\n{len(FAILURES)} FAILURES:")
         for f in FAILURES:

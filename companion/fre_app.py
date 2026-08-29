@@ -241,7 +241,7 @@ class FREApp:
         ttk.Label(p, text="✅ AI Passport 已连接", font=self._font_title
                   ).pack(pady=(0, 16))
         rows = (
-            ("输入方式", "按住 ● 讲话 · 松开发送\n双击 OK 清空 · DOWN 回车"),
+            ("输入方式", "按住 ▲ 讲话 · 松开发送\n长按 ▼ 清空 · 单击 ▼ 回车"),
             ("连接", None),
             ("ASR", "Volcano"),
             ("Injection", None),

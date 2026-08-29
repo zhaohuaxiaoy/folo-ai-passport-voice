@@ -7,6 +7,11 @@
   - clipboard: pbcopy 写入剪贴板 + osascript 模拟 Cmd+V 粘贴, 注入后
     恢复旧剪贴板内容(仅文本; 剪贴板历史工具仍会留下记录)。
 
+落地校验(2026-08-28 "有时候明明有焦点却没输入上去"): unicode 路径注入后读一次
+聚焦元素的字数(原生 AX, 见 _ax_probe), 字数没动就慢速重打一次, 仍不动才判定失败
+并回退剪贴板 —— 在此之前"已粘贴 N 字符"只代表"调用没抛异常", 与真落地无关, 失败
+在日志里完全看不见。字数拿不到的元素(WPS 文档区等)算"无法校验", 保持放行。
+
 权限: osascript(System Events)与 CGEvent 注入都需要「辅助功能」授权
 (系统设置 → 隐私与安全性 → 辅助功能)。未授权时 osascript 报错
 (常见 -1743 / -25211), 本程序抛出带指引的明确异常。
@@ -30,7 +35,14 @@ class InjectError(Exception):
     """注入失败(非 macOS / 缺系统工具 / 剪贴板失败 / 辅助功能未授权)。"""
 
 
-def _type_unicode(text):
+# 逐字符事件的间隔。0 间隔时 26 个汉字 52 个事件能在 1~2ms 内全部 post 出去,
+# 忙于渲染的目标应用会整批丢掉(2026-08-28 "有时候明明有焦点却没输入上去"的头号
+# 嫌疑)。3ms/字对 40 字的转写只多 120ms, 但把事件摊到应用能消费的节奏上。
+_TYPE_GAP_S = 0.003
+_TYPE_GAP_SLOW_S = 0.015   # 确认一个字都没落地时的重打节奏
+
+
+def _type_unicode(text, gap=_TYPE_GAP_S):
     """CGEvent 逐字符键盘事件注入(不碰剪贴板, 中文/emoji 无忧)。
 
     应用视角等同输入法上屏; 终端(Terminal.app/iTerm2)正常接受, 部分
@@ -40,7 +52,7 @@ def _type_unicode(text):
     try:
         from Quartz import (CGEventCreateKeyboardEvent,
                             CGEventKeyboardSetUnicodeString,
-                            CGEventPost, kCGHIDEventTap)
+                            CGEventPost, CGEventSetFlags, kCGHIDEventTap)
     except ImportError as e:
         raise InjectError(
             f"缺少 pyobjc-framework-Quartz: pip install pyobjc-framework-Quartz "
@@ -59,10 +71,21 @@ def _type_unicode(text):
     for ch in text:
         # 非 BMP 字符(emoji)占 2 个 UTF-16 单元, stringLength 按单元计
         units = len(ch.encode("utf-16-le")) // 2
-        down = CGEventCreateKeyboardEvent(None, 0, True)
-        CGEventKeyboardSetUnicodeString(down, units, ch)
-        CGEventPost(kCGHIDEventTap, down)
-        CGEventPost(kCGHIDEventTap, CGEventCreateKeyboardEvent(None, 0, False))
+        # 抬键也挂同一串 unicode: 只给按下事件挂字符时, 抬键就是一个"裸的
+        # keycode 0"(= 'a' 键松开), Qt/Chromium 系应用(WPS/Electron)看抬键
+        # 决定是否上屏, 裸抬键会让它把整个字符丢掉。
+        for is_down in (True, False):
+            ev = CGEventCreateKeyboardEvent(None, 0, is_down)
+            CGEventKeyboardSetUnicodeString(ev, units, ch)
+            # 必须显式清零修饰位!! 新建事件的 flags 默认继承"系统当前修饰键状态",
+            # 而我们自己刚发过的 Cmd+A / Ctrl+U 会把那个状态**粘住**: 实测
+            # Cmd+A 之后新建事件的 flags = 0x20100000(Command 位仍在), 于是接
+            # 下来每个字符都变成 Cmd+字符被应用当快捷键吃掉 —— TextEdit 实测
+            # 文档一个字都没进。这就是"双击清空之后那一句永远打不进去"的真因。
+            CGEventSetFlags(ev, 0)
+            CGEventPost(kCGHIDEventTap, ev)
+        if gap:
+            time.sleep(gap)
 
 
 # clear/enter 的按键序列用"机制中立"的形式描述: (CGEvent keycode, 修饰位,
@@ -75,6 +98,7 @@ _K_DELETE = (51, 0, "key code 51")
 _K_CMD_A = (0, _CG_CMD, 'keystroke "a" using command down')
 _K_CTRL_E = (14, _CG_CTRL, 'keystroke "e" using control down')
 _K_CTRL_U = (32, _CG_CTRL, 'keystroke "u" using control down')
+_K_CMD_V = (9, _CG_CMD, 'keystroke "v" using command down')
 
 
 def _cg_keys(keys):
@@ -103,10 +127,116 @@ def _cg_keys(keys):
     for code, flags in keys:
         for is_down in (True, False):
             ev = CGEventCreateKeyboardEvent(None, code, is_down)
-            if flags:
-                CGEventSetFlags(ev, flags)
+            # 无条件设(flags=0 也要设): 原来"flags 为 0 就不设"等于沿用系统
+            # 当前修饰键状态, 于是 Cmd+A 之后那个 Delete 实际发出去的是
+            # Cmd+Delete, 后续 _type_unicode 的每个字符也都带着 Cmd。
+            CGEventSetFlags(ev, flags)
             CGEventPost(kCGHIDEventTap, ev)
         time.sleep(0.02)   # 给目标应用处理"全选"再收"删除"的间隙
+
+
+# 只有这些 AX role 的"字数"可信, 才拿它当注入落地的判据。其余(WPS 文档区是
+# AXSplitGroup、Electron 里常见 AXGroup/AXUnknown)一律算"无法校验" —— 校验不了
+# 就保持旧行为放行, 绝不能把校验手段的缺失当成注入失败去重打(会打两遍)。
+_TEXTISH_AX_ROLES = ("AXTextField", "AXTextArea", "AXComboBox", "AXSearchField")
+
+
+def _ax_probe():
+    """(前台 app 标识, 聚焦元素 AX role, 聚焦文本字数); 取不到的项为 None。
+
+    走原生 AXUIElement(NSWorkspace 取前台 pid → AXUIElementCreateApplication):
+    实测 0~40ms, 而同样三件事用 osascript 要三条脚本、每条 ~190ms。字数
+    (AXNumberOfCharacters, 退到 len(AXValue))是注入第一次有了可校验的成功判据
+    —— 在此之前"已粘贴 N 字符"只表示"没抛异常", 和真落地无关。
+    探测永不抛异常: 失败返回 None, 由调用方按"不知道"处理。
+    """
+    try:
+        from AppKit import NSWorkspace
+        from ApplicationServices import (AXUIElementCopyAttributeValue,
+                                         AXUIElementCreateApplication,
+                                         AXUIElementSetMessagingTimeout)
+    except ImportError:
+        return None, None, None
+    try:
+        app = NSWorkspace.sharedWorkspace().frontmostApplication()
+        if app is None:
+            return None, None, None
+        ident = app.bundleIdentifier() or app.localizedName()
+        ident = str(ident) if ident else None
+        ael = AXUIElementCreateApplication(app.processIdentifier())
+        AXUIElementSetMessagingTimeout(ael, 1.0)   # 目标应用卡住时别拖住注入
+        err, el = AXUIElementCopyAttributeValue(ael, "AXFocusedUIElement", None)
+        if err != 0 or el is None:
+            return ident, None, None
+        err, role = AXUIElementCopyAttributeValue(el, "AXRole", None)
+        role = str(role) if (err == 0 and role) else None
+        err, n = AXUIElementCopyAttributeValue(el, "AXNumberOfCharacters", None)
+        if err != 0 or not isinstance(n, int):
+            err, val = AXUIElementCopyAttributeValue(el, "AXValue", None)
+            n = len(val) if (err == 0 and isinstance(val, str)) else None
+        return ident, role, n
+    except Exception:   # noqa: BLE001 探测失败等价于"不知道", 不能阻断注入
+        return None, None, None
+
+
+def _settled_len(before, tries=3, delay=0.12):
+    """等聚焦元素字数变化(应用更新 AX 有延迟), 最多 tries×delay。
+
+    返回最后读到的字数; 读不到返回 None(= 无法校验, 不等于 0)。
+    """
+    last = before
+    for _ in range(tries):
+        time.sleep(delay)
+        _, _, n = _ax_probe()
+        if n is None:
+            return None
+        last = n
+        if n != before:
+            return n
+    return last
+
+
+def _verifiable(ident, role, n):
+    """字数这个判据在当前聚焦元素上可信吗?
+
+    终端类应用必须排除: Terminal.app 插入一行后 AXNumberOfCharacters /
+    len(AXValue) 实测仍是 99 不动, Warp 更是恒定报 0 —— 字数不动在这里不等于
+    "没落地"。若拿它当判据, 会把成功的注入判成失败, 于是重打一次再粘贴一次,
+    结果是终端里出现两三份重复文本, 比原来的"静默失败"更糟。
+    """
+    if n is None or role not in _TEXTISH_AX_ROLES:
+        return False
+    if ident and (ident in _TERMINAL_APPS
+                  or ident in _TERMINAL_APPS.values()):
+        return False
+    return True
+
+
+def _type_and_verify(text):
+    """逐字符注入并尽量校验落地。
+
+    返回 True = 已确认落地 / 无法校验(保持旧行为放行);
+    返回 False = 确认一个字都没进去(调用方决定回退剪贴板还是报错)。
+    只在"字数一点没动"时重打一次 —— 部分落地绝不重打, 否则会叠字。
+    """
+    ident, role, before = _ax_probe()
+    where = f"目标={ident!r} role={role!r}"
+    _type_unicode(text)
+    if not _verifiable(ident, role, before):
+        print(f"[inject] {where} 无法校验落地(该元素不报可信字数)")
+        return True
+    want = len(text.encode("utf-16-le")) // 2
+    after = _settled_len(before)
+    if after is None or after != before:
+        print(f"[inject] {where} 字数 {before}→{after}(期望 +{want})")
+        return True
+    print(f"[inject] {where} 字数没变({before}), 慢速重打一次", file=sys.stderr)
+    _type_unicode(text, gap=_TYPE_GAP_SLOW_S)
+    after = _settled_len(before)
+    if after is None or after != before:
+        print(f"[inject] {where} 重打后字数 {before}→{after}(期望 +{want})")
+        return True
+    return False
 
 
 def _clipboard_snapshot():
@@ -144,25 +274,39 @@ def paste_text(text, dry_run=False, mode="auto"):
             raise InjectError(f"缺少系统工具 {tool}(仅 macOS 自带)")
 
     if mode in ("auto", "unicode"):
-        try:
-            if dry_run:
-                print(f"# 注入文本 {len(text)} 字符: {text!r}")
-                print("# [CGEvent] 逐字符键盘事件注入(不碰剪贴板)")
-                if mode == "auto":
-                    print("# (auto: 基础设施不可用时回退剪贴板路径, 见下)")
-            else:
-                _type_unicode(text)
+        if dry_run:
+            print(f"# 注入文本 {len(text)} 字符: {text!r}")
+            print("# [CGEvent] 逐字符键盘事件注入(不碰剪贴板)")
+            print("# [校验] 注入后读聚焦元素字数, 一个字没进就重打, 仍不进则回退")
+            if mode == "auto":
+                print("# (auto: 基础设施不可用/两次都没落地时回退剪贴板, 见下)")
             return
+        try:
+            landed = _type_and_verify(text)
         except InjectError as e:
             if mode == "unicode":
                 raise
             print(f"[inject] unicode 注入不可用, 回退剪贴板: {e}",
                   file=sys.stderr)
+        else:
+            if landed:
+                return
+            # 校验说得很确定: 字数一点没动, 两次都没动。这正是原来只会打出
+            # "已粘贴 N 字符"、用户却看着输入框空着的那种失败。
+            if mode == "unicode":
+                raise InjectError(
+                    "unicode 注入两次都没落到输入框(聚焦元素字数无变化)。"
+                    "目标应用可能不吃合成键盘事件, 试 --mode clipboard。")
+            print("[inject] unicode 两次都没落地, 回退剪贴板粘贴", file=sys.stderr)
 
     # clipboard: 备份 → 写入 → Cmd+V → 恢复旧文本(非文本内容无法恢复)
     old_ok, old = (False, None)
+    verify_before = None
     if not dry_run:
         old_ok, old = _clipboard_snapshot()
+        v_ident, v_role, n = _ax_probe()
+        if _verifiable(v_ident, v_role, n):
+            verify_before = n
 
     cmds = [
         ["pbcopy"],
@@ -182,11 +326,29 @@ def paste_text(text, dry_run=False, mode="auto"):
         raise InjectError("pbcopy 写入剪贴板失败: "
                           + p.stderr.decode("utf-8", "replace").strip())
 
-    p = subprocess.run(cmds[1], capture_output=True, text=True)
-    if p.returncode != 0:
-        err = p.stderr.strip()
-        raise InjectError("粘贴失败(osascript 被拒)。" + GUIDE
-                          + "\n原始错误: " + err)
+    # Cmd+V 也优先 CGEvent: osascript(System Events)在打包 App 里实测会
+    # exit 0 却毫无效果(见 _cg_keys 的取证注释), 那条通道只能当兜底。
+    try:
+        _cg_keys([(_K_CMD_V[0], _K_CMD_V[1])])
+    except InjectError as e:
+        print(f"[inject] CGEvent 粘贴不可用, 回退 osascript: {e}", file=sys.stderr)
+        p = subprocess.run(cmds[1], capture_output=True, text=True)
+        if p.returncode != 0:
+            err = p.stderr.strip()
+            raise InjectError("粘贴失败(osascript 被拒)。" + GUIDE
+                              + "\n原始错误: " + err)
+
+    # 粘贴同样要校验: 走到这条路多半是 unicode 已经确认没落地, 若粘贴也没落地,
+    # 那就必须报错 —— 再打印一句"已粘贴 N 字符"就是第二次骗人。最常见的成因是
+    # 焦点其实不在输入框上(前台窗口是对的, 但聚焦元素是标题/消息之类的静态文本)。
+    # _settled_len 本身要等 ~0.4s, 顺带充当"给目标应用消费粘贴内容"的间隔。
+    if verify_before is not None and _settled_len(verify_before) == verify_before:
+        # 故意不恢复旧剪贴板: 这一句话是用户刚说的、丢了就没了, 留在剪贴板里
+        # 他能自己 Cmd+V 救回来; 旧剪贴板内容相比之下可再生。
+        raise InjectError(
+            "注入没落到输入框(逐字符与剪贴板粘贴都试过, 聚焦元素字数没变)。"
+            "多半是焦点不在输入框上 —— 点一下要输入的输入框, 文本已留在剪贴板, "
+            "按 Cmd+V 即可贴入。")
 
     if old_ok:
         time.sleep(0.3)   # 给目标应用消费粘贴内容的时间, 再恢复旧剪贴板
@@ -297,11 +459,16 @@ def key_action(action, dry_run=False):
 
     need_text_focus = False   # clear 的非终端分支才需要"聚焦在输入框"这道保险
     ident = None
+    ax_role = None
     branch = "enter回车"
     if action == "enter":
         keys = [_K_RETURN]
     else:   # clear
-        ident = _frontmost_ident()
+        # 一次原生 AX 查询同时拿到前台 app 与聚焦元素 role, 顶替原来三条
+        # osascript(~190ms/条)。缺 pyobjc 时逐项回退到 osascript 探测。
+        ident, ax_role, _ = _ax_probe()
+        if ident is None:
+            ident = _frontmost_ident()
         is_term = ident is not None and (ident in _TERMINAL_APPS
                                          or ident in _TERMINAL_APPS.values())
         if is_term:
@@ -330,12 +497,12 @@ def key_action(action, dry_run=False):
     # 避险闸门只在真正注入时生效(dry-run 只是打印, 没有破坏性)
     role = None
     if need_text_focus:
-        role = _focused_ax_role()
+        role = ax_role if ax_role is not None else _focused_ax_role()
         if role in _DANGEROUS_AX_ROLES:
             raise InjectError(
                 f"当前聚焦的是列表类元素(AX role={role}), 跳过清空 —— "
                 "Cmd+A + Delete 在邮件/文件列表里会删数据。"
-                "请先点进要清空的输入框再双击音量+。")
+                "请先点进要清空的输入框再长按音量-。")
 
     # 诊断(2026-08-28 "还是不管用"):设备侧证明手势判对了、relay 侧证明事件到了、
     # osascript 还 exit 0 —— 唯一没有记录的就是"这一下打给了谁"。前台 app / 分支 /
