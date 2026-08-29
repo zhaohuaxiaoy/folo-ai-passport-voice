@@ -383,6 +383,18 @@ static void app_task(void *arg)
             app_event_t t = { .type = APP_EV_TICK };
             uint8_t n = 0;
             app_state_reduce(&s_state, &t, now_ms, acts, &n);
+            // 诊断(2026-08-29):心跳里出现 STREAM_START 只有一个来源 ——
+            // LISTENING 的滴声兜底超时(APP_TONE_PENDING_TIMEOUT_MS,TONE_DONE
+            // 没来)。归约器是纯 C 不打日志,故在这里辨认并留痕:真机上"这一按
+            // 开录音明显慢"就能一眼分清是兜底路径(慢 ≥200ms)还是正常路径
+            // (~60ms),不必再靠时间戳反推(8-29 有一次 622ms 就是这么猜的)。
+            for (uint8_t i = 0; i < n; i++) {
+                if (acts[i].type == APP_ACT_STREAM_START) {
+                    ESP_LOGW(TAG, "滴声兜底开流:等 TONE_DONE 超时 %ums",
+                             (unsigned)APP_TONE_PENDING_TIMEOUT_MS);
+                    break;
+                }
+            }
             run_actions(acts, n);
             tick_acted = (n > 0);      // TICK 产生动作(toast 过期/超时/息屏) → 需渲染
             next_tick = now_ms + APP_TICK_MS;

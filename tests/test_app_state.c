@@ -32,6 +32,15 @@ static void reduce_btn(app_event_type_t t, app_btn_t b, uint64_t ts) {
     app_state_reduce(&s, &ev, now, out, &on);
 }
 
+// 带 ADC 读数的按键事件(mv 默认 0 = 真实按压;≥2000 = 松开电平 = 幽灵事件)
+static void reduce_btn_mv(app_event_type_t t, app_btn_t b, uint16_t mv, uint64_t ts) {
+    app_event_t ev = { .type = t };
+    ev.u.key.btn = b;
+    ev.u.key.mv = mv;
+    now = ts;
+    app_state_reduce(&s, &ev, now, out, &on);
+}
+
 static int has_action(app_action_type_t t) {
     for (uint8_t i = 0; i < on; i++) if (out[i].type == t) return 1;
     return 0;
@@ -58,7 +67,7 @@ static void reset(void) {
     s.last_key_ms = now;
 }
 
-// ---- HOME:● 单击进入 READY;▲(音量加)双击=清空;▼ 单击=回车 ----
+// ---- HOME:● 单击进入 READY;▼ 单击=回车 / 长按=清空;▲ 无空闲语义 ----
 static void test_home_nav(void) {
     reset();
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
@@ -71,20 +80,19 @@ static void test_home_nav(void) {
     assert(a && a->u.key_action.action == APP_KEY_ENTER);
 
     reset();
-    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_DOWN, now + 10);
-    assert(s.state == APP_ST_HOME);                // DOWN 双击无动作
-    assert(!has_action(APP_ACT_SEND_KEY_ACTION));
-
-    reset();
-    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 10);
-    assert(s.state == APP_ST_HOME);                // OK 双击不再清空(迁到 UP 双击)
-    assert(!has_action(APP_ACT_SEND_KEY_ACTION));
-
-    reset();
-    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 10);
-    assert(s.state == APP_ST_HOME);                // UP(音量加)双击=清空,不切走
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_DOWN, now + 10);
+    assert(s.state == APP_ST_HOME);                // DOWN 长按=清空,不切走
     a = find_action(APP_ACT_SEND_KEY_ACTION);
     assert(a && a->u.key_action.action == APP_KEY_CLEAR);
+
+    // 三颗键的双击一律无语义(清空已从 UP 双击迁到 DOWN 长按,2026-08-29)
+    for (int i = 0; i < 3; i++) {
+        const app_btn_t b[] = { APP_BTN_UP, APP_BTN_DOWN, APP_BTN_OK };
+        reset();
+        reduce_btn(APP_EV_KEY_DOUBLE, b[i], now + 10);
+        assert(s.state == APP_ST_HOME);
+        assert(!has_action(APP_ACT_SEND_KEY_ACTION));
+    }
 
     // ▲ 空闲:无切换、无动作
     reset();
@@ -93,7 +101,7 @@ static void test_home_nav(void) {
     assert(!has_action(APP_ACT_SEND_KEY_ACTION));
 }
 
-// ---- READY:OK 已退出 PTT;▲(音量加)长按=说话 / 双击=清空;▼ 单击=回车 ----
+// ---- READY:OK 已退出 PTT;▲ 长按=说话;▼ 单击=回车 / 长按=清空 ----
 static void test_down_enter_clear(void) {
     reset();
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);   // → READY (BUILD)
@@ -103,8 +111,16 @@ static void test_down_enter_clear(void) {
     app_action_t *a = find_action(APP_ACT_SEND_KEY_ACTION);
     assert(a && a->u.key_action.action == APP_KEY_ENTER);
 
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_DOWN, now + 30);  // DOWN 长按 = 清空
+    a = find_action(APP_ACT_SEND_KEY_ACTION);
+    assert(a && a->u.key_action.action == APP_KEY_CLEAR);
+    // 长按态松开只报 LONG_UP,不补 CLICK —— 清空之后绝不会再补一次回车
+    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_DOWN, now + 40);
+    assert(!has_action(APP_ACT_SEND_KEY_ACTION));
+    assert(s.state == APP_ST_READY);
+
     reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_DOWN, now + 30);
-    assert(!has_action(APP_ACT_SEND_KEY_ACTION));    // DOWN 双击已移除
+    assert(!has_action(APP_ACT_SEND_KEY_ACTION));    // DOWN 双击无语义
 
     // UP 空闲
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 40);
@@ -112,176 +128,75 @@ static void test_down_enter_clear(void) {
 
     // PTT 不受影响(基线缺陷:离线检查引入后此段未设 link_up,PTT 被拒;修正)
     s.link_up = true;
-    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 50);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 50);
     assert(s.state == APP_ST_LISTENING);
     assert(has_action(APP_ACT_SEND_VOICE_START));
 }
 
-// ---- 双击清空 vs 长按说话消歧(2026-08-28):疑似双击第二按的 LONG 要挂起 ----
-static void test_double_click_not_ptt(void) {
-    // 场景 A:双击(第二按稍久 → 报 LONG),必须不开录音,DOUBLE 照常清空
+// ---- 键位改版回归(2026-08-29:清空 UP 双击 → DOWN 长按)----
+// 旧版为了让"双击清空"和"长按说话"挤在 UP 一颗键上,堆了四层补偿:自建轻点链
+// (UP_TAP_CHAIN_MS 1800)、挂起确认(PTT_CONFIRM_MS 250)、回弹假双击防御、驱动
+// 补报去重。清空搬到 DOWN 长按后这四层全部删除,对应的五个用例
+// (test_double_click_not_ptt / test_tap_chain_clear / test_slow_double_clear /
+// test_real_device_rhythm_clear / test_single_tap_no_clear)一并删除,换成下面两个
+// 反向断言:UP 上再没有轻点语义,长按说话不再被任何前置轻点拖慢。
+
+// UP 的轻点/单击/双击一律无清空语义。按下即录之后(2026-08-29)轻点会开一次
+// 会话并在松开时当场收束(< PTT_MIN_TALK_MS),但绝不产生任何按键上行动作
+static void test_up_taps_never_clear(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);      // → READY
-    reduce_btn(APP_EV_KEY_PRESS,   APP_BTN_UP, now + 20);    // 第一按
-    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_UP, now + 100);   // 轻点松开
-    reduce_btn(APP_EV_KEY_PRESS,   APP_BTN_UP, now + 60);    // 第二按(链内)
-    reduce_btn(APP_EV_KEY_LONG,    APP_BTN_UP, now + 300);   // 按住 300ms → LONG
-    assert(s.state == APP_ST_READY);                          // 挂起,尚未开录音
-    assert(!has_action(APP_ACT_SEND_VOICE_START));
-    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 80);    // 确认窗前松手 → 录音作废
-    assert(s.state == APP_ST_READY);
-    assert(!has_action(APP_ACT_SEND_VOICE_START));
-    // 这一下是第二次轻点 → 自建链当即判双击清空(不等驱动 DOUBLE)
-    app_action_t *a = find_action(APP_ACT_SEND_KEY_ACTION);
-    assert(a && a->u.key_action.action == APP_KEY_CLEAR);
-    reduce(APP_EV_TICK, now + 500);                           // 心跳不该补开录音
-    assert(s.state == APP_ST_READY);
-    reduce_btn(APP_EV_KEY_DOUBLE,  APP_BTN_UP, now + 10);    // 驱动补报 → 去重
+
+    // 连续三次轻点(旧版第二次就会判双击清空)
+    for (int i = 0; i < 3; i++) {
+        reduce_btn(APP_EV_KEY_PRESS,   APP_BTN_UP, now + 20);
+        reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_UP, now + 120);
+        assert(!has_action(APP_ACT_SEND_KEY_ACTION));
+        assert(s.state == APP_ST_READY);                 // 轻点开的会话已收束
+        reduce_btn(APP_EV_KEY_CLICK,   APP_BTN_UP, now + 180);
+        assert(!has_action(APP_ACT_SEND_KEY_ACTION));
+        assert(on == 0);                                  // 补报单击在 READY 无语义
+    }
+    // 驱动补报 DOUBLE 也不清空
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 50);
     assert(!has_action(APP_ACT_SEND_KEY_ACTION));
-
-    // 场景 B:轻点后真的按住不放 → 确认窗过后仍要开录音(不能吞掉真实意图)
-    reset();
-    s.link_up = true;
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    reduce_btn(APP_EV_KEY_PRESS,   APP_BTN_UP, now + 20);
-    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_UP, now + 100);
-    reduce_btn(APP_EV_KEY_PRESS,   APP_BTN_UP, now + 60);
-    reduce_btn(APP_EV_KEY_LONG,    APP_BTN_UP, now + 300);
-    assert(s.state == APP_ST_READY);                          // 挂起中
-    reduce(APP_EV_TICK, now + 300);                           // 仍按住,确认窗到
-    assert(s.state == APP_ST_LISTENING);
-    assert(has_action(APP_ACT_SEND_VOICE_START));
-
-    // 场景 C:没有前置轻点的单独长按 → 300ms 立即开录音(阈值语义不变)
-    reset();
-    s.link_up = true;
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);
-    reduce_btn(APP_EV_KEY_LONG,  APP_BTN_UP, now + 300);
-    assert(s.state == APP_ST_LISTENING);
-    assert(has_action(APP_ACT_SEND_VOICE_START));
-
-    // 场景 D:轻点后隔了 UP_TAP_CHAIN_MS 以上再长按 → 不算双击链,立即开
-    reset();
-    s.link_up = true;
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    reduce_btn(APP_EV_KEY_PRESS,   APP_BTN_UP, now + 20);
-    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_UP, now + 100);
-    reduce_btn(APP_EV_KEY_PRESS,   APP_BTN_UP, now + 1900);  // 早已出链(>1.8s)
-    reduce_btn(APP_EV_KEY_LONG,    APP_BTN_UP, now + 300);
-    assert(s.state == APP_ST_LISTENING);
+    assert(s.state == APP_ST_READY);
 }
 
-// ---- 阈值边缘"两下都被判成长按"的双击:自建轻点链仍要清空 ----
-static void test_tap_chain_clear(void) {
+// 轻点之后立刻按住说话:必须当场开录音(按下即录,更不存在 250ms 挂起确认)
+static void test_ptt_no_confirm_delay(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);      // → READY
 
-    // 第一下:按住 340ms → 驱动报 LONG(前面无轻点 → 立即开录音)
-    reduce_btn(APP_EV_KEY_PRESS,   APP_BTN_UP, now + 20);
-    reduce_btn(APP_EV_KEY_LONG,    APP_BTN_UP, now + 300);
+    reduce_btn(APP_EV_KEY_PRESS,   APP_BTN_UP, now + 20);    // 轻点
+    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_UP, now + 120);
+    reduce_btn(APP_EV_KEY_PRESS,   APP_BTN_UP, now + 60);    // 紧接着按住(旧版判"链内")
+    assert(s.state == APP_ST_LISTENING);                      // 按下当场开录
+    assert(has_action(APP_ACT_SEND_VOICE_START));
+    reduce_btn(APP_EV_KEY_LONG,    APP_BTN_UP, now + 500);    // 驱动到点补报,已在录音中
     assert(s.state == APP_ST_LISTENING);
-    // 40ms 就松手 → 误触收口:丢音频 + 收束会话,不进转写
-    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 40);
+    assert(on == 0);                                          // 补报长按不再产生动作
+    // 松手正常发送(按住够久,不触发误触收口)
+    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 3000);
+    assert(s.state == APP_ST_TRANSCRIBING);
+    assert(has_action(APP_ACT_SEND_VOICE_END));
+
+    // 误碰级短按(< PTT_MIN_TALK_MS)收口:丢音频、不进转写。短按不到长按阈值,
+    // 松开只报 RELEASE(没有 LONG_UP),结束分支必须同时认这一种。
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    reduce_btn(APP_EV_KEY_PRESS,   APP_BTN_UP, now + 20);
+    assert(s.state == APP_ST_LISTENING);
+    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_UP, now + 120);
     assert(s.state == APP_ST_READY);
     assert(has_action(APP_ACT_STREAM_CANCEL));
     assert(has_action(APP_ACT_SEND_VOICE_END));
-    // 同一次松手驱动补报 RELEASE → 不得重复计点(否则单下就变清空)
-    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_UP, now + 1);
-    assert(!has_action(APP_ACT_SEND_KEY_ACTION));
-
-    // 第二下:间隔 80ms 再按下(链内),又按住 300ms 被判长按 → 挂起,不开录音
-    reduce_btn(APP_EV_KEY_PRESS,   APP_BTN_UP, now + 80);
-    reduce_btn(APP_EV_KEY_LONG,    APP_BTN_UP, now + 300);
-    assert(s.state == APP_ST_READY);
-    assert(!has_action(APP_ACT_SEND_VOICE_START));
-    // 松手 → 第二次轻点成链 → 清空输入框
-    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 40);
-    app_action_t *a = find_action(APP_ACT_SEND_KEY_ACTION);
-    assert(a && a->u.key_action.action == APP_KEY_CLEAR);
-    assert(s.state == APP_ST_READY);
-
-    // 驱动随后补报的 DOUBLE 必须去重(不能清第二次)
-    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 300);
-    assert(!has_action(APP_ACT_SEND_KEY_ACTION));
-}
-
-// ---- 慢双击(松手→按下 ~900ms):真机上人就是这么按的,必须也算双击 ----
-// 2026-08-28 用户二次反馈"还是不行":原 UP_TAP_CHAIN_MS=400 照驱动双击窗定,
-// 比真人在"带长按语义的键"上的节奏紧太多,两下按不进同一条链 → CLEAR
-// 从不发出。窗口放宽后本例必须清空。
-static void test_slow_double_clear(void) {
-    reset();
-    s.link_up = true;
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);      // → READY
-
-    // 第一下:125ms 短按(驱动报 RELEASE + CLICK)
-    reduce_btn(APP_EV_KEY_PRESS,   APP_BTN_UP, now + 20);
-    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_UP, now + 125);
-    reduce_btn(APP_EV_KEY_CLICK,   APP_BTN_UP, now + 113);
-    assert(!has_action(APP_ACT_SEND_KEY_ACTION));           // 单下不清空
-
-    // 第二下:距上次松手 900ms 才按下(链内),按住 310ms 被判长按 → 挂起
-    reduce_btn(APP_EV_KEY_PRESS,   APP_BTN_UP, now + 787);  // 113+787 = 900ms
-    reduce_btn(APP_EV_KEY_LONG,    APP_BTN_UP, now + 310);
-    assert(s.state == APP_ST_READY);
-    assert(!has_action(APP_ACT_SEND_VOICE_START));          // 不误开录音
-    // 松手 → 成链 → 清空
-    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_UP, now + 30);
-    app_action_t *a = find_action(APP_ACT_SEND_KEY_ACTION);
-    assert(a && a->u.key_action.action == APP_KEY_CLEAR);
-    assert(s.state == APP_ST_READY);
-}
-
-// ---- 真机取证节奏(2026-08-28 三次反馈"我也试过摁快一点,还是不管用")----
-// ring 实测那一对:300ms 轻点 → 空档 1279ms → 290ms 轻点,两下都被驱动正确判成
-// CLICK,唯一的问题是空档超出当时的 1200ms 窗 79ms → CLEAR 从不发出。用户"摁快"
-// 快的是按住时长,卡住的是空档。窗口 1800ms 后本例必须清空。
-static void test_real_device_rhythm_clear(void) {
-    reset();
-    s.link_up = true;
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);      // → READY
-
-    // 第一下:按住 300ms(阈值 400ms 下仍是短按)→ RELEASE + CLICK
-    reduce_btn(APP_EV_KEY_PRESS,   APP_BTN_UP, now + 20);
-    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_UP, now + 300);
-    reduce_btn(APP_EV_KEY_CLICK,   APP_BTN_UP, now + 112);
-    assert(!has_action(APP_ACT_SEND_KEY_ACTION));           // 单下不清空
-
-    // 第二下:距上次松手 1279ms 才按下 —— 旧窗口就是死在这 79ms 上
-    reduce_btn(APP_EV_KEY_PRESS,   APP_BTN_UP, now + 1167);  // 112+1167 = 1279ms
-    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_UP, now + 290);
-    assert(!has_action(APP_ACT_SEND_VOICE_START));           // 全程不误开录音
-    app_action_t *a = find_action(APP_ACT_SEND_KEY_ACTION);
-    assert(a && a->u.key_action.action == APP_KEY_CLEAR);
-    assert(s.state == APP_ST_READY);
-    // 驱动随后补报 CLICK/DOUBLE 都不得再清一次
-    reduce_btn(APP_EV_KEY_CLICK,  APP_BTN_UP, now + 112);
-    assert(!has_action(APP_ACT_SEND_KEY_ACTION));
-    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 10);
-    assert(!has_action(APP_ACT_SEND_KEY_ACTION));
-}
-
-// ---- 单独一次轻点不该清空;真实长按说话不受轻点链影响 ----
-static void test_single_tap_no_clear(void) {
-    reset();
-    s.link_up = true;
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    reduce_btn(APP_EV_KEY_PRESS,   APP_BTN_UP, now + 20);
-    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_UP, now + 120);
-    assert(!has_action(APP_ACT_SEND_KEY_ACTION));
-    reduce_btn(APP_EV_KEY_CLICK,   APP_BTN_UP, now + 300);   // 驱动单击:READY 无语义
-    assert(!has_action(APP_ACT_SEND_KEY_ACTION));
-
-    // 出链后的长按说话:正常开录音,松手正常发送(留足余量,不贴 1.8s 边界)
-    reduce_btn(APP_EV_KEY_PRESS,   APP_BTN_UP, now + 2100);
-    reduce_btn(APP_EV_KEY_LONG,    APP_BTN_UP, now + 300);
-    assert(s.state == APP_ST_LISTENING);
-    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 2000);
-    assert(s.state == APP_ST_TRANSCRIBING);
-    assert(has_action(APP_ACT_SEND_VOICE_END));
+    // 驱动随后补报的单击落在 READY:无语义,零动作
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 180);
+    assert(on == 0);
 }
 
 // ---- PTT:离线被拒 + 错误音;在线开流 ----
@@ -289,7 +204,7 @@ static void test_ptt_offline_online(void) {
     reset();
     s.link_up = false;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);    // → READY
-    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);    // 离线长按 ▲
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);    // 离线按下 ▲
     assert(s.state == APP_ST_READY);                       // 原地不动
     app_action_t *t = find_action(APP_ACT_PLAY_TONE);
     assert(t && t->u.tone == APP_TONE_ERROR);
@@ -298,7 +213,7 @@ static void test_ptt_offline_online(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);    // 在线长按 ▲
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);    // 在线按下 ▲
     assert(s.state == APP_ST_LISTENING);
     assert(has_action(APP_ACT_PLAY_TONE));                 // 440Hz 就绪音
     assert(has_action(APP_ACT_SEND_VOICE_START));
@@ -318,7 +233,7 @@ static void test_tone_press_produce(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);    // → READY
-    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);    // 开录
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);    // 开录
     assert(s.state == APP_ST_LISTENING);
     assert(s.stream_started == false);
     assert(!has_action(APP_ACT_STREAM_START));
@@ -333,7 +248,7 @@ static void test_tone_done_idempotent(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);    // 开录,未开流
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);    // 开录,未开流
     app_event_t ev = { .type = APP_EV_TONE_DONE };
     app_state_reduce(&s, &ev, now + 110, out, &on);        // 滴声播完
     assert(has_action(APP_ACT_STREAM_START));
@@ -347,9 +262,9 @@ static void test_tone_done_late_after_send(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);    // 按下 #1:入 LISTENING,未开流
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);    // 按下 #1:入 LISTENING,未开流
     assert(!has_action(APP_ACT_STREAM_START));
-    // 松开:立即发送(≥ PTT_MIN_TALK_MS,否则算阈值误触被取消,见 test_double_click_not_ptt)
+    // 松开:立即发送(≥ PTT_MIN_TALK_MS,否则算阈值误触被取消,见 test_ptt_no_confirm_delay)
     reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 500);
     assert(s.state == APP_ST_TRANSCRIBING);
     app_event_t ev = { .type = APP_EV_TONE_DONE };
@@ -363,7 +278,7 @@ static void test_tone_release_sends_order(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);    // 开录
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);    // 开录
     app_event_t ev = { .type = APP_EV_TONE_DONE };
     app_state_reduce(&s, &ev, now + 110, out, &on);        // 滴声播完 → 开流
     assert(has_action(APP_ACT_STREAM_START));
@@ -374,16 +289,18 @@ static void test_tone_release_sends_order(void) {
     assert_action_order(APP_ACT_STREAM_STOP, APP_ACT_SEND_VOICE_END);
 }
 
-// ---- S3:兜底——TICK 500ms 未收 TONE_DONE → 强制开流(防声音任务异常卡死) ----
+// ---- S3:兜底——TICK 满 APP_TONE_PENDING_TIMEOUT_MS 未收 TONE_DONE → 强制开流 ----
+// 阈值用常量表达(2026-08-29 由 500 降到 200):这条断言卡的是"到点才开、早一毫秒
+// 不开",与具体毫秒值无关,常量再调本测试自动跟随。
 static void test_tone_tick_fallback(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);    // 开录
-    reduce(APP_EV_TICK, s.state_since_ms + 499);           // 499ms 未到阈值
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);    // 开录
+    reduce(APP_EV_TICK, s.state_since_ms + APP_TONE_PENDING_TIMEOUT_MS - 1);   // 差 1ms
     assert(!has_action(APP_ACT_STREAM_START));
     assert(!s.stream_started);
-    reduce(APP_EV_TICK, s.state_since_ms + 500);           // 500ms 到 → 兜底开流
+    reduce(APP_EV_TICK, s.state_since_ms + APP_TONE_PENDING_TIMEOUT_MS);       // 到点兜底
     assert(has_action(APP_ACT_STREAM_START));
     assert(s.stream_started == true);
     // 兜底后迟到的 TONE_DONE:幂等忽略
@@ -409,7 +326,7 @@ static void test_listening_release_sends(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);    // 开录
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);    // 开录
     assert(s.state == APP_ST_LISTENING);
     reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 3000); // 松开:立即发送
     assert(s.state == APP_ST_TRANSCRIBING);
@@ -420,94 +337,86 @@ static void test_listening_release_sends(void) {
     assert(!has_action(APP_ACT_PLAY_TONE));
 }
 
-// ---- UP(音量加)双击 = 清空输入框;OK 双击已移除(录音松开已发送,DOUBLE 全局处理)----
-static void test_up_double_clears_input(void) {
-    // READY 态完整双击流:两按均短(<0.5s 不触发长按),DOUBLE → clear,无提示音
+// ---- DOWN(音量减)长按 0.5s = 清空输入框(2026-08-29 从 UP 双击迁来)----
+static void test_down_long_clears_input(void) {
+    // READY:长按判定当场清空 + 一声确认音;不碰会话状态
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);    // → READY
     assert(s.state == APP_ST_READY);
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);
-    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_UP, now + 40);
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 200);   // 双击第二按
-    // 清空在第二下松手即发出(自建轻点链,不再等驱动的 DOUBLE 窗口):
-    // 阈值 300ms 下驱动经常把轻点判成长按而根本不报 DOUBLE,详见 note_up_tap。
-    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_UP, now + 220);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_DOWN, now + 20);
+    assert(!has_action(APP_ACT_SEND_KEY_ACTION));          // 按下还不算
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_DOWN, now + 500);
     app_action_t *a = find_action(APP_ACT_SEND_KEY_ACTION);
     assert(a && a->u.key_action.action == APP_KEY_CLEAR);
-    assert(!has_action(APP_ACT_PLAY_TONE));                // 双击无提示音
-    assert(!has_action(APP_ACT_SEND_VOICE_START));         // 无录音动作
-    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 400);  // 驱动补报 → 去重,不清第二次
+    app_action_t *tone = find_action(APP_ACT_PLAY_TONE);
+    assert(tone && tone->u.tone == APP_TONE_REJECT);       // 阈值到点的确认音
+    assert(!has_action(APP_ACT_SEND_VOICE_START));         // 不开录音
+    assert(s.state == APP_ST_READY);
+    // 松开:长按态只报 LONG_UP,不补 CLICK → 不会再发一次回车
+    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_DOWN, now + 300);
     assert(!has_action(APP_ACT_SEND_KEY_ACTION));
-    assert(s.state == APP_ST_READY);                       // 会话状态不受影响
 
-    // 转写/执行中双击 UP 同样清空(第二按落在 TRANSCRIBING 的典型场景)
+    // 全局语义:转写中 / Agent 运行中同样清空,且不动会话
+    const app_stage_t st_list[] = { APP_ST_TRANSCRIBING, APP_ST_AGENT_RUNNING,
+                                    APP_ST_HOME, APP_ST_APPROVAL };
+    for (unsigned i = 0; i < sizeof(st_list) / sizeof(st_list[0]); i++) {
+        reset();
+        s.link_up = true;
+        s.state = st_list[i];
+        s.state_since_ms = now;
+        reduce_btn(APP_EV_KEY_LONG, APP_BTN_DOWN, now + 10);
+        a = find_action(APP_ACT_SEND_KEY_ACTION);
+        assert(a && a->u.key_action.action == APP_KEY_CLEAR);
+        assert(!has_action(APP_ACT_STREAM_CANCEL));        // 不清会话
+        assert(!has_action(APP_ACT_STREAM_STOP));
+        assert(s.state == st_list[i]);                     // 状态不变
+    }
+
+    // 幽灵长按(回调 mv 回到松开电平 2890 = 无人按键,射频腐蚀残留)必须丢弃 ——
+    // 清空是破坏性动作,不能被假事件触发
     reset();
     s.link_up = true;
-    s.state = APP_ST_TRANSCRIBING;
-    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 10);
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);    // → READY
+    reduce_btn_mv(APP_EV_KEY_LONG, APP_BTN_DOWN, 2890, now + 500);
+    assert(on == 0);                                       // 零动作
+    // 真实按压读数(DOWN 档 150-447mV)照常清空
+    reduce_btn_mv(APP_EV_KEY_LONG, APP_BTN_DOWN, 300, now + 500);
     a = find_action(APP_ACT_SEND_KEY_ACTION);
     assert(a && a->u.key_action.action == APP_KEY_CLEAR);
-    assert(!has_action(APP_ACT_STREAM_CANCEL));            // 不清会话(无取消语义)
-    assert(!has_action(APP_ACT_STREAM_STOP));
-    assert(s.state == APP_ST_TRANSCRIBING);                // 会话状态不受影响
 
-    // OK 双击不再清空(功能迁到 UP 双击)
+    // UP 双击不再清空(语义已迁走);OK 双击本来就没有
     reset();
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 10);
+    assert(!has_action(APP_ACT_SEND_KEY_ACTION));
     reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 10);
     assert(!has_action(APP_ACT_SEND_KEY_ACTION));
 
-    // 长按松开(PTT 结束)后回弹窗口内的双击是"长按+机械回弹"误判的假双击:
-    // 忽略,防止 clear 上行在注入完成后删掉刚注入的文本。
-    reset();
-    s.link_up = true;
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);     // → READY
-    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 500);     // 开录
-    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 3500); // 松开 → TRANSCRIBING
-    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 100);   // 松开 100ms 后的假双击
-    assert(!has_action(APP_ACT_SEND_KEY_ACTION));           // 回弹假双击被吞
-    assert(s.state == APP_ST_TRANSCRIBING);                 // 会话不受影响
-
-    // 回弹按压延迟上报:误判双击的第二按在松开后 ~300ms,DOUBLE 事件要再等
-    // 双击窗口 300ms,即松开后 ~600ms 才上报 —— 也在防御窗口(700ms)内
-    reset();
-    s.link_up = true;
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);     // → READY
-    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 500);     // 开录
-    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 3500); // 松开 → TRANSCRIBING
-    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 600);   // 松开 600ms 后的延迟误判
-    assert(!has_action(APP_ACT_SEND_KEY_ACTION));           // 仍在窗口内:被吞
-
-    // 录音中(LISTENING,手指在按住)收到 DOUBLE(ADC 阈值穿越抖动):忽略
+    // PTT 结束后立刻长按 DOWN 清空:不再有回弹防御窗口把它吞掉(回弹扫过 DOWN 档
+    // 只是掠过,凑不出 500ms 长按,不需要靠时间窗防)
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 500);     // 开录
-    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 1200);  // 按住期间的假双击
-    assert(!has_action(APP_ACT_SEND_KEY_ACTION));
-    assert(s.state == APP_ST_LISTENING);
-
-    // 松开超过回弹窗口后(注入已完成、用户看到文本)的正常双击清空不受影响
-    reset();
-    s.link_up = true;
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 500);
-    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 3500);
-    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 1000);  // 松开 1s 后双击
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 500);     // 开录
+    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 3500); // 松开 → TRANSCRIBING
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_DOWN, now + 100);   // 松开 100ms 后就清空
     a = find_action(APP_ACT_SEND_KEY_ACTION);
     assert(a && a->u.key_action.action == APP_KEY_CLEAR);
+    assert(s.state == APP_ST_TRANSCRIBING);                 // 会话不受影响
 }
 
-// ---- UP(音量加)长按 ≥0.5s = 说话:LONG 开录(滴声在判定时响),LONG_UP 松开发送 ----
-static void test_up_long_ptt(void) {
+// ---- UP(音量加)= 按住说话:PRESS 当场开录(滴声同时响),松开发送 ----
+// 2026-08-29:开录事件由 LONG(0.5s 阈值)改为 PRESS —— 真机实测按下到 `采集开始`
+// 要 ~1.01s(428ms 阈值 + 578ms 滴声门禁),用户第一秒的话被吞掉。
+static void test_up_press_ptt(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);    // → READY
     assert(s.state == APP_ST_READY);
-    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 500);    // 0.5s 判定:开录
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 500);    // 按下即录
     assert(s.state == APP_ST_LISTENING);
     app_action_t *t = find_action(APP_ACT_PLAY_TONE);
-    assert(t && t->u.tone == APP_TONE_START);              // 滴声在长按判定时响
+    assert(t && t->u.tone == APP_TONE_START);              // 滴声在按下时响
     assert(has_action(APP_ACT_SEND_VOICE_START));
     assert(!has_action(APP_ACT_STREAM_STOP));              // 未结束
     assert(!has_action(APP_ACT_STREAM_CANCEL));
@@ -519,18 +428,18 @@ static void test_up_long_ptt(void) {
     // 转写期静音(用户需求 2026-08-28):松开不再播发送音
     assert(!has_action(APP_ACT_PLAY_TONE));
 
-    // 离线:长按 UP 被拒,error 音 + toast,不进 LISTENING
+    // 离线:按下 UP 被拒,error 音 + toast,不进 LISTENING
     reset();
     s.link_up = false;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);    // → READY
-    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 500);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 500);
     assert(s.state == APP_ST_READY);
     assert(!has_action(APP_ACT_SEND_VOICE_START));
     t = find_action(APP_ACT_PLAY_TONE);
     assert(t && t->u.tone == APP_TONE_ERROR);
     assert(strstr(s.toast, "OFFLINE"));
 
-    // 短按(CLICK 而非 LONG)不触发任何动作、无提示音
+    // 只有补报单击、没有 PRESS(测试构造)时不触发任何动作、无提示音
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
@@ -554,10 +463,59 @@ static void test_up_long_ptt(void) {
     assert(!has_action(APP_ACT_STREAM_STOP));
 }
 
-// ---- LISTENING 端:见 test_listening_release_sends / test_up_double_clears_input ----
+// ---- 按下即录的三道防线(2026-08-29)----
+// 1) 幽灵 PRESS 判假:UP 侧用分压档上限(≤150mV)而不是通用的 2000mV —— 真机环里
+//    抓到过 `btn=0 ev=0 mv=598`(OK 键按住期间冒出的跨档假 UP 按下),2000 放它过去。
+// 2) 短按收口:< PTT_MIN_TALK_MS 松手 → 丢音频 + 收束回 READY。
+// 3) 不变量 PTT_MIN_TALK_MS ≥ 驱动 long_press_time(500ms):短于阈值的一按事后会被
+//    驱动补报 SINGLE_CLICK,而 UP 单击在 TRANSCRIBING 是"退出转写"。取等号让二者互斥
+//    —— 能进转写的一按必然到过阈值,到过阈值的一按永不补报单击。
+static void test_ptt_press_start_guards(void) {
+    // 幽灵按下(松开电平 2890)不开会话
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);          // → READY
+    reduce_btn_mv(APP_EV_KEY_PRESS, APP_BTN_UP, 2890, now + 20);
+    assert(s.state == APP_ST_READY);
+    assert(on == 0);
+
+    // 跨档幽灵按下(598mV 落在 OK 档)同样不开会话
+    reduce_btn_mv(APP_EV_KEY_PRESS, APP_BTN_UP, 598, now + 30);
+    assert(s.state == APP_ST_READY);
+    assert(on == 0);
+
+    // 真实按下(3mV)当场开会话
+    reduce_btn_mv(APP_EV_KEY_PRESS, APP_BTN_UP, 3, now + 40);
+    assert(s.state == APP_ST_LISTENING);
+    assert(has_action(APP_ACT_SEND_VOICE_START));
+
+    // 不变量:差一毫秒到阈值(499ms)必须收束回 READY,绝不能进 TRANSCRIBING ——
+    // 否则紧随的补报单击会把这次转写撤掉。
+    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_UP, now + 499);
+    assert(s.state == APP_ST_READY);
+    assert(has_action(APP_ACT_STREAM_CANCEL));
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 180);         // 驱动补报
+    assert(s.state == APP_ST_READY);
+    assert(on == 0);
+
+    // 刚好到阈值(500ms):正常发送进转写,此时驱动只报 LONG_UP,不补单击
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    reduce_btn_mv(APP_EV_KEY_PRESS, APP_BTN_UP, 3, now + 20);
+    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 500);
+    assert(s.state == APP_ST_TRANSCRIBING);
+    assert(has_action(APP_ACT_SEND_VOICE_END));
+    // 长按态松开后驱动还会补一条 RELEASE:已不在 LISTENING,零动作
+    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_UP, now + 1);
+    assert(on == 0);
+    assert(s.state == APP_ST_TRANSCRIBING);
+}
+
+// ---- LISTENING 端:见 test_listening_release_sends / test_down_long_clears_input ----
 static void test_listening_end(void) {
     test_listening_release_sends();
-    test_up_double_clears_input();
+    test_down_long_clears_input();
 }
 
 // ---- 超时:TRANSCRIBING 30s / AGENT_RUNNING 90s → READY ----
@@ -565,7 +523,7 @@ static void test_timeouts(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);
     reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 3000);
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 3300);  // 单击窗口到期 → TRANSCRIBING
     assert(s.state == APP_ST_TRANSCRIBING);
@@ -841,7 +799,7 @@ static void test_approval_during_listening(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);    // 开录
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);    // 开录
     assert(s.state == APP_ST_LISTENING);
 
     app_event_t ev = { .type = APP_EV_APPROVAL_REQUEST,
@@ -887,9 +845,9 @@ static void test_keys_ignored_in_running(void) {
     assert(s.state == APP_ST_AGENT_RUNNING);
     assert(on == 0);                                       // PRESS/CLICK 无动作
 
-    // UP 双击=全局清空(各态统一,AGENT_RUNNING 也不例外)—— 基线测试过期:
-    // 旧断言"任意键全部忽略"未涵盖双击全局语义;OK 双击已迁到 UP
-    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 30);
+    // DOWN 长按=全局清空(各态统一,AGENT_RUNNING 也不例外)—— 基线测试过期:
+    // 旧断言"任意键全部忽略"未涵盖全局清空语义(先 OK 双击 → UP 双击 → DOWN 长按)
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_DOWN, now + 30);
     app_action_t *a = find_action(APP_ACT_SEND_KEY_ACTION);
     assert(a && a->u.key_action.action == APP_KEY_CLEAR);
     assert(s.state == APP_ST_AGENT_RUNNING);
@@ -905,7 +863,7 @@ static void test_listening_arrows_ignored(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
-    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 30);
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 40);
     assert(s.state == APP_ST_LISTENING);
@@ -964,12 +922,17 @@ static void test_locked_keys_operate_screen_off(void) {
     assert(s.locked == true);
     assert(s.screen_on == false);
 
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 30);    // UP PRESS(不唤醒)
-    assert(on == 0);
+    // UP 按下即录(2026-08-29):锁定态照常开录,且不亮屏(口袋盲操作)
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 30);
+    assert(s.state == APP_ST_LISTENING);
+    assert(has_action(APP_ACT_SEND_VOICE_START));
     assert(s.screen_on == false);                          // 保持息屏
     assert(s.panel_on == false);
+    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_UP, now + 100); // 误碰级短按:收束回 READY
+    assert(s.state == APP_ST_READY);
+    assert(s.screen_on == false);
 
-    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 40);   // 双击:照常清空
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_DOWN, now + 40);   // DOWN 长按:照常清空
     app_action_t *a = find_action(APP_ACT_SEND_KEY_ACTION);
     assert(a && a->u.key_action.action == APP_KEY_CLEAR);
     assert(s.screen_on == false);                          // 执行但不亮屏
@@ -986,7 +949,7 @@ static void test_locked_keys_operate_screen_off(void) {
     assert(s.locked == true);
     assert(s.screen_on == false);
 
-    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 80);     // 长按 UP:照常开录
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 80);     // 再按 UP:照常开录
     assert(s.state == APP_ST_LISTENING);
     assert(has_action(APP_ACT_SEND_VOICE_START));
     assert(s.screen_on == false);                          // 口袋说话,屏幕仍关
@@ -1080,15 +1043,14 @@ static void test_screen_off_keys_pass_through(void) {
     app_action_t *a = find_action(APP_ACT_SEND_KEY_ACTION);
     assert(a && a->u.key_action.action == APP_KEY_ENTER);
 
-    // b. ▲ UP 长按(READY,息屏):唤醒 + start_ptt 进 LISTENING
+    // b. ▲ UP 按下(READY,息屏):唤醒 + start_ptt 进 LISTENING(同一个 PRESS)
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);         // → READY
     reduce(APP_EV_TICK, s.last_key_ms + APP_IDLE_BACKLIGHT_OFF_MS + 1); // 息屏
     assert(s.screen_on == false);
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 10);         // 按下:唤醒
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 10);         // 按下:唤醒 + 开录
     assert(s.screen_on == true);
-    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 500);         // 0.5s 长按判定:开录
     assert(s.state == APP_ST_LISTENING);
     assert(has_action(APP_ACT_SEND_VOICE_START));
 
@@ -1103,12 +1065,12 @@ static void test_screen_off_keys_pass_through(void) {
     assert(s.screen_on == true);
     assert(on == 0);                                            // LONG 零动作
 
-    // d. ▲ UP 双击(息屏):唤醒 + 清空上行
+    // d. ▼ DOWN 长按(息屏):唤醒 + 清空上行
     reset();
     reduce(APP_EV_TICK, now + APP_IDLE_BACKLIGHT_OFF_MS + 1);   // 息屏
-    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 10);         // 双击第一按:唤醒
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_DOWN, now + 10);       // 按下:唤醒
     assert(s.screen_on == true);
-    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 20);        // DOUBLE:清空
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_DOWN, now + 500);       // 0.5s 长按:清空
     a = find_action(APP_ACT_SEND_KEY_ACTION);
     assert(a && a->u.key_action.action == APP_KEY_CLEAR);
 }
@@ -1136,7 +1098,7 @@ static void test_lock_guards_listening_approval(void) {
     reset();
     s.link_up = true;
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);       // → READY
-    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);        // 开录
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);        // 开录
     assert(s.state == APP_ST_LISTENING);
     reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 30);
     assert(s.locked == false);
@@ -1266,7 +1228,7 @@ static void test_usb_link_up(void) {
     // USB 链路下 PTT 可用(HOME 单击进 READY,再按下开录)
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
     assert(s.state == APP_ST_READY);
-    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 20);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);
     assert(s.state == APP_ST_LISTENING);
     assert(has_action(APP_ACT_SEND_VOICE_START));
 }
@@ -1392,7 +1354,7 @@ static void test_dual_idle_last_connect_wins(void) {
     // PTT 开录:link_channel 保持 USB;期间 BLE 断开不掐流
     // (时间推进 ≥1s:绕过 BLE 连接握手期假长按抑制窗口 BLE_CONNECT_PTT_GUARD)
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 1100);
-    reduce_btn(APP_EV_KEY_LONG, APP_BTN_UP, now + 1200);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 1200);
     assert(s.state == APP_ST_LISTENING);
     assert(s.link_channel == APP_CHAN_USB);
     app_event_t bd = { .type = APP_EV_BLE_DISCONNECTED };
@@ -1428,7 +1390,8 @@ int main(void) {
     test_tone_tick_fallback();
     test_tone_done_ignored_elsewhere();
     test_listening_end();
-    test_up_long_ptt();
+    test_up_press_ptt();
+    test_ptt_press_start_guards();
     test_timeouts();
     test_agent_running_timeout();
     test_agent_status_flow();
@@ -1442,11 +1405,8 @@ int main(void) {
     test_ok_long_unlocks();
     test_wake_no_relock();
     test_screen_off_keys_pass_through();
-    test_double_click_not_ptt();
-    test_tap_chain_clear();
-    test_slow_double_clear();
-    test_real_device_rhythm_clear();
-    test_single_tap_no_clear();
+    test_up_taps_never_clear();
+    test_ptt_no_confirm_delay();
     test_relock_cycle();
     test_lock_guards_listening_approval();
     test_transcript_display();

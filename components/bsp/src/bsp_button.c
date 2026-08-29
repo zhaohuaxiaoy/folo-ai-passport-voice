@@ -69,19 +69,26 @@ esp_err_t bsp_button_init(bsp_btn_cb_t cb, void *user) {
             .min          = BTN_MV[i][0],
             .max          = BTN_MV[i][1],
         };
-        // OK 长按 = 手动锁定息屏(0.5s 判定;与 UP 的 0.4s 区分,避免误触):
-        // 锁定态再长按 OK 解锁。启用后进入长按态松开的 OK 只报
-        // BUTTON_LONG_PRESS_UP 而不报 SINGLE_CLICK —— 单击语义(HOME 进
-        // READY / APPROVAL 批准)只覆盖 <0.5s 的短按,长按不再误触发。
-        // UP 键(音量加)长按 = 说话(PTT 已从 OK 移师 UP 键):0.4s 判定,
-        // 长按态松开上报 BUTTON_LONG_PRESS_UP → BSP_BTN_LONG_UP 带出"说话结束"。
+        // 三颗键都用 0.5s 长按阈值(各自独立计时,同值不冲突),各自的长按语义:
+        //   OK   长按 = 手动锁定息屏(锁定态再长按 OK 解锁);
+        //   UP   长按 = 不再有语义(PTT 已改为 PRESS 触发,2026-08-29),但阈值本身
+        //        仍是承重的:它划定"这一按事后还会不会补报 SINGLE_CLICK"的分界线,
+        //        必须与 app_state.c 的 PTT_MIN_TALK_MS 取同值(见该常量的不变量注释)——
+        //        UP 单击在 APPROVAL(拒绝)/TRANSCRIBING(退出转写)两态仍有语义;
+        //   DOWN 长按 = 清空输入框(2026-08-29 从"UP 双击"迁来)。
+        // 关键机制(三颗键同理):一旦进入长按态,这一按就只报 LONG_PRESS_START /
+        // LONG_PRESS_UP,再也不报 SINGLE_CLICK/DOUBLE_CLICK。所以同一颗键上的
+        // 「单击 + 长按」互斥得干净 —— OK 的单击(HOME 进 READY / APPROVAL 批准)、
+        // DOWN 的单击(回车)都只覆盖 <0.5s 的短按,长按不会误触发,反过来想长按
+        // 也绝不会先执行单击。而「长按 + 双击」不成立:长按到点就宣布,双击的第二
+        // 按只要多按几十毫秒就被判成长按,双击彻底消失(用户轻点实测 285~300ms,
+        // 300ms 阈值只剩 5~15ms 余量 —— 这就是"清空"从 UP 双击搬到 DOWN 长按的原因,
+        // 见 main/app_state.c 文件头键位注释)。
+        // 阈值 500ms 由 400 上调而来(2026-08-29 用户指定),轻点余量 200~215ms;
+        // 改 PTT 为按下即录之后(同日),这个阈值不再让录音晚开 —— 它只决定单击的
+        // 补报边界(以及 DOWN 清空 / OK 锁屏的判定点)。
         button_config_t bc = { 0 };
-        if (i == BSP_BTN_OK) bc.long_press_time = 500;      // 0.5s 判定锁定(与 UP 区分)
-        // 0.4s 判定长按说话(2026-08-28 用户指定,由 300 上调)。取值就是双击
-        // 与说话在同一颗键上的分界线:用户自己的轻点实测 285~300ms,300ms 阈值
-        // 只剩 5~15ms 余量,一旦被判成长按 iot_button 就再也不报 CLICK/DOUBLE,
-        // 清空直接消失、那一下还变成录音。400ms 给到 100~115ms 余量。
-        if (i == BSP_BTN_UP) bc.long_press_time = 400;
+        bc.long_press_time = 500;
         esp_err_t e = iot_button_new_adc_device(&bc, &ac, &s_btn[i]);
         if (e != ESP_OK || !s_btn[i]) {
             ESP_LOGE(TAG, "按键 %d 创建失败 (%s) —— 检查 GPIO%d 的 ADC 配置与分压电阻",

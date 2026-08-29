@@ -99,7 +99,12 @@ esp_err_t app_sound_init(void) {
     // 1536B 时高水位仅剩 316B(2026-08-28 实测)→ 2048B。
     static StackType_t s_snd_stack[2048 / sizeof(StackType_t)];
     static StaticTask_t s_snd_tcb;
-    if (!xTaskCreateStatic(sound_worker, "sound_worker", 2048, NULL, 3,
+    // 优先级 5(2026-08-29 由 3 提升,与 ble_worker 同级,仍低于 audio_worker 6):
+    // 开录音的滴声播完才开流(TONE_DONE 门禁),prio 3 时它排在 app_task(4)与
+    // taskLVGL(4,2 行缓冲刷 240x320)后面 —— 真机实测长按判定到 `采集开始` 要
+    // 578ms,而滴声本身只有 80ms。提级后这段回落到 ~80ms。提示音只有几十毫秒的
+    // 阻塞 I2S 写(等 DMA 时让出 CPU),不会饿死同级/低级任务;且它与采集不重叠。
+    if (!xTaskCreateStatic(sound_worker, "sound_worker", 2048, NULL, 5,
                            s_snd_stack, &s_snd_tcb)) {
         ESP_LOGE(TAG, "sound worker 创建失败");
         return ESP_FAIL;

@@ -7,17 +7,19 @@
 #include <string.h>
 #include <stdio.h>
 
-// 长按松开后忽略双击的窗口:机械回弹/ADC 阈值穿越会把"长按+回弹"误判成
-// 双击 → clear 上行在注入完成后才到达,删掉刚注入的文本。真实双击清空
-// 发生在注入后(用户看到文本才决定清空),远晚于此窗口。
-// 窗口必须 ≥ 回弹按压延迟(~300ms)+ iot_button 双击判定延迟(第二按松开后
-// 再等 short_press_ticks=300ms 才上报 DOUBLE)——实测误判上报在松开后
-// 400-600ms,300ms 窗口覆盖不住,故取 700ms。
-#define PTT_REBOUND_GUARD_MS 700
-// 假 LONG 判定阈值:on_key 回调时刻 ADC 读数 ≥2000mV = 松开电平 → 假按。
-// 真实按压回调读 3-5mV(事件处理时刻手指仍在键上)。三档键:UP 按下 0-150,
-// 松开 2890,2000 在两者之间留足余量(RF_GUARD_HIGH_MV 同值)。
+// 假按判定阈值:on_key 回调时刻 ADC 读数 ≥2000mV = 松开电平 → 假按(射频腐蚀
+// 造成的幽灵事件,无人按键)。真实按压回调读的是该键分压档(UP 3-5mV / DOWN
+// 150-447mV,事件处理时刻手指仍在键上)。三档键松开态 2890,2000 留足余量
+// (RF_GUARD_HIGH_MV 同值)。UP 开录音与 DOWN 清空都拿它挡幽灵长按。
 #define PTT_FAKE_LONG_MV 2000
+
+// UP 键"真实按压"上限(2026-08-29,PTT 改按下即录后收紧):UP 分压档是 0-150mV
+// (BSP_BTN_MV_TABLE),真实按压回调实测 3-5mV。2000 的通用门只挡"松开电平"型
+// 幽灵(2890),挡不住跨档幽灵 —— 真机环里抓到过 `btn=0 ev=0 mv=598`(OK 键按住
+// 期间冒出的假 UP 按下,598 落在 OK 档),按下即录的话它会直接开一次录音。
+// 故 UP 侧一律用本档上限判真假(DOWN 清空仍用 PTT_FAKE_LONG_MV:DOWN 档 150-447,
+// 真实读数 303-305,收到 150 会把自己挡掉)。
+#define PTT_UP_PRESS_MAX_MV 150
 
 // 连接握手期(~0.4-1s:参数协商/DLE/PHY 更新)密集射频会把按键 ADC 整段
 // 腐蚀成 0mV → 假 UP 长按 → 自动开录音(真机实测: 连接后 130s 内自动触发
@@ -25,40 +27,34 @@
 // 假事件;超窗后正常。
 #define BLE_CONNECT_PTT_GUARD_MS 1000
 
-// ---- 双击清空 vs 长按说话的消歧(2026-08-28 用户反馈)----
-// 同一颗 UP 键既是"长按说话"又是"双击清空",而 iot_button 在按住到阈值的当下
-// 就报 LONG_PRESS_START —— 双击的第二按只要多按几十毫秒就先变成录音,随后
-// DOUBLE 又被 PTT_REBOUND_GUARD_MS 吞掉 → 用户实测"双击经常不好用,而且经常
-// 误触录音"。对"疑似双击第二按"延后确认:若这次按下发生在上一次短按松开后
-// UP_TAP_CHAIN_MS 内,LONG 不立即开录音而挂起,再按住 PTT_CONFIRM_MS 仍未松手
-// 才真开;中途松手则什么都没发生 —— DOUBLE 照常上报清空,且 ptt_end_ms 未被
-// 刷新,不会被回弹窗口吞掉。单独的长按说话(前面没有短按)不受影响。
-// 更关键的一半:阈值意味着**任何按住 ≥阈值的轻点都被 iot_button 判成长按**,
-// 于是它根本不再上报 CLICK/DOUBLE —— 阈值 300ms 时用户自己的轻点实测 285~300ms,
-// 只剩 5~15ms 余量,一下手慢 20ms"清空"就彻底消失(真机取证:52.4s/54.7s/59.8s
-// 三次 PRESS 后直接 LONG+LONG_UP,无 DOUBLE)。阈值已上调到 400ms(见
-// bsp_button.c)把余量做到 100ms 以上,但状态机不能只依赖驱动上报,自己数轻点:
-// PRESS→(RELEASE|LONG_UP) 且按住 < UP_TAP_MAX_MS 记一次轻点,两次轻点间隔
-// < UP_TAP_CHAIN_MS 即判双击 → CLEAR。驱动随后若补报 DOUBLE,按 clear_ms 去重。
-// 链判据统一用"上一次轻点松手 → 这一次按下"的间隔(不是松手到松手):按住
-// 时长本身可长可短(轻点最长 500ms),用松手到松手会把两个 300ms 的轻点误判成
-// 出链。同一次松手驱动连报 LONG_UP+RELEASE 时按下时刻没变,天然不成链。
-// 窗口取值(2026-08-28 三次放宽,取证驱动):1200ms 仍然不够。用户按"我已经
-// 摁快了"的那一对,ring 实测是 300ms 轻点 → 空档 1279ms → 290ms 轻点,两下
-// 都正确判成 CLICK,只因空档超窗 79ms 而没成链 —— 用户感知就是"按快也没用",
-// 因为他快的是按住时长,卡住的是空档。人手在这颗键上的双击空档实测落在
-// 1.1s~1.3s(1094ms 成链那次 / 1279ms 差 79ms 出链那次),1800ms 才有余量。
-// 放宽的代价只有一项:轻点后 1.8s 内的"按住说话"要多等 PTT_CONFIRM_MS 才开
-// 录音(仍然会开),独立长按不受影响;UP 单击在 READY/HOME 无其它语义,误触
-// 链的风险只在 APPROVAL/TRANSCRIBING 里"点一下 + 再点一下",概率低于双击本身
-// 失灵的代价。
-#define UP_TAP_CHAIN_MS 1800  // 上一次松手到这一次按下的间隔上限
-#define UP_TAP_MAX_MS   500   // 按住多久以内算"轻点"(超过 = 真的想按住说话)
-#define UP_TAP_DEDUP_MS 100   // 同一次松手驱动会连报 LONG_UP + RELEASE,去重窗口
-#define PTT_CONFIRM_MS  250   // 挂起后再按住这么久才真开录音(TICK 100ms 粒度)
-// 不足这么久的"录音"不可能有语音(阈值误触/双击第一下):丢音频 + 收束会话,
-// 不进转写、不刷新 ptt_end_ms(否则紧随其后的 CLEAR 会被回弹窗口吞掉)。
-#define PTT_MIN_TALK_MS 400
+// ---- 键位:按住 UP = 说话(按下即录),长按 DOWN = 清空,单击 DOWN = 回车(2026-08-29)----
+// 上一版把"清空"放在 UP 双击上,和同一颗键的"长按说话"根本无法共存:iot_button
+// 按住到阈值的当下就报 LONG_PRESS_START,并且从此不再为这一按上报 CLICK/DOUBLE。
+// 于是双击的第二按只要多按几十毫秒就先变成录音,清空彻底消失(真机取证:阈值
+// 300ms 时用户轻点实测 285~300ms,只剩 5~15ms 余量)。为了救它先后堆了四层补偿
+// (自建轻点链 UP_TAP_CHAIN_MS 1800 / 挂起确认 PTT_CONFIRM_MS / 回弹假双击防御
+// PTT_REBOUND_GUARD_MS / 驱动补报去重 clear_ms),用户实测仍然"别扭",阈值也被迫
+// 一路抬到 500ms。
+// 根因是手势组合本身,不是参数:
+//   单击 + 长按 → 可共存(阈值分界,OK 键锁屏已真机验证);
+//   单击 + 双击 → 必须等双击窗口才敢执行单击,要么迟滞 ~1.8s 要么误发;
+//   长按 + 双击 → 最差,长按到点就宣布,提前把双击判死。
+// 所以清空改挂 DOWN 长按(0.5s,与 OK 锁屏同阈值):DOWN 上「单击=回车 / 长按=
+// 清空」是已验证可共存的那一组,零迟滞、零误发,四层补偿逻辑全部删除。
+// 回弹与幽灵事件为什么不用再防:长按要求同一分压档连续保持 500ms —— 松手回弹时
+// ADC 从 0 扫到 2890 会掠过 DOWN 档(150-447),但只是掠过,凑不出 500ms;射频腐蚀
+// 实测是整段压到 0mV(落在 UP 档),同样到不了 DOWN 长按。剩下的残余风险由回调
+// mv 判假兜住(见 PTT_FAKE_LONG_MV)。
+// 不足这么久的"录音"不可能有语音(误碰/轻点):丢音频 + 收束会话,不进转写。
+// ⚠ 不变量:PTT_MIN_TALK_MS 必须 ≥ 驱动的 long_press_time(bsp_button.c,现 500ms)。
+// PTT 改成"按下即录"后(2026-08-29),短于长按阈值的一按事后还会被驱动补报
+// SINGLE_CLICK(松开 + 双击窗口 ~180ms),而 UP 单击在 TRANSCRIBING 态是"退出转写"。
+// 两者只要能同时成立,一次 400-500ms 的说话就会:进转写 → 紧随的补报单击把它撤掉。
+// 取等号即让二者互斥:短于阈值 → 必然收束回 READY(READY 态 UP 单击无语义,补报
+// 落地即无害);到达阈值 → 驱动只报 LONG_PRESS_UP,永不补报单击。
+// (驱动判长按实测略早于名义阈值:500ms 配置下 428ms 即报 LONG —— 偏早的方向正好
+//  落在安全侧,"没报 LONG"必然意味着按压确实短于 500ms。)
+#define PTT_MIN_TALK_MS 500
 
 // 唤醒防误锁窗口:息屏后长按 OK 唤醒时,PRESS 唤醒瞬间起 1s 内的 OK LONG
 // 不触发锁定 —— 否则"唤醒"会立刻变成"再锁"(PRESS 后 ~500ms 即到 LONG)。
@@ -143,23 +139,7 @@ static void send_key_action(app_state_t *s, app_key_action_t action,
     emit(out, n, max, a);
 }
 
-// PTT 开始(音量加长按 0.5s 判定):离线 toast+error 音;在线滴声+开流。
-// UP 键一次"轻点"(短按松手)登记:第二次落在链内即判双击 → 清空输入框。
-// 回弹防御沿用 ptt_end_ms 窗口(真实录音松手后的机械回弹不算轻点)。
-static void note_up_tap(app_state_t *s, uint64_t now_ms,
-                        app_action_t *out, uint8_t *n, uint8_t max) {
-    if (now_ms - s->ptt_end_ms < PTT_REBOUND_GUARD_MS) return;   // 录音松手回弹
-    if (s->up_tap_ms && now_ms - s->up_tap_ms < UP_TAP_DEDUP_MS) return;  // 同一次松手重复上报
-    if (s->up_tap_ms && s->up_press_ms > s->up_tap_ms &&
-        s->up_press_ms - s->up_tap_ms < UP_TAP_CHAIN_MS) {
-        s->up_tap_ms = 0;
-        s->clear_ms = now_ms;   // 驱动稍后若补报 DOUBLE,按此去重
-        send_key_action(s, APP_KEY_CLEAR, out, n, max);
-        return;
-    }
-    s->up_tap_ms = now_ms;
-}
-
+// PTT 开始(音量加按下即触发):离线 toast+error 音;在线滴声+开流。
 static void start_ptt(app_state_t *s, uint64_t now_ms,
                       app_action_t *out, uint8_t *n, uint8_t max) {
     if (!s->link_up) {
@@ -171,8 +151,9 @@ static void start_ptt(app_state_t *s, uint64_t now_ms,
         emit(out, n, max, r);
     } else {
         // 分帧时序:滴声 → voice.start → 开流由 TONE_DONE 驱动(播放完成才采,
-        // 避免 codec 分时冲突)。开流动作移到 TONE_DONE 分支,app_task 不再
-        // 同步阻塞 80ms 播滴声。
+        // 避免 codec 分时冲突 + 滴声不被录进音频)。app_task 不同步阻塞播滴声;
+        // sound_worker 优先级 5(高于 app_task/LVGL,2026-08-29 由 3 提升)保证
+        // 这 80ms 立刻播完 —— 否则它排在 LISTENING 全屏刷新后面,开流要等 ~578ms。
         app_action_t t = { .type = APP_ACT_PLAY_TONE };
         t.u.tone = APP_TONE_START;
         emit(out, n, max, t);
@@ -197,7 +178,6 @@ static void end_ptt(app_state_t *s, uint64_t now_ms,
     s->agent_state_name[0] = '\0';   // 新会话开始,清除旧 agent 状态
     app_action_t r = { .type = APP_ACT_UI_REFRESH };
     emit(out, n, max, r);
-    s->ptt_end_ms = now_ms;   // 供双击防御:松开后回弹窗口内的假双击忽略
 }
 
 static void go_ready(app_state_t *s, uint64_t now_ms, app_action_t *out, uint8_t *n, uint8_t max) {
@@ -226,24 +206,6 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
     if (ev->type == APP_EV_KEY_PRESS && b == APP_BTN_UP) {
         s->last_up_press_mv = ev->u.key.mv;
     }
-    if (ev->type == APP_EV_KEY_PRESS && b == APP_BTN_UP) {
-        s->up_press_ms = now_ms;
-    }
-    // 松手登记轻点:RELEASE(纯短按)与 LONG_UP(被驱动判成长按的轻点)都算,
-    // 同一次松手驱动会两条都报 → note_up_tap 内按 UP_TAP_DEDUP_MS 去重。
-    // 假按不记(射频噪声不该给真实长按凭空加 250ms 确认延迟)。
-    if (b == APP_BTN_UP && s->last_up_press_mv < PTT_FAKE_LONG_MV &&
-        (ev->type == APP_EV_KEY_RELEASE || ev->type == APP_EV_KEY_LONG_UP) &&
-        now_ms - s->up_press_ms < UP_TAP_MAX_MS) {
-        note_up_tap(s, now_ms, out, n, max);
-    }
-    // 松手/单击/双击/长按松开 → 挂起的 PTT 作废(说明这不是"按住说话")
-    if (b == APP_BTN_UP && (ev->type == APP_EV_KEY_RELEASE ||
-                            ev->type == APP_EV_KEY_LONG_UP ||
-                            ev->type == APP_EV_KEY_CLICK ||
-                            ev->type == APP_EV_KEY_DOUBLE)) {
-        s->ptt_pending_ms = 0;
-    }
     // 息屏 = 自动息屏的省电显示态(非锁定):按键先恢复显示,事件照常放行执行。
     // 锁定态见下方 locked 门禁:操作照常放行但不亮屏(与自动息屏的唤醒是两回事)。
     const bool screen_was_off = !s->screen_on;
@@ -266,7 +228,7 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             emit(out, n, max, r);
             return;
         }
-        // 其余事件放行:跳过下方唤醒与锁定入口,直接落到双击清空/状态机。
+        // 其余事件放行:跳过下方唤醒与锁定入口,直接落到长按清空/状态机。
         // 不亮屏不唤醒;锁定仅发生在 HOME/READY,盲操作开录进 LISTENING 后
         // 再长按 OK 仍是解锁(上方分支先行),录音不受影响。
     } else {
@@ -285,10 +247,11 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
                 app_action_t r = { .type = APP_ACT_UI_REFRESH };
                 emit(out, n, max, r);
             }
-            // 不 return:事件继续放行到下方正常逻辑(锁定入口 → 双击清空 → 状态机)。
+            // 不 return:事件继续放行到下方正常逻辑(锁定入口 → 长按清空 → 状态机)。
             // 自动息屏只省显示,不吞按键事件(过修修正:息屏后 UP/DOWN 应唤醒并照常
             // 执行)。放行安全性:
-            //  - PRESS 在状态机各态均无处理分支 → 无副作用;
+            //  - PRESS 仅 READY 态有分支(= 开录音,2026-08-29 按下即录):息屏下
+            //    按住 UP 会"唤醒 + 立刻开录",与锁定态盲操作说话语义一致;
             //  - 息屏只可能发生在 HOME/READY(idle_state 限定;APPROVAL 常亮、
             //    LISTENING 不超时)→ 放行事件只落到 HOME/READY 分支;
             //  - 唤醒后 1s 内 OK LONG 被 OK_LONG_GUARD 挡(防"唤醒即锁");
@@ -314,23 +277,21 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         }
     }
 
-    // UP(音量加)双击 = 清空输入框(全局语义,各态统一)。
-    // 双击无提示音:两按均 <0.5s,不触发长按判定,自然不响滴声。
-    // 防"注入后删除":长按松开瞬间机械回弹/ADC 阈值穿越会把"长按+回弹"误判
-    // 成双击 → clear 上行在识别注入完成后才被执行,删掉刚注入的文本(PTT
-    // 移师 UP 键后暴露;以前 PTT 在 OK 键,双击无语义)。真实双击清空发生在
-    // 注入后(用户看到文本才决定清空),故录音中(LISTENING,手指在按住、
-    // 不可能主动双击)与松开后 PTT_REBOUND_GUARD_MS 内的双击一律忽略。
-    if (ev->type == APP_EV_KEY_DOUBLE && b == APP_BTN_UP) {
-        if (s->state == APP_ST_LISTENING || now_ms - s->ptt_end_ms < PTT_REBOUND_GUARD_MS) {
+    // DOWN(音量减)长按 0.5s = 清空输入框(全局语义,各态统一,锁定/息屏下也生效)。
+    // 与同一颗键的"单击 = 回车"天然互斥:iot_button 一旦判成长按,这一按就只报
+    // LONG_PRESS_START/LONG_PRESS_UP,不再补报 SINGLE_CLICK —— 想清空的时候绝不会
+    // 先把内容发出去(这正是"清空放双击"做不到的一点,见文件头键位注释)。
+    // 幽灵长按拦截:回调时刻 mv 已回松开电平 = 无人按键(射频腐蚀残留),丢弃。
+    // 长按到点即清空并给一声提示音 —— 用户无法凭手感知道 500ms 到了没有,和
+    // 开录音的滴声同理(这是阈值确认音,不是状态音,不违反"转写期静音")。
+    if (ev->type == APP_EV_KEY_LONG && b == APP_BTN_DOWN) {
+        if (ev->u.key.mv >= PTT_FAKE_LONG_MV) {
             return;
         }
-        // 自建轻点链刚判过双击并已清空 → 驱动补报的这条丢弃(否则清两次)
-        if (s->clear_ms && now_ms - s->clear_ms < PTT_REBOUND_GUARD_MS) {
-            return;
-        }
-        s->up_tap_ms = 0;   // 驱动上报即收束本链
         send_key_action(s, APP_KEY_CLEAR, out, n, max);
+        app_action_t t = { .type = APP_ACT_PLAY_TONE };
+        t.u.tone = APP_TONE_REJECT;   // 220Hz/120ms,清空确认
+        emit(out, n, max, t);
         return;
     }
 
@@ -346,14 +307,21 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
     case APP_ST_READY:
         if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
             send_key_action(s, APP_KEY_ENTER, out, n, max);
-        } else if (ev->type == APP_EV_KEY_LONG && b == APP_BTN_UP) {
-            // 音量加长按 ≥0.4s = 说话(滴声只在长按判定时响,双击不会走到这里)。
-            // OK 键已退出 PTT:按住/松开不再开录音。
-            // 连接握手期假长按抑制:密集射频腐蚀 → 假 UP 长按,窗口内吞掉。
+        } else if (ev->type == APP_EV_KEY_PRESS && b == APP_BTN_UP) {
+            // 音量加"按下即录"(2026-08-29,取代原先等 0.5s 长按判定):真机实测
+            // 按下到真正 `采集开始` 要 ~1.01s —— 428ms 花在长按阈值上,另外 578ms
+            // 花在"滴声播完才开流"的门禁上(滴声只有 80ms,其余是 sound_worker
+            // prio 3 被 app_task/LVGL 全屏刷新挤在后面,已随本次改动提到 prio 5)。
+            // 用户张嘴即被吞掉第一秒,故这里不再等阈值:按下就开会话。
+            // 短按的收口在 LISTENING 的 PTT_MIN_TALK_MS(与驱动长按阈值取等,见
+            // 该常量注释):误碰 <500ms 松手 → 丢音频 + 收束回 READY。
+            // 驱动仍保留 500ms 长按阈值 —— UP 单击在 APPROVAL(拒绝)/TRANSCRIBING
+            // (退出)两态还有语义,READY 态本就没有单击语义,故互不干扰。
+            // 连接握手期假按抑制:密集射频腐蚀 → 假 UP 事件,窗口内吞掉。
             if (s->ble_connected && now_ms - s->ble_connect_ms < BLE_CONNECT_PTT_GUARD_MS) {
                 break;
             }
-            // 假长按抑制(2026-08-28 真机取证,替代固定 3s 窗口):PTT 松开
+            // 假按抑制(2026-08-28 真机取证,替代固定 3s 窗口):PTT 松开
             // 后 BLE 链路异常期 SAR ADC 被腐蚀 → 假 PRESS→LONG 序列,落在
             // READY 态即触发 PTT(第二声滴 + 假录音)。iot_button 判定按住
             // 是腐蚀中读低压,但 on_key 回调时刻腐蚀已过 → mv 读回松开电平
@@ -361,13 +329,7 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             // 实 LONG 全 <150 —— 100% 区分。不能用固定窗口:用户连续长按
             // 间隔实测 2-3s,3s 窗口把 43.17s/50.12s 真实长按吞掉("长按没
             // 反应"根因),故以回调 mv 判假,任何间隔的真实长按都不误伤。
-            if (ev->u.key.mv >= PTT_FAKE_LONG_MV) {
-                break;
-            }
-            // 疑似双击第二按:挂起,等 TICK 确认仍在按住才开录音(见 UP_TAP_CHAIN_MS)
-            if (s->up_tap_ms && s->up_press_ms > s->up_tap_ms &&
-                s->up_press_ms - s->up_tap_ms < UP_TAP_CHAIN_MS) {
-                s->ptt_pending_ms = now_ms;
+            if (ev->u.key.mv > PTT_UP_PRESS_MAX_MV) {
                 break;
             }
             start_ptt(s, now_ms, out, n, max);
@@ -375,13 +337,15 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         break;
 
     case APP_ST_LISTENING:
-        // 音量加长按录音的松开是 LONG_UP(长按态松开不再报 RELEASE),松开立即
-        // 结束并发送(无取消窗口)。双击的第二按落在 TRANSCRIBING(录音已发送),
-        // 其 DOUBLE 事件由上方全局分支处理为"清空"。
-        if (ev->type == APP_EV_KEY_LONG_UP && b == APP_BTN_UP) {
-            // 误触收口:不足 PTT_MIN_TALK_MS 就松手 = 阈值边缘的轻点(常见于
-            // 双击的第一下),里面不可能有语音。丢掉音频、把会话收束回 READY,
-            // 不进转写、不刷 ptt_end_ms —— 紧随其后的第二下轻点照常判双击清空。
+        // 松开立即结束并发送(无取消窗口)。按下即录之后两种松开事件都要收:
+        // 超过驱动 500ms 阈值的一按报 LONG_PRESS_UP(随后还有一条 RELEASE),
+        // 短按只报 RELEASE。谁先到谁结束,后到的那条已落在别的状态里被忽略。
+        // 录音期间清空不可达:三档分压键同时按下 UP+DOWN 只会读出更低的那一档,
+        // DOWN 长按压根形成不了。
+        if ((ev->type == APP_EV_KEY_LONG_UP || ev->type == APP_EV_KEY_RELEASE) &&
+            b == APP_BTN_UP) {
+            // 误触收口:不足 PTT_MIN_TALK_MS 就松手 = 误碰或轻点,里面不可能有
+            // 语音。丢掉音频、把会话收束回 READY,不进转写。
             if (now_ms - s->state_since_ms < PTT_MIN_TALK_MS) {
                 app_action_t c = { .type = APP_ACT_STREAM_CANCEL };
                 emit(out, n, max, c);   // 幂等:滴声未播完时甚至还没开流
@@ -428,12 +392,12 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
     case APP_ST_TRANSCRIBING:
         // 音量+单击:退出转写场景(2026-08-28 用户需求)——不等识别结果,直接
         // 回 READY。迟到的识别文本由 APP_EV_TRANSCRIPT 的 READY/HOME 门禁丢弃。
-        // 真实单击的 PRESS 回调 mv=3-5(手指在键上);假按风暴的 PRESS mv=2890
-        // (腐蚀,无人按键)→ 用 PRESS 读数区分真假单击(CLICK 回调时刻用户已
-        // 松手,mv 恒 2890,不可用)。长按(开始新录音)保持忽略:转写中须先
-        // 退出或等结果,防误触新会话。
+        // 真实单击的 PRESS 回调 mv=3-5(手指在键上);假按的 PRESS 读数落在别的
+        // 分压档(2890 松开电平 / 598 跨档)→ 用 PRESS 读数区分真假单击(CLICK
+        // 回调时刻用户已松手,mv 恒 2890,不可用)。按下即录不影响这里:转写态
+        // 没有 PRESS 分支,新会话只能从 READY 起。
         if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_UP &&
-            s->last_up_press_mv < PTT_FAKE_LONG_MV) {
+            s->last_up_press_mv <= PTT_UP_PRESS_MAX_MV) {
             abort_to_ready(s, now_ms, NULL, out, n, max);
         }
         break;
@@ -445,15 +409,6 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
 }
 
 static void handle_tick(app_state_t *s, uint64_t now_ms, app_action_t *out, uint8_t *n, uint8_t max) {
-    // 挂起的 PTT 确认:仍在 READY 且手指没松(松手会清零)→ 真的是按住说话
-    if (s->ptt_pending_ms) {
-        if (s->state != APP_ST_READY) {
-            s->ptt_pending_ms = 0;
-        } else if (now_ms - s->ptt_pending_ms >= PTT_CONFIRM_MS) {
-            s->ptt_pending_ms = 0;
-            start_ptt(s, now_ms, out, n, max);
-        }
-    }
     // toast 过期
     if (s->toast[0] && now_ms >= s->toast_until_ms) {
         s->toast[0] = '\0';
@@ -699,7 +654,7 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         break;
 
     case APP_EV_TONE_DONE:
-        // START 提示音播放完成:开流(幂等)。非 LISTENING(双击取消/单击发送已离开)
+        // START 提示音播放完成:开流(幂等)。非 LISTENING(误触收口/断链已离开)
         // 或流已开 → 忽略,保证"滴声先于采集"且取消期间不误开流。
         if (s->state == APP_ST_LISTENING && !s->stream_started) {
             app_action_t st = { .type = APP_ACT_STREAM_START };

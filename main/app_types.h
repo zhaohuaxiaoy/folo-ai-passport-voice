@@ -28,8 +28,9 @@ typedef enum {
 } app_stage_t;
 
 // ---------------- 按键 ----------------
-// 物理键语义:UP(音量加)= 长按 0.5s 说话 / 双击清空输入框;DOWN = 回车;
-// OK = PTT 说话(按住说、松开发)。
+// 物理键语义(2026-08-29):UP(音量加)= 按下即录、松开发送(按住说话);
+// DOWN(音量减)= 单击回车 / 长按 0.5s 清空输入框;OK = 单击导航·批准 /
+// 长按 0.5s 锁屏解锁。同一颗键上只放"单击 + 长按",不放双击(见 app_state.c)。
 typedef enum {
     APP_BTN_UP = 0,
     APP_BTN_DOWN,
@@ -213,7 +214,13 @@ typedef struct {
 #define APP_TRANSCRIBE_TIMEOUT  30000u   // 转写等待超时
 #define APP_AGENT_RUN_TIMEOUT   90000u   // Agent 执行超时
 #define APP_TICK_MS             100u     // 应用任务心跳
-#define APP_TONE_PENDING_TIMEOUT_MS 500u // S3:START 音后未收 TONE_DONE 的最大等待(兜底开流)
+// S3:START 音后未收 TONE_DONE 的最大等待(兜底开流)。500 → 200(2026-08-29):
+// 滴声本身只有 80ms,500ms 的余量是给"声音任务被挤住"留的,可它同时也是 PTT 最
+// 坏延迟 —— 真机抓到过一次按下到开录 622ms(= 本值 + APP_TICK_MS 粒度),用户已
+// 在说话而设备还没开录。降到 200 仍有 2.5 倍余量;代价是滴声真被拖慢时会与采集
+// 重叠(前几帧录进 440Hz),只发生在退化路径,可接受。兜底触发在串口留痕
+// (main.c 心跳里辨认 STREAM_START),下次再慢可直接看日志而不是猜。
+#define APP_TONE_PENDING_TIMEOUT_MS 200u
 
 #ifdef __cplusplus
 }

@@ -20,14 +20,11 @@ typedef struct {
     uint64_t       last_key_ms;     // 最近按键时刻(息屏计时)
     uint64_t       state_since_ms;  // 进入当前状态的时刻(超时计时)
     uint64_t       wake_ms;         // 最近一次息屏唤醒时刻(OK_LONG_GUARD:防"唤醒即锁")
-    uint64_t       ptt_end_ms;      // PTT 松开时刻(过滤松开回弹误判的双击)
-    uint64_t       up_tap_ms;       // UP 键最近一次"短按松开"时刻(真实按压才记):
-                                    // 双击的第二按落在此后 UP_TAP_CHAIN_MS 内
-    uint64_t       ptt_pending_ms;  // UP LONG 待确认时刻(0=无):疑似双击第二按时
-                                    // 不立刻开录音,再按住 PTT_CONFIRM_MS 才开
-    uint64_t       up_press_ms;     // UP 键最近一次按下时刻(算按住时长,判"轻点")
-    uint64_t       clear_ms;        // 最近一次自建双击判定发出 CLEAR 的时刻
-                                    // (去重 iot_button 随后补报的 DOUBLE)
+    // 清空已从"UP 双击"改为"DOWN 长按"(2026-08-29),随之删掉的字段:
+    // ptt_end_ms / up_tap_ms / ptt_pending_ms / up_press_ms / clear_ms ——
+    // 它们全部只服务于"同一颗键上长按与双击互相干扰"的补偿逻辑(自建轻点链、
+    // 挂起确认、回弹假双击防御、驱动补报去重)。UP 上不再有双击语义,DOWN 上
+    // 单击与长按靠驱动阈值天然互斥,补偿逻辑整块作废,详见 app_state.c 键位注释。
     uint16_t       last_up_press_mv; // UP 键最近 PRESS 回调读数:真实按压 3-5mV
                                      // (手指在键上),假按(射频腐蚀)2890mV(无人
                                      // 按键)。CLICK 回调时刻用户已松手(mv 恒
